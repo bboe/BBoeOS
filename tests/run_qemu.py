@@ -49,84 +49,6 @@ class QemuResult:
     output: str
 
 
-def run_commands(
-    commands: list[str],
-    *,
-    boot_timeout: float = BOOT_TIMEOUT,
-    command_timeout: float = COMMAND_TIMEOUT,
-    drive: Path = DEFAULT_IMAGE,
-    extra_qemu_args: list[str] | None = None,
-    floppy: bool = False,
-    machine: str | None = None,
-    memory: str | None = None,
-    pcap: Path | None = None,
-    retry: bool = True,
-    snapshot: bool = False,
-    with_net: bool = False,
-) -> QemuResult:
-    """Boot QEMU, run each command, return a :class:`QemuResult`.
-
-    QEMU is always killed when this returns (normal or error path). The shell
-    prompt ('$ ') is used as the synchronisation marker: the function returns
-    after it has seen the prompt once per command.
-
-    *floppy* attaches the drive image as the primary floppy (``if=floppy``)
-    instead of the default IDE/HDD attachment — boots route through
-    INT 13h's floppy path in the BIOS and through ``fdc_*`` post-flip,
-    which is the harder path to keep working as the kernel evolves.
-
-    *memory* (e.g. ``"16M"``) appends ``-m <memory>`` to QEMU.  Defaults
-    to ``"1"`` (1 MB) — the OS's minimum-RAM target — so most tests run
-    against the same low-RAM configuration the kernel is sized for.
-    Tests that need more (e.g. test_kernel_cc 's cc-on-host stages, or
-    workloads that load large blobs into extended RAM) pass an explicit
-    value.  An unset memory falls back to ``BBOE_QEMU_MEMORY`` if set,
-    else ``"1"``.
-
-    *machine* (e.g. ``"acpi=off"``) appends ``-machine <machine>``;
-    falls back to ``BBOE_QEMU_MACHINE`` when unset, else no flag.  The
-    env-var fallbacks let the self-review driver sweep configurations
-    without per-script CLI plumbing.
-
-    When *retry* is True (the default) and a TimeoutError occurs, the entire
-    QEMU session is retried once with 50% more time for both boot and command
-    timeouts.  A second timeout raises immediately.
-    """
-    try:
-        return _run_commands_once(
-            commands,
-            boot_timeout=boot_timeout,
-            command_timeout=command_timeout,
-            drive=drive,
-            extra_qemu_args=extra_qemu_args,
-            floppy=floppy,
-            machine=machine,
-            memory=memory,
-            pcap=pcap,
-            snapshot=snapshot,
-            with_net=with_net,
-        )
-    except TimeoutError:
-        if not retry:
-            raise
-        return _run_commands_once(
-            commands,
-            boot_timeout=boot_timeout * 1.5,
-            command_timeout=command_timeout * 1.5,
-            drive=drive,
-            extra_qemu_args=extra_qemu_args,
-            floppy=floppy,
-            machine=machine,
-            memory=memory,
-            pcap=pcap,
-            snapshot=snapshot,
-            with_net=with_net,
-        )
-
-
-_PROMPT_SETTLE_SECONDS = 0.05
-
-
 class QemuSession:
     """A live QEMU process driven by run_qemu.
 
@@ -344,6 +266,156 @@ def _build_qemu_args(
     return qemu_args
 
 
+def _drain_until_idle(*, buffer: bytearray, file_descriptor: int, settle_seconds: float) -> None:
+    """Append any pending bytes to `buffer` until `settle_seconds` of silence."""
+    deadline = time.monotonic() + settle_seconds
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([file_descriptor], [], [], settle_seconds)
+        if not ready:
+            return
+        try:
+            chunk = os.read(file_descriptor, 4096)
+        except BlockingIOError:
+            return
+        if not chunk:
+            return
+        buffer.extend(chunk)
+        deadline = time.monotonic() + settle_seconds
+
+
+def _run_commands_once(
+    commands: list[str],
+    *,
+    boot_timeout: float,
+    command_timeout: float,
+    drive: Path,
+    extra_qemu_args: list[str] | None,
+    floppy: bool,
+    machine: str | None,
+    memory: str | None,
+    pcap: Path | None,
+    snapshot: bool,
+    with_net: bool,
+) -> QemuResult:
+    """Single-attempt implementation of run_commands."""
+    with qemu_session(
+        boot_timeout=boot_timeout,
+        drive=drive,
+        extra_qemu_args=extra_qemu_args,
+        floppy=floppy,
+        machine=machine,
+        memory=memory,
+        pcap=pcap,
+        snapshot=snapshot,
+        with_net=with_net,
+    ) as session:
+        for command in commands:
+            session.send_command(command, timeout=command_timeout)
+        return QemuResult(
+            boot_time=session.boot_time,
+            command_times=list(session.command_times),
+            output=session.output,
+        )
+
+
+def _terminate(*, process: subprocess.Popen) -> None:
+    """Kill the QEMU process and wait for it to exit."""
+    if process.poll() is not None:
+        return
+    process.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=5)
+
+
+def _wait_path(*, path: Path, timeout: float) -> None:
+    """Block until *path* exists, or raise :class:`RuntimeError` on timeout."""
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() > deadline:
+            message = f"{path} never appeared within {timeout}s"
+            raise RuntimeError(message)
+        time.sleep(0.05)
+
+
+def main() -> int:
+    """CLI entry point: run each positional argument as a shell command."""
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("commands", nargs="+", help="shell command to run")
+    parser.add_argument(
+        "--boot-timeout",
+        type=float,
+        default=BOOT_TIMEOUT,
+        help=f"seconds to wait for initial boot prompt (default: {BOOT_TIMEOUT})",
+    )
+    parser.add_argument(
+        "--drive",
+        type=Path,
+        default=DEFAULT_IMAGE,
+        help=f"path to drive image (default: {DEFAULT_IMAGE})",
+    )
+    parser.add_argument(
+        "--floppy",
+        action="store_true",
+        help="attach drive as primary floppy (if=floppy) instead of IDE",
+    )
+    parser.add_argument(
+        "--machine",
+        type=str,
+        default=None,
+        help="value for -machine (e.g. 'acpi=off'); falls back to $BBOE_QEMU_MACHINE",
+    )
+    parser.add_argument(
+        "--memory",
+        type=str,
+        default=None,
+        help="value for -m (e.g. '32M'); falls back to $BBOE_QEMU_MEMORY, then '1' (1 MB)",
+    )
+    parser.add_argument(
+        "--net",
+        action="store_true",
+        help="attach NE2000 NIC (user-mode networking)",
+    )
+    parser.add_argument(
+        "--pcap",
+        type=Path,
+        default=None,
+        help="capture NIC traffic to this pcap file (requires --net)",
+    )
+    parser.add_argument(
+        "--snapshot",
+        action="store_true",
+        help="discard drive writes on exit (no persistence across runs)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=COMMAND_TIMEOUT,
+        help=f"per-command timeout in seconds (default: {COMMAND_TIMEOUT})",
+    )
+    arguments = parser.parse_args()
+    result = run_commands(
+        arguments.commands,
+        boot_timeout=arguments.boot_timeout,
+        command_timeout=arguments.timeout,
+        drive=arguments.drive,
+        floppy=arguments.floppy,
+        machine=arguments.machine,
+        memory=arguments.memory,
+        pcap=arguments.pcap,
+        snapshot=arguments.snapshot,
+        with_net=arguments.net,
+    )
+    sys.stdout.write(result.output)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
 @contextlib.contextmanager
 def qemu_session(
     *,
@@ -427,151 +499,79 @@ def qemu_session(
             yield session
 
 
-def _wait_path(*, path: Path, timeout: float) -> None:
-    """Block until *path* exists, or raise :class:`RuntimeError` on timeout."""
-    deadline = time.monotonic() + timeout
-    while not path.exists():
-        if time.monotonic() > deadline:
-            message = f"{path} never appeared within {timeout}s"
-            raise RuntimeError(message)
-        time.sleep(0.05)
-
-
-def _drain_until_idle(*, buffer: bytearray, file_descriptor: int, settle_seconds: float) -> None:
-    """Append any pending bytes to `buffer` until `settle_seconds` of silence."""
-    deadline = time.monotonic() + settle_seconds
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([file_descriptor], [], [], settle_seconds)
-        if not ready:
-            return
-        try:
-            chunk = os.read(file_descriptor, 4096)
-        except BlockingIOError:
-            return
-        if not chunk:
-            return
-        buffer.extend(chunk)
-        deadline = time.monotonic() + settle_seconds
-
-
-def _run_commands_once(
+def run_commands(
     commands: list[str],
     *,
-    boot_timeout: float,
-    command_timeout: float,
-    drive: Path,
-    extra_qemu_args: list[str] | None,
-    floppy: bool,
-    machine: str | None,
-    memory: str | None,
-    pcap: Path | None,
-    snapshot: bool,
-    with_net: bool,
+    boot_timeout: float = BOOT_TIMEOUT,
+    command_timeout: float = COMMAND_TIMEOUT,
+    drive: Path = DEFAULT_IMAGE,
+    extra_qemu_args: list[str] | None = None,
+    floppy: bool = False,
+    machine: str | None = None,
+    memory: str | None = None,
+    pcap: Path | None = None,
+    retry: bool = True,
+    snapshot: bool = False,
+    with_net: bool = False,
 ) -> QemuResult:
-    """Single-attempt implementation of run_commands."""
-    with qemu_session(
-        boot_timeout=boot_timeout,
-        drive=drive,
-        extra_qemu_args=extra_qemu_args,
-        floppy=floppy,
-        machine=machine,
-        memory=memory,
-        pcap=pcap,
-        snapshot=snapshot,
-        with_net=with_net,
-    ) as session:
-        for command in commands:
-            session.send_command(command, timeout=command_timeout)
-        return QemuResult(
-            boot_time=session.boot_time,
-            command_times=list(session.command_times),
-            output=session.output,
+    """Boot QEMU, run each command, return a :class:`QemuResult`.
+
+    QEMU is always killed when this returns (normal or error path). The shell
+    prompt ('$ ') is used as the synchronisation marker: the function returns
+    after it has seen the prompt once per command.
+
+    *floppy* attaches the drive image as the primary floppy (``if=floppy``)
+    instead of the default IDE/HDD attachment — boots route through
+    INT 13h's floppy path in the BIOS and through ``fdc_*`` post-flip,
+    which is the harder path to keep working as the kernel evolves.
+
+    *memory* (e.g. ``"16M"``) appends ``-m <memory>`` to QEMU.  Defaults
+    to ``"1"`` (1 MB) — the OS's minimum-RAM target — so most tests run
+    against the same low-RAM configuration the kernel is sized for.
+    Tests that need more (e.g. test_kernel_cc 's cc-on-host stages, or
+    workloads that load large blobs into extended RAM) pass an explicit
+    value.  An unset memory falls back to ``BBOE_QEMU_MEMORY`` if set,
+    else ``"1"``.
+
+    *machine* (e.g. ``"acpi=off"``) appends ``-machine <machine>``;
+    falls back to ``BBOE_QEMU_MACHINE`` when unset, else no flag.  The
+    env-var fallbacks let the self-review driver sweep configurations
+    without per-script CLI plumbing.
+
+    When *retry* is True (the default) and a TimeoutError occurs, the entire
+    QEMU session is retried once with 50% more time for both boot and command
+    timeouts.  A second timeout raises immediately.
+    """
+    try:
+        return _run_commands_once(
+            commands,
+            boot_timeout=boot_timeout,
+            command_timeout=command_timeout,
+            drive=drive,
+            extra_qemu_args=extra_qemu_args,
+            floppy=floppy,
+            machine=machine,
+            memory=memory,
+            pcap=pcap,
+            snapshot=snapshot,
+            with_net=with_net,
+        )
+    except TimeoutError:
+        if not retry:
+            raise
+        return _run_commands_once(
+            commands,
+            boot_timeout=boot_timeout * 1.5,
+            command_timeout=command_timeout * 1.5,
+            drive=drive,
+            extra_qemu_args=extra_qemu_args,
+            floppy=floppy,
+            machine=machine,
+            memory=memory,
+            pcap=pcap,
+            snapshot=snapshot,
+            with_net=with_net,
         )
 
 
-def _terminate(*, process: subprocess.Popen) -> None:
-    """Kill the QEMU process and wait for it to exit."""
-    if process.poll() is not None:
-        return
-    process.kill()
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=5)
-
-
-def main() -> int:
-    """CLI entry point: run each positional argument as a shell command."""
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("commands", nargs="+", help="shell command to run")
-    parser.add_argument(
-        "--boot-timeout",
-        type=float,
-        default=BOOT_TIMEOUT,
-        help=f"seconds to wait for initial boot prompt (default: {BOOT_TIMEOUT})",
-    )
-    parser.add_argument(
-        "--drive",
-        type=Path,
-        default=DEFAULT_IMAGE,
-        help=f"path to drive image (default: {DEFAULT_IMAGE})",
-    )
-    parser.add_argument(
-        "--floppy",
-        action="store_true",
-        help="attach drive as primary floppy (if=floppy) instead of IDE",
-    )
-    parser.add_argument(
-        "--machine",
-        type=str,
-        default=None,
-        help="value for -machine (e.g. 'acpi=off'); falls back to $BBOE_QEMU_MACHINE",
-    )
-    parser.add_argument(
-        "--memory",
-        type=str,
-        default=None,
-        help="value for -m (e.g. '32M'); falls back to $BBOE_QEMU_MEMORY, then '1' (1 MB)",
-    )
-    parser.add_argument(
-        "--net",
-        action="store_true",
-        help="attach NE2000 NIC (user-mode networking)",
-    )
-    parser.add_argument(
-        "--pcap",
-        type=Path,
-        default=None,
-        help="capture NIC traffic to this pcap file (requires --net)",
-    )
-    parser.add_argument(
-        "--snapshot",
-        action="store_true",
-        help="discard drive writes on exit (no persistence across runs)",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=COMMAND_TIMEOUT,
-        help=f"per-command timeout in seconds (default: {COMMAND_TIMEOUT})",
-    )
-    arguments = parser.parse_args()
-    result = run_commands(
-        arguments.commands,
-        boot_timeout=arguments.boot_timeout,
-        command_timeout=arguments.timeout,
-        drive=arguments.drive,
-        floppy=arguments.floppy,
-        machine=arguments.machine,
-        memory=arguments.memory,
-        pcap=arguments.pcap,
-        snapshot=arguments.snapshot,
-        with_net=arguments.net,
-    )
-    sys.stdout.write(result.output)
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+_PROMPT_SETTLE_SECONDS = 0.05

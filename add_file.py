@@ -62,28 +62,6 @@ def _ext2_partition(*, ext2_start_sector: int, image_path: str) -> Generator[str
         tmp.unlink()
 
 
-def add_file(
-    *,
-    allow_empty: bool = False,
-    executable: bool,
-    file_path: str,
-    image_path: str,
-    subdirectory: str | None,
-) -> None:
-    """Add a single file to the BBoeOS drive image.
-
-    Thin wrapper around ``add_files()``; preserved for callers that
-    only have one file.  See ``add_files`` for full semantics.
-    """
-    add_files(
-        allow_empty=allow_empty,
-        executable=executable,
-        file_paths=[file_path],
-        image_path=image_path,
-        subdirectory=subdirectory,
-    )
-
-
 def add_empty_files(
     *,
     image_path: str,
@@ -112,6 +90,28 @@ def add_empty_files(
             image_path=image_path,
             subdirectory=subdirectory,
         )
+
+
+def add_file(
+    *,
+    allow_empty: bool = False,
+    executable: bool,
+    file_path: str,
+    image_path: str,
+    subdirectory: str | None,
+) -> None:
+    """Add a single file to the BBoeOS drive image.
+
+    Thin wrapper around ``add_files()``; preserved for callers that
+    only have one file.  See ``add_files`` for full semantics.
+    """
+    add_files(
+        allow_empty=allow_empty,
+        executable=executable,
+        file_paths=[file_path],
+        image_path=image_path,
+        subdirectory=subdirectory,
+    )
 
 
 def add_files(

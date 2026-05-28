@@ -540,6 +540,437 @@ class EmissionMixin:
             self.ax_clear()
             self.generate_body(default_case.body, scoped=True)
 
+    def _generate_conditional(self, expression: Conditional, /) -> None:
+        """Lower a ternary ``c ? t : e`` to a conditional branch.
+
+        Evaluates the condition; jumps over the then-branch when false;
+        evaluates the chosen branch (only one fires) and leaves the
+        result in AX/EAX.  The condition is normalised the same way
+        ``parse_condition`` normalises ``if`` / ``while`` heads — bare
+        expressions become ``expr != 0`` so the shared
+        :meth:`emit_condition_false_jump` machinery handles short-
+        circuit ``&&`` / ``||`` and carry-flag callees uniformly.
+
+        Both branches reach the same end label, so AX-tracking
+        (``ax_local`` / ``ax_is_byte``) is cleared after the merge:
+        whichever branch the actual control flow took, the merge
+        point can't promise that AX still holds the then-branch's
+        value tag.
+
+        Fast path for ``MAX(a, b)`` / ``MIN(a, b)`` macro expansion:
+        when the then-branch is structurally identical to the
+        comparison's left operand (and pure — no calls), ``AX`` will
+        already hold the desired value after :meth:`emit_condition`,
+        so the then-branch's re-evaluation is elided and we jump
+        directly to the end label on cond-true.  This collapses
+        ``MIN(total_length - logical_offset, 512)`` to the same
+        compact ``cmp / Jcc / mov ax, 512`` that the hand-written
+        ``if`` saturation would emit, without a redundant
+        ``sub`` second time around.
+        """
+        condition = self._normalise_ternary_condition(expression.condition)
+        if self._try_emit_conditional_via_cond_value(condition=condition, expression=expression):
+            return
+        label_index = self.new_label()
+        else_label = f".cond_else_{label_index}"
+        end_label = f".cond_end_{label_index}"
+        self.emit_condition_false_jump(condition=condition, context="ast", fail_label=else_label)
+        self.generate_expression(expression.then_expr)
+        self.emit(f"        jmp {end_label}")
+        self.emit(f"{else_label}:")
+        # Else-branch enters from the conditional jump; AX state
+        # accumulated by the then-branch is invalid here.
+        self.ax_clear()
+        self.generate_expression(expression.else_expr)
+        self.emit(f"{end_label}:")
+        # At the merge, AX holds the result of whichever branch ran;
+        # neither branch's variable-tracking is guaranteed.
+        self.ax_clear()
+
+    def _generate_logical_value(self, expression: Node, /) -> None:
+        """Materialize a ``LogicalAnd`` / ``LogicalOr`` into the accumulator as 0 or 1.
+
+        cc.py used to handle short-circuit operators only in condition
+        position (inside ``if`` / ``while`` / ``? :`` heads), so any
+        expression-position use like ``int same = a && b;`` raised
+        ``unknown expression: LogicalAnd``.  This helper reuses the
+        existing :meth:`emit_condition_false_jump` /
+        :meth:`emit_condition_true_jump` short-circuit machinery to
+        leave the accumulator holding the C boolean value: 1 when the
+        operand evaluates true, 0 otherwise.
+
+        For ``&&`` we false-jump every leaf to a shared zero-label
+        (matching how condition-position lowering already works), then
+        fall through to set the accumulator to 1.  For ``||`` we
+        true-jump every leaf to a shared one-label, falling through to
+        set the accumulator to 0.
+        """
+        label_index = self.new_label()
+        end_label = f".lbool_{label_index}_end"
+        if isinstance(expression, LogicalAnd):
+            zero_label = f".lbool_{label_index}_zero"
+            self.emit_condition_false_jump(condition=expression, context="expr", fail_label=zero_label)
+            self.emit(f"        mov {self.target.acc}, 1")
+            self.emit(f"        jmp {end_label}")
+            self.emit(f"{zero_label}:")
+            self.emit(f"        xor {self.target.acc}, {self.target.acc}")
+        else:
+            one_label = f".lbool_{label_index}_one"
+            self.emit_condition_true_jump(condition=expression, context="expr", success_label=one_label)
+            self.emit(f"        xor {self.target.acc}, {self.target.acc}")
+            self.emit(f"        jmp {end_label}")
+            self.emit(f"{one_label}:")
+            self.emit(f"        mov {self.target.acc}, 1")
+        self.emit(f"{end_label}:")
+        self.ax_clear()
+
+    def _generate_tail_dispatch_if(self, statement: If, /) -> None:
+        """Emit an ``if/else`` where each branch's last call is a tail jmp.
+
+        Used for ``naked`` dispatchers: both branches end the function
+        via ``jmp <target>``, so the only labels needed are the else
+        entry point.  No common end label, no fall-through ``jmp``
+        skip-around, no ``ret`` after the structure.
+        """
+        label_index = self.new_label()
+        self.emit_condition_false_jump(condition=statement.cond, context="if", fail_label=f".if_{label_index}_else")
+        self.generate_body(statement.body[:-1], scoped=True)
+        self.generate_call(statement.body[-1], tail_call=True)
+        self.emit(f".if_{label_index}_else:")
+        self.generate_body(statement.else_body[:-1], scoped=True)
+        self.generate_call(statement.else_body[-1], tail_call=True)
+
+    def _has_tail_dispatch_shape(self, body: list[Node], /) -> bool:
+        """``body[-1]`` is an ``If/else`` whose branches both tail-call.
+
+        Each branch's last statement must be a tail-call-eligible
+        ``Call``; the whole ``if`` then becomes a register-preserving
+        dispatcher (``cmp ... ; jcc .else ; ... ; jmp fn1 ; .else: ... ; jmp fn2``).
+        Used for ``naked`` dispatchers like ``read_sector`` that pick
+        between two drivers based on a flag byte.
+        """
+        if not body or not isinstance(body[-1], If):
+            return False
+        if_stmt = body[-1]
+        if if_stmt.else_body is None:
+            return False
+        return (
+            bool(if_stmt.body)
+            and isinstance(if_stmt.body[-1], Call)
+            and self._is_tail_call_eligible(if_stmt.body[-1])
+            and bool(if_stmt.else_body)
+            and isinstance(if_stmt.else_body[-1], Call)
+            and self._is_tail_call_eligible(if_stmt.else_body[-1])
+        )
+
+    def _ir_value_to_ast(self, value: ir.Value) -> Node:
+        """Convert an :data:`ir.Value` to the equivalent simple AST leaf node."""
+        if isinstance(value, int):
+            return Int(value=value)
+        if isinstance(value, AddressOf):
+            return value
+        if value.startswith("_ir_s"):
+            content = self._ir_string_map.get(value)
+            if content is not None:
+                return String(content=content)
+        return Var(name=value)
+
+    def _is_pure_expression(self, node: Node, /) -> bool:
+        """Return True if evaluating *node* has no observable side effect.
+
+        Conservative: only literals, variable / named-constant reads,
+        struct-member reads, array indexing, address-of, sizeof, and
+        arithmetic / comparison / logical / bitwise binary operations
+        over pure operands qualify.  Anything that could ``call`` user
+        code (``Call``, ``TailCall``) or that mutates state is
+        rejected.  Used by :meth:`_try_emit_conditional_via_cond_value`
+        to decide whether eliding the then-branch (which by the textual
+        macro semantics would otherwise be re-evaluated) is safe.
+        """
+        if isinstance(node, (Int, SizeofExpr, SizeofType, SizeofVar, String, Var, AddressOf, MemberAddressOf)):
+            return True
+        if isinstance(node, BinaryOperation):
+            return self._is_pure_expression(node.left) and self._is_pure_expression(node.right)
+        if isinstance(node, (LogicalAnd, LogicalOr)):
+            return self._is_pure_expression(node.left) and self._is_pure_expression(node.right)
+        if isinstance(node, Index):
+            # ``arr[i]`` reads from memory but doesn't write; the index
+            # itself must also be pure.
+            return self._is_pure_expression(node.index)
+        if isinstance(node, (MemberAccess, MemberIndex, IndexMemberAccess, IndexMemberIndex)):
+            return True
+        if isinstance(node, Conditional):
+            return (
+                self._is_pure_expression(node.condition)
+                and self._is_pure_expression(node.then_expr)
+                and self._is_pure_expression(node.else_expr)
+            )
+        return False
+
+    def _is_tail_call_eligible(self, call: Call, /) -> bool:
+        """Check whether a tail-call replacement (``jmp`` for ``call; ret``) is safe.
+
+        Safe when:
+        - ``elide_frame`` is True (no ``pop bp; ret`` teardown to emit).
+        - callee is a user function (not a builtin with its own shape).
+        - callee isn't an inline-asm splice target (we'd need the body
+          inlined, not a jmp).
+        - no pinned registers need saving at this call site — we'd
+          never get a chance to restore them after the jmp.
+        - no stack args — we can't ``add sp, N`` after a jmp either.
+        """
+        if not self.elide_frame:
+            return False
+        if call.name not in self.user_functions:
+            return False
+        if call.name in self.inline_bodies:
+            return False
+        clobbers: frozenset[str] = frozenset(self.target.register_pool)
+        if self._pinned_registers_to_save(clobbers):
+            return False
+        callee_pins = self.user_function_pin_params.get(call.name, {}) if call.name in self.register_convention_functions else {}
+        is_fastcall = call.name in self.fastcall_functions
+        in_regs = self.in_register_params.get(call.name, {})
+        out_regs = self.out_register_params.get(call.name, {})
+        for index in range(len(call.args)):
+            if is_fastcall and index == 0:
+                continue
+            if index in callee_pins:
+                continue
+            if index in in_regs or index in out_regs:
+                continue
+            return False  # stack arg — can't clean up after a jmp
+        return True
+
+    def _lower_ir_instruction(self, instruction: ir.Instruction) -> None:
+        match instruction:
+            case ir.BinaryOperation(destination=destination, operation=operation, left=left, right=right):
+                expression = BinaryOperation(left=self._ir_value_to_ast(left), operation=operation, right=self._ir_value_to_ast(right))
+                self.emit_store_local(expression=expression, name=destination)
+            case ir.Copy(destination=destination, source=source):
+                self.emit_store_local(expression=self._ir_value_to_ast(source), name=destination)
+            case ir.Call(destination=None, name=name, args=args):
+                call = Call(args=[self._ir_value_to_ast(a) for a in args], name=name)
+                self._current_call_pinned_initialized = self._ir_call_pinned_initialized.get(id(instruction))
+                try:
+                    self.generate_call(call, discard_return=True)
+                finally:
+                    self._current_call_pinned_initialized = None
+                self.ax_clear()
+            case ir.Call(destination=destination, name=name, args=args):
+                call = Call(args=[self._ir_value_to_ast(a) for a in args], name=name)
+                self._current_call_pinned_initialized = self._ir_call_pinned_initialized.get(id(instruction))
+                try:
+                    self.emit_store_local(expression=call, name=destination)
+                finally:
+                    self._current_call_pinned_initialized = None
+            case ir.Index(destination=destination, base=base, index=index):
+                expression = Index(array=Var(name=base), index=self._ir_value_to_ast(index))
+                self.emit_store_local(expression=expression, name=destination)
+            case ir.IndexAssign(base=base, index=index, source=source):
+                stmt = IndexAssign(array=Var(name=base), expr=self._ir_value_to_ast(source), index=self._ir_value_to_ast(index))
+                self.generate_index_assign(stmt)
+            case ir.Label(name=name):
+                # Control can arrive at an IR label from any preceding
+                # branch / jump, so AX-tracking state (``ax_local`` /
+                # ``ax_is_byte``) and SI-tracking (``si_local``)
+                # accumulated on the fall-through path are not guaranteed
+                # on the jump path.  Clear both.
+                self.ax_clear()
+                self.si_local = None
+                self.emit(f"{name}:")
+            case ir.Jump(target=target):
+                self.emit(f"        jmp {target}")
+            case ir.BranchFalse(left=left, operation=operation, right=right, target=target):
+                condition = BinaryOperation(left=self._ir_value_to_ast(left), operation=operation, right=self._ir_value_to_ast(right))
+                self.emit_condition_false_jump(condition=condition, context="ir", fail_label=target)
+            case ir.CarryBranch(call_ast=call_ast, target=target, when=when):
+                # Tight ``call X / jc target`` (when="set") or ``jnc``
+                # (when="clear") for ``carry_return`` callees used in an
+                # ``if`` / ``while`` condition.  ``generate_call`` sets
+                # up args (regparm / stack) the same way a direct call
+                # would.
+                self._current_call_pinned_initialized = self._ir_call_pinned_initialized.get(id(instruction))
+                try:
+                    self.generate_call(call_ast, discard_return=True)
+                finally:
+                    self._current_call_pinned_initialized = None
+                self.emit(f"        {'jc' if when == 'set' else 'jnc'} {target}")
+                self.ax_clear()
+            case ir.Return(value=value):
+                stmt = Return(value=self._ir_value_to_ast(value) if value is not None else None)
+                self.generate_return(stmt)
+            case ir.InlineAsm(content=content):
+                for line in decode_string_escapes(content).splitlines():
+                    self.emit(line)
+            case ir.LoopBoundary(continue_label=continue_label, end_label=end_label, push=push):
+                if push:
+                    self.loop_continue_labels.append(continue_label)
+                    self.loop_end_labels.append(end_label)
+                else:
+                    self.loop_continue_labels.pop()
+                    self.loop_end_labels.pop()
+            case ir.Block(node=node):
+                self.generate_statement(node)
+
+    def _member_assign_targets_bitfield(self, statement: MemberAssign, /) -> bool:
+        """Return True if *statement* writes to a bitfield member.
+
+        Uses the same ``struct_layouts`` / ``variable_types`` lookup as
+        :meth:`generate_member_assign` so the detection predicate is
+        consistent: ``info.bit_width is not None``.
+        """
+        if statement.base_expr is not None:
+            return False
+        struct_type = self.variable_types.get(statement.object_name, "")
+        if statement.arrow:
+            if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
+                return False
+            tag = struct_type[7:-1]
+        else:
+            if not struct_type.startswith("struct ") or struct_type.endswith("*"):
+                return False
+            tag = struct_type[7:]
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            return False
+        info = layout.get(statement.member_name)
+        if info is None:
+            return False
+        return info.bit_width is not None
+
+    def _node_contains_var(self, node: Node, name: str, /) -> bool:
+        """Return True if node or any descendant is Var(name).
+
+        Conservative: any str field equal to name is treated as a possible
+        variable read so that nodes like Assign, MemberAssign, and the
+        IndexMember* family (which still store the target's name as a plain
+        str rather than a Var) are not silently missed.
+        """
+        if isinstance(node, Var):
+            return node.name == name
+        for field in fields(node):
+            value = getattr(node, field.name)
+            if isinstance(value, str) and value == name:
+                return True
+            if isinstance(value, Node) and self._node_contains_var(value, name):
+                return True
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node) and self._node_contains_var(item, name):
+                        return True
+        return False
+
+    @staticmethod
+    def _normalise_ternary_condition(condition: Node) -> Node:
+        """Wrap a ternary condition as ``expr != 0`` unless it's already a comparison.
+
+        Mirrors :meth:`cc.parser.Parser.parse_condition`: ``&&`` / ``||``
+        and explicit comparisons (``==`` / ``<`` / etc.) are passed
+        through; everything else (a bare variable, an arithmetic
+        expression, a call) is normalised to ``expr != 0`` so the
+        downstream :meth:`emit_condition_false_jump` always sees a
+        comparison-shaped node.
+        """
+        if isinstance(condition, (LogicalAnd, LogicalOr)):
+            return condition
+        if isinstance(condition, BinaryOperation) and condition.operation in COMPARISON_OPERATIONS:
+            return condition
+        return BinaryOperation(left=condition, line=condition.line, operation="!=", right=Int(line=condition.line, value=0))
+
+    def _param_slot_is_read(self, body: list[Node], param_name: str, /) -> bool:
+        """Return True if the local slot for param_name is read anywhere in body.
+
+        Var refs that appear as direct TailCall arguments are excluded because
+        change 3a sources those from the named in_register directly rather than
+        loading from the stack slot.  Non-Var TailCall args are still walked.
+        Conservative: any Var(param_name) in a non-TailCall-arg position is
+        treated as a slot read and the spill is kept.
+        """
+        # Pure thunk: the body is exactly one TailCall.  Simple Var args
+        # will be sourced from the named register (param_in_register), so
+        # they do NOT require the slot.  Non-Var args are checked
+        # conservatively — if any contain the param, keep the spill.
+        if len(body) == 1 and isinstance(body[0], TailCall):
+            return any(not isinstance(arg, Var) and self._node_contains_var(arg, param_name) for arg in body[0].args)
+        # Non-pure-thunk: every reference to param_name — including
+        # TailCall args — keeps the slot alive so the reload before
+        # the tail jmp is valid and the named register's stale value
+        # is never used.
+        return any(self._node_contains_var(stmt, param_name) for stmt in body)
+
+    def _try_emit_conditional_via_cond_value(self, *, condition: Node, expression: Conditional) -> bool:
+        """Elide the then-branch when it duplicates the comparison's left operand.
+
+        Returns True when the ternary matched the pure-then-equals-cond.left
+        shape and the lowering was emitted; the caller (``_generate_conditional``)
+        then skips its default cond-jump / then / jmp / else / end layout.
+
+        Recognised shape (verbatim output of ``MAX(a, b)`` / ``MIN(a, b)``
+        after function-like macro expansion):
+
+            Conditional(
+                condition=BinaryOperation(left=X, op=COMP, right=Y),
+                then_expr=X,                 # structurally equal to cond.left
+                else_expr=anything,
+            )
+
+        :meth:`emit_condition` ends with ``cmp ax, <right>`` and leaves
+        AX = X.  A *true*-jump to the merge label therefore skips the
+        else branch with no re-evaluation of X — which is exactly the
+        savings the textual macro pattern needs (``MIN(a-b, K)`` would
+        otherwise emit ``a-b`` twice).
+
+        Refused for impure ``then_expr`` (calls, address-of, etc.) — the
+        textual macro semantics require evaluating the chosen branch in
+        full, side effects included.  Refused too for ``&&`` / ``||``
+        condition shapes (those go through the general
+        :meth:`emit_condition_false_jump` short-circuit machinery, which
+        doesn't leave a single representative value in AX), for unsigned
+        long destinations (32-bit accumulator handling differs), and for
+        byte-byte comparisons (AL holds the left byte but AH is stale,
+        so falling through with AX as the result needs a zero-extend
+        the standard path already issues separately).
+        """
+        if not isinstance(condition, BinaryOperation) or condition.operation not in COMPARISON_OPERATIONS:
+            return False
+        if expression.then_expr != condition.left:
+            return False
+        if not self._is_pure_expression(expression.then_expr):
+            return False
+        if self._is_byte_index(condition.left) and self._is_byte_index(condition.right):
+            return False
+        operator, unsigned = self.emit_condition(condition=condition, context="ast")
+        table = JUMP_WHEN_TRUE_UNSIGNED if unsigned else JUMP_WHEN_TRUE
+        # ``emit_condition`` may have returned the synthetic "carry" /
+        # "not_carry" operator for a ``carry_return`` callee — there's
+        # no entry in JUMP_WHEN_TRUE for those, and the cmp path that
+        # this fast track depends on wasn't taken.  Bail.
+        if operator not in table:
+            return False
+        end_label = f".cond_end_{self.new_label()}"
+        self.emit(f"        {table[operator]} {end_label}")
+        # Cond is false here — load else_expr into AX.  Clear ax_local
+        # first so a Var(then_expr.name) shape inside else_expr doesn't
+        # short-circuit on stale tracking.
+        self.ax_clear()
+        self.generate_expression(expression.else_expr)
+        self.emit(f"{end_label}:")
+        # Merge: AX holds whichever branch's value ran, but the
+        # cross-path variable tracking is no longer guaranteed.
+        self.ax_clear()
+        return True
+
+    def _va_arg_advance_size(self, type_name: str, /) -> int:
+        """Return the number of bytes to advance a ``va_list`` cursor for *type_name*.
+
+        Delegates to :meth:`_type_size` for all known types.  On i386
+        cdecl, ``double`` occupies 8 bytes on the caller's stack; every
+        other currently-supported type fits in one native word (4 bytes
+        under ``--bits 32``, 2 under ``--bits 16``).
+        """
+        return self._type_size(type_name)
+
     def generate(self, ast: Node, /) -> str:
         """Generate assembly for an entire program AST.
 
@@ -837,180 +1268,6 @@ class EmissionMixin:
             i += 1
         if saved is not None:
             self.visible_vars = saved
-
-    def _generate_conditional(self, expression: Conditional, /) -> None:
-        """Lower a ternary ``c ? t : e`` to a conditional branch.
-
-        Evaluates the condition; jumps over the then-branch when false;
-        evaluates the chosen branch (only one fires) and leaves the
-        result in AX/EAX.  The condition is normalised the same way
-        ``parse_condition`` normalises ``if`` / ``while`` heads — bare
-        expressions become ``expr != 0`` so the shared
-        :meth:`emit_condition_false_jump` machinery handles short-
-        circuit ``&&`` / ``||`` and carry-flag callees uniformly.
-
-        Both branches reach the same end label, so AX-tracking
-        (``ax_local`` / ``ax_is_byte``) is cleared after the merge:
-        whichever branch the actual control flow took, the merge
-        point can't promise that AX still holds the then-branch's
-        value tag.
-
-        Fast path for ``MAX(a, b)`` / ``MIN(a, b)`` macro expansion:
-        when the then-branch is structurally identical to the
-        comparison's left operand (and pure — no calls), ``AX`` will
-        already hold the desired value after :meth:`emit_condition`,
-        so the then-branch's re-evaluation is elided and we jump
-        directly to the end label on cond-true.  This collapses
-        ``MIN(total_length - logical_offset, 512)`` to the same
-        compact ``cmp / Jcc / mov ax, 512`` that the hand-written
-        ``if`` saturation would emit, without a redundant
-        ``sub`` second time around.
-        """
-        condition = self._normalise_ternary_condition(expression.condition)
-        if self._try_emit_conditional_via_cond_value(condition=condition, expression=expression):
-            return
-        label_index = self.new_label()
-        else_label = f".cond_else_{label_index}"
-        end_label = f".cond_end_{label_index}"
-        self.emit_condition_false_jump(condition=condition, context="ast", fail_label=else_label)
-        self.generate_expression(expression.then_expr)
-        self.emit(f"        jmp {end_label}")
-        self.emit(f"{else_label}:")
-        # Else-branch enters from the conditional jump; AX state
-        # accumulated by the then-branch is invalid here.
-        self.ax_clear()
-        self.generate_expression(expression.else_expr)
-        self.emit(f"{end_label}:")
-        # At the merge, AX holds the result of whichever branch ran;
-        # neither branch's variable-tracking is guaranteed.
-        self.ax_clear()
-
-    def _generate_logical_value(self, expression: Node, /) -> None:
-        """Materialize a ``LogicalAnd`` / ``LogicalOr`` into the accumulator as 0 or 1.
-
-        cc.py used to handle short-circuit operators only in condition
-        position (inside ``if`` / ``while`` / ``? :`` heads), so any
-        expression-position use like ``int same = a && b;`` raised
-        ``unknown expression: LogicalAnd``.  This helper reuses the
-        existing :meth:`emit_condition_false_jump` /
-        :meth:`emit_condition_true_jump` short-circuit machinery to
-        leave the accumulator holding the C boolean value: 1 when the
-        operand evaluates true, 0 otherwise.
-
-        For ``&&`` we false-jump every leaf to a shared zero-label
-        (matching how condition-position lowering already works), then
-        fall through to set the accumulator to 1.  For ``||`` we
-        true-jump every leaf to a shared one-label, falling through to
-        set the accumulator to 0.
-        """
-        label_index = self.new_label()
-        end_label = f".lbool_{label_index}_end"
-        if isinstance(expression, LogicalAnd):
-            zero_label = f".lbool_{label_index}_zero"
-            self.emit_condition_false_jump(condition=expression, context="expr", fail_label=zero_label)
-            self.emit(f"        mov {self.target.acc}, 1")
-            self.emit(f"        jmp {end_label}")
-            self.emit(f"{zero_label}:")
-            self.emit(f"        xor {self.target.acc}, {self.target.acc}")
-        else:
-            one_label = f".lbool_{label_index}_one"
-            self.emit_condition_true_jump(condition=expression, context="expr", success_label=one_label)
-            self.emit(f"        xor {self.target.acc}, {self.target.acc}")
-            self.emit(f"        jmp {end_label}")
-            self.emit(f"{one_label}:")
-            self.emit(f"        mov {self.target.acc}, 1")
-        self.emit(f"{end_label}:")
-        self.ax_clear()
-
-    def _has_tail_dispatch_shape(self, body: list[Node], /) -> bool:
-        """``body[-1]`` is an ``If/else`` whose branches both tail-call.
-
-        Each branch's last statement must be a tail-call-eligible
-        ``Call``; the whole ``if`` then becomes a register-preserving
-        dispatcher (``cmp ... ; jcc .else ; ... ; jmp fn1 ; .else: ... ; jmp fn2``).
-        Used for ``naked`` dispatchers like ``read_sector`` that pick
-        between two drivers based on a flag byte.
-        """
-        if not body or not isinstance(body[-1], If):
-            return False
-        if_stmt = body[-1]
-        if if_stmt.else_body is None:
-            return False
-        return (
-            bool(if_stmt.body)
-            and isinstance(if_stmt.body[-1], Call)
-            and self._is_tail_call_eligible(if_stmt.body[-1])
-            and bool(if_stmt.else_body)
-            and isinstance(if_stmt.else_body[-1], Call)
-            and self._is_tail_call_eligible(if_stmt.else_body[-1])
-        )
-
-    def _is_pure_expression(self, node: Node, /) -> bool:
-        """Return True if evaluating *node* has no observable side effect.
-
-        Conservative: only literals, variable / named-constant reads,
-        struct-member reads, array indexing, address-of, sizeof, and
-        arithmetic / comparison / logical / bitwise binary operations
-        over pure operands qualify.  Anything that could ``call`` user
-        code (``Call``, ``TailCall``) or that mutates state is
-        rejected.  Used by :meth:`_try_emit_conditional_via_cond_value`
-        to decide whether eliding the then-branch (which by the textual
-        macro semantics would otherwise be re-evaluated) is safe.
-        """
-        if isinstance(node, (Int, SizeofExpr, SizeofType, SizeofVar, String, Var, AddressOf, MemberAddressOf)):
-            return True
-        if isinstance(node, BinaryOperation):
-            return self._is_pure_expression(node.left) and self._is_pure_expression(node.right)
-        if isinstance(node, (LogicalAnd, LogicalOr)):
-            return self._is_pure_expression(node.left) and self._is_pure_expression(node.right)
-        if isinstance(node, Index):
-            # ``arr[i]`` reads from memory but doesn't write; the index
-            # itself must also be pure.
-            return self._is_pure_expression(node.index)
-        if isinstance(node, (MemberAccess, MemberIndex, IndexMemberAccess, IndexMemberIndex)):
-            return True
-        if isinstance(node, Conditional):
-            return (
-                self._is_pure_expression(node.condition)
-                and self._is_pure_expression(node.then_expr)
-                and self._is_pure_expression(node.else_expr)
-            )
-        return False
-
-    def _is_tail_call_eligible(self, call: Call, /) -> bool:
-        """Check whether a tail-call replacement (``jmp`` for ``call; ret``) is safe.
-
-        Safe when:
-        - ``elide_frame`` is True (no ``pop bp; ret`` teardown to emit).
-        - callee is a user function (not a builtin with its own shape).
-        - callee isn't an inline-asm splice target (we'd need the body
-          inlined, not a jmp).
-        - no pinned registers need saving at this call site — we'd
-          never get a chance to restore them after the jmp.
-        - no stack args — we can't ``add sp, N`` after a jmp either.
-        """
-        if not self.elide_frame:
-            return False
-        if call.name not in self.user_functions:
-            return False
-        if call.name in self.inline_bodies:
-            return False
-        clobbers: frozenset[str] = frozenset(self.target.register_pool)
-        if self._pinned_registers_to_save(clobbers):
-            return False
-        callee_pins = self.user_function_pin_params.get(call.name, {}) if call.name in self.register_convention_functions else {}
-        is_fastcall = call.name in self.fastcall_functions
-        in_regs = self.in_register_params.get(call.name, {})
-        out_regs = self.out_register_params.get(call.name, {})
-        for index in range(len(call.args)):
-            if is_fastcall and index == 0:
-                continue
-            if index in callee_pins:
-                continue
-            if index in in_regs or index in out_regs:
-                continue
-            return False  # stack arg — can't clean up after a jmp
-        return True
 
     def generate_call(self, statement: Call, /, *, discard_return: bool = False, tail_call: bool = False) -> None:
         """Generate code for a function call statement.
@@ -2121,34 +2378,6 @@ class EmissionMixin:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
 
-    def generate_for(self, statement: For, /) -> None:
-        """Generate assembly for a ``for (init; cond; step) { body }`` loop.
-
-        ``continue`` jumps to the step label (not the condition test) so
-        that the step expressions are always executed.
-        """
-        label_index = self.new_label()
-        top_label = f".for_{label_index}"
-        step_label = f".for_{label_index}_step"
-        end_label = f".for_{label_index}_end"
-        for init_statement in statement.init:
-            self.generate_statement(init_statement)
-        self.emit(f"{top_label}:")
-        self.loop_end_labels.append(end_label)
-        self.loop_continue_labels.append(step_label)
-        if statement.cond is not None:
-            self.emit_condition_false_jump(condition=statement.cond, context="for", fail_label=end_label)
-        self.generate_body(statement.body, scoped=True)
-        self.emit(f"{step_label}:")
-        for step_expression in statement.step:
-            self.generate_expression(step_expression)
-            self.ax_clear()
-        self.emit(f"        jmp {top_label}")
-        self.emit(f"{end_label}:")
-        self.loop_continue_labels.pop()
-        self.loop_end_labels.pop()
-        self.ax_clear()
-
     def generate_extended_asm(self, statement: ExtendedAsm, /) -> None:
         """Generate assembly for a GCC extended inline asm statement.
 
@@ -2423,251 +2652,33 @@ class EmissionMixin:
     # IR lowering
     # ------------------------------------------------------------------
 
-    def _ir_value_to_ast(self, value: ir.Value) -> Node:
-        """Convert an :data:`ir.Value` to the equivalent simple AST leaf node."""
-        if isinstance(value, int):
-            return Int(value=value)
-        if isinstance(value, AddressOf):
-            return value
-        if value.startswith("_ir_s"):
-            content = self._ir_string_map.get(value)
-            if content is not None:
-                return String(content=content)
-        return Var(name=value)
+    def generate_for(self, statement: For, /) -> None:
+        """Generate assembly for a ``for (init; cond; step) { body }`` loop.
 
-    def lower_ir_body(self, body: list[ir.Instruction]) -> None:
-        """Generate x86 assembly from a flat IR instruction list."""
-        for instruction in body:
-            self._lower_ir_instruction(instruction)
-
-    def _lower_ir_instruction(self, instruction: ir.Instruction) -> None:
-        match instruction:
-            case ir.BinaryOperation(destination=destination, operation=operation, left=left, right=right):
-                expression = BinaryOperation(left=self._ir_value_to_ast(left), operation=operation, right=self._ir_value_to_ast(right))
-                self.emit_store_local(expression=expression, name=destination)
-            case ir.Copy(destination=destination, source=source):
-                self.emit_store_local(expression=self._ir_value_to_ast(source), name=destination)
-            case ir.Call(destination=None, name=name, args=args):
-                call = Call(args=[self._ir_value_to_ast(a) for a in args], name=name)
-                self._current_call_pinned_initialized = self._ir_call_pinned_initialized.get(id(instruction))
-                try:
-                    self.generate_call(call, discard_return=True)
-                finally:
-                    self._current_call_pinned_initialized = None
-                self.ax_clear()
-            case ir.Call(destination=destination, name=name, args=args):
-                call = Call(args=[self._ir_value_to_ast(a) for a in args], name=name)
-                self._current_call_pinned_initialized = self._ir_call_pinned_initialized.get(id(instruction))
-                try:
-                    self.emit_store_local(expression=call, name=destination)
-                finally:
-                    self._current_call_pinned_initialized = None
-            case ir.Index(destination=destination, base=base, index=index):
-                expression = Index(array=Var(name=base), index=self._ir_value_to_ast(index))
-                self.emit_store_local(expression=expression, name=destination)
-            case ir.IndexAssign(base=base, index=index, source=source):
-                stmt = IndexAssign(array=Var(name=base), expr=self._ir_value_to_ast(source), index=self._ir_value_to_ast(index))
-                self.generate_index_assign(stmt)
-            case ir.Label(name=name):
-                # Control can arrive at an IR label from any preceding
-                # branch / jump, so AX-tracking state (``ax_local`` /
-                # ``ax_is_byte``) and SI-tracking (``si_local``)
-                # accumulated on the fall-through path are not guaranteed
-                # on the jump path.  Clear both.
-                self.ax_clear()
-                self.si_local = None
-                self.emit(f"{name}:")
-            case ir.Jump(target=target):
-                self.emit(f"        jmp {target}")
-            case ir.BranchFalse(left=left, operation=operation, right=right, target=target):
-                condition = BinaryOperation(left=self._ir_value_to_ast(left), operation=operation, right=self._ir_value_to_ast(right))
-                self.emit_condition_false_jump(condition=condition, context="ir", fail_label=target)
-            case ir.CarryBranch(call_ast=call_ast, target=target, when=when):
-                # Tight ``call X / jc target`` (when="set") or ``jnc``
-                # (when="clear") for ``carry_return`` callees used in an
-                # ``if`` / ``while`` condition.  ``generate_call`` sets
-                # up args (regparm / stack) the same way a direct call
-                # would.
-                self._current_call_pinned_initialized = self._ir_call_pinned_initialized.get(id(instruction))
-                try:
-                    self.generate_call(call_ast, discard_return=True)
-                finally:
-                    self._current_call_pinned_initialized = None
-                self.emit(f"        {'jc' if when == 'set' else 'jnc'} {target}")
-                self.ax_clear()
-            case ir.Return(value=value):
-                stmt = Return(value=self._ir_value_to_ast(value) if value is not None else None)
-                self.generate_return(stmt)
-            case ir.InlineAsm(content=content):
-                for line in decode_string_escapes(content).splitlines():
-                    self.emit(line)
-            case ir.LoopBoundary(continue_label=continue_label, end_label=end_label, push=push):
-                if push:
-                    self.loop_continue_labels.append(continue_label)
-                    self.loop_end_labels.append(end_label)
-                else:
-                    self.loop_continue_labels.pop()
-                    self.loop_end_labels.pop()
-            case ir.Block(node=node):
-                self.generate_statement(node)
-
-    def _member_assign_targets_bitfield(self, statement: MemberAssign, /) -> bool:
-        """Return True if *statement* writes to a bitfield member.
-
-        Uses the same ``struct_layouts`` / ``variable_types`` lookup as
-        :meth:`generate_member_assign` so the detection predicate is
-        consistent: ``info.bit_width is not None``.
+        ``continue`` jumps to the step label (not the condition test) so
+        that the step expressions are always executed.
         """
-        if statement.base_expr is not None:
-            return False
-        struct_type = self.variable_types.get(statement.object_name, "")
-        if statement.arrow:
-            if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
-                return False
-            tag = struct_type[7:-1]
-        else:
-            if not struct_type.startswith("struct ") or struct_type.endswith("*"):
-                return False
-            tag = struct_type[7:]
-        layout = self.struct_layouts.get(tag)
-        if layout is None:
-            return False
-        info = layout.get(statement.member_name)
-        if info is None:
-            return False
-        return info.bit_width is not None
-
-    def _node_contains_var(self, node: Node, name: str, /) -> bool:
-        """Return True if node or any descendant is Var(name).
-
-        Conservative: any str field equal to name is treated as a possible
-        variable read so that nodes like Assign, MemberAssign, and the
-        IndexMember* family (which still store the target's name as a plain
-        str rather than a Var) are not silently missed.
-        """
-        if isinstance(node, Var):
-            return node.name == name
-        for field in fields(node):
-            value = getattr(node, field.name)
-            if isinstance(value, str) and value == name:
-                return True
-            if isinstance(value, Node) and self._node_contains_var(value, name):
-                return True
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, Node) and self._node_contains_var(item, name):
-                        return True
-        return False
-
-    @staticmethod
-    def _normalise_ternary_condition(condition: Node) -> Node:
-        """Wrap a ternary condition as ``expr != 0`` unless it's already a comparison.
-
-        Mirrors :meth:`cc.parser.Parser.parse_condition`: ``&&`` / ``||``
-        and explicit comparisons (``==`` / ``<`` / etc.) are passed
-        through; everything else (a bare variable, an arithmetic
-        expression, a call) is normalised to ``expr != 0`` so the
-        downstream :meth:`emit_condition_false_jump` always sees a
-        comparison-shaped node.
-        """
-        if isinstance(condition, (LogicalAnd, LogicalOr)):
-            return condition
-        if isinstance(condition, BinaryOperation) and condition.operation in COMPARISON_OPERATIONS:
-            return condition
-        return BinaryOperation(left=condition, line=condition.line, operation="!=", right=Int(line=condition.line, value=0))
-
-    def _param_slot_is_read(self, body: list[Node], param_name: str, /) -> bool:
-        """Return True if the local slot for param_name is read anywhere in body.
-
-        Var refs that appear as direct TailCall arguments are excluded because
-        change 3a sources those from the named in_register directly rather than
-        loading from the stack slot.  Non-Var TailCall args are still walked.
-        Conservative: any Var(param_name) in a non-TailCall-arg position is
-        treated as a slot read and the spill is kept.
-        """
-        # Pure thunk: the body is exactly one TailCall.  Simple Var args
-        # will be sourced from the named register (param_in_register), so
-        # they do NOT require the slot.  Non-Var args are checked
-        # conservatively — if any contain the param, keep the spill.
-        if len(body) == 1 and isinstance(body[0], TailCall):
-            return any(not isinstance(arg, Var) and self._node_contains_var(arg, param_name) for arg in body[0].args)
-        # Non-pure-thunk: every reference to param_name — including
-        # TailCall args — keeps the slot alive so the reload before
-        # the tail jmp is valid and the named register's stale value
-        # is never used.
-        return any(self._node_contains_var(stmt, param_name) for stmt in body)
-
-    def _try_emit_conditional_via_cond_value(self, *, condition: Node, expression: Conditional) -> bool:
-        """Elide the then-branch when it duplicates the comparison's left operand.
-
-        Returns True when the ternary matched the pure-then-equals-cond.left
-        shape and the lowering was emitted; the caller (``_generate_conditional``)
-        then skips its default cond-jump / then / jmp / else / end layout.
-
-        Recognised shape (verbatim output of ``MAX(a, b)`` / ``MIN(a, b)``
-        after function-like macro expansion):
-
-            Conditional(
-                condition=BinaryOperation(left=X, op=COMP, right=Y),
-                then_expr=X,                 # structurally equal to cond.left
-                else_expr=anything,
-            )
-
-        :meth:`emit_condition` ends with ``cmp ax, <right>`` and leaves
-        AX = X.  A *true*-jump to the merge label therefore skips the
-        else branch with no re-evaluation of X — which is exactly the
-        savings the textual macro pattern needs (``MIN(a-b, K)`` would
-        otherwise emit ``a-b`` twice).
-
-        Refused for impure ``then_expr`` (calls, address-of, etc.) — the
-        textual macro semantics require evaluating the chosen branch in
-        full, side effects included.  Refused too for ``&&`` / ``||``
-        condition shapes (those go through the general
-        :meth:`emit_condition_false_jump` short-circuit machinery, which
-        doesn't leave a single representative value in AX), for unsigned
-        long destinations (32-bit accumulator handling differs), and for
-        byte-byte comparisons (AL holds the left byte but AH is stale,
-        so falling through with AX as the result needs a zero-extend
-        the standard path already issues separately).
-        """
-        if not isinstance(condition, BinaryOperation) or condition.operation not in COMPARISON_OPERATIONS:
-            return False
-        if expression.then_expr != condition.left:
-            return False
-        if not self._is_pure_expression(expression.then_expr):
-            return False
-        if self._is_byte_index(condition.left) and self._is_byte_index(condition.right):
-            return False
-        operator, unsigned = self.emit_condition(condition=condition, context="ast")
-        table = JUMP_WHEN_TRUE_UNSIGNED if unsigned else JUMP_WHEN_TRUE
-        # ``emit_condition`` may have returned the synthetic "carry" /
-        # "not_carry" operator for a ``carry_return`` callee — there's
-        # no entry in JUMP_WHEN_TRUE for those, and the cmp path that
-        # this fast track depends on wasn't taken.  Bail.
-        if operator not in table:
-            return False
-        end_label = f".cond_end_{self.new_label()}"
-        self.emit(f"        {table[operator]} {end_label}")
-        # Cond is false here — load else_expr into AX.  Clear ax_local
-        # first so a Var(then_expr.name) shape inside else_expr doesn't
-        # short-circuit on stale tracking.
-        self.ax_clear()
-        self.generate_expression(expression.else_expr)
+        label_index = self.new_label()
+        top_label = f".for_{label_index}"
+        step_label = f".for_{label_index}_step"
+        end_label = f".for_{label_index}_end"
+        for init_statement in statement.init:
+            self.generate_statement(init_statement)
+        self.emit(f"{top_label}:")
+        self.loop_end_labels.append(end_label)
+        self.loop_continue_labels.append(step_label)
+        if statement.cond is not None:
+            self.emit_condition_false_jump(condition=statement.cond, context="for", fail_label=end_label)
+        self.generate_body(statement.body, scoped=True)
+        self.emit(f"{step_label}:")
+        for step_expression in statement.step:
+            self.generate_expression(step_expression)
+            self.ax_clear()
+        self.emit(f"        jmp {top_label}")
         self.emit(f"{end_label}:")
-        # Merge: AX holds whichever branch's value ran, but the
-        # cross-path variable tracking is no longer guaranteed.
+        self.loop_continue_labels.pop()
+        self.loop_end_labels.pop()
         self.ax_clear()
-        return True
-
-    def _va_arg_advance_size(self, type_name: str, /) -> int:
-        """Return the number of bytes to advance a ``va_list`` cursor for *type_name*.
-
-        Delegates to :meth:`_type_size` for all known types.  On i386
-        cdecl, ``double`` occupies 8 bytes on the caller's stack; every
-        other currently-supported type fits in one native word (4 bytes
-        under ``--bits 32``, 2 under ``--bits 16``).
-        """
-        return self._type_size(type_name)
 
     def generate_function(self, function: Function | ir.Function, /) -> None:
         """Generate assembly for a single function definition."""
@@ -3164,22 +3175,6 @@ class EmissionMixin:
             self.emit("        ret")
         self.emit()
 
-    def _generate_tail_dispatch_if(self, statement: If, /) -> None:
-        """Emit an ``if/else`` where each branch's last call is a tail jmp.
-
-        Used for ``naked`` dispatchers: both branches end the function
-        via ``jmp <target>``, so the only labels needed are the else
-        entry point.  No common end label, no fall-through ``jmp``
-        skip-around, no ``ret`` after the structure.
-        """
-        label_index = self.new_label()
-        self.emit_condition_false_jump(condition=statement.cond, context="if", fail_label=f".if_{label_index}_else")
-        self.generate_body(statement.body[:-1], scoped=True)
-        self.generate_call(statement.body[-1], tail_call=True)
-        self.emit(f".if_{label_index}_else:")
-        self.generate_body(statement.else_body[:-1], scoped=True)
-        self.generate_call(statement.else_body[-1], tail_call=True)
-
     def generate_if(self, statement: If, /) -> None:
         """Generate assembly for an if statement.
 
@@ -3646,19 +3641,7 @@ class EmissionMixin:
             CompileError: If an unknown statement kind is encountered.
 
         """
-        if isinstance(statement, VarDecl):
-            self.visible_vars.add(statement.name)
-            self.variable_types[statement.name] = statement.type_name
-            if statement.name in self.constant_aliases:
-                return
-            if statement.init is not None:
-                if isinstance(statement.init, StructInitializer):
-                    self._emit_struct_initializer(statement.name, statement.init)
-                elif statement.name in self.zero_init_skippable:
-                    self.zero_init_skippable.discard(statement.name)
-                else:
-                    self.emit_store_local(expression=statement.init, name=statement.name)
-        elif isinstance(statement, ArrayDecl):
+        if isinstance(statement, ArrayDecl):
             self.visible_vars.add(statement.name)
             self.variable_types[statement.name] = statement.type_name
             if statement.init is not None:
@@ -3679,29 +3662,14 @@ class EmissionMixin:
         elif isinstance(statement, Assign):
             self._check_defined(statement.name, line=statement.line)
             self.emit_store_local(expression=statement.expr, name=statement.name)
-        elif isinstance(statement, IncrementDecrement):
-            # ``var++;`` / ``--var;`` etc. at statement scope — value
-            # discarded.  Share the expression-form codegen; the
-            # accumulator load it produces is unused, but
-            # ``ax_clear()`` invalidates the AX-tracking shortcut so a
-            # later read of ``var`` doesn't reuse a stale value.
-            self.generate_expression(statement)
-            self.ax_clear()
-        elif isinstance(statement, MemberIncrementDecrement):
-            # ``s->f++;`` / ``--s.f;`` at statement scope — value
-            # discarded; route through the expression-form codegen.
-            self.generate_expression(statement)
-            self.ax_clear()
-        elif isinstance(statement, IndexAssign):
-            self.generate_index_assign(statement)
-        elif isinstance(statement, IndexedCall):
-            self.generate_indexed_call(statement, discard_return=True)
-            self.ax_clear()
         elif isinstance(statement, Break):
             if not self.loop_end_labels:
                 message = "break outside of a loop"
                 raise CompileError(message, line=statement.line)
             self.emit(f"        jmp {self.loop_end_labels[-1]}")
+        elif isinstance(statement, Call):
+            self.generate_call(statement, discard_return=True)
+            self.ax_clear()
         elif isinstance(statement, Compound):
             self.generate_body(statement.body, scoped=True)
         elif isinstance(statement, Continue):
@@ -3709,38 +3677,6 @@ class EmissionMixin:
                 message = "continue outside of a loop"
                 raise CompileError(message, line=statement.line)
             self.emit(f"        jmp {self.loop_continue_labels[-1]}")
-        elif isinstance(statement, Goto):
-            self.user_labels_referenced.setdefault(statement.name, statement.line)
-            self.emit(f"        jmp .user_{statement.name}")
-        elif isinstance(statement, Label):
-            if statement.name in self.user_labels_defined:
-                message = f"duplicate label '{statement.name}'"
-                raise CompileError(message, line=statement.line)
-            self.user_labels_defined[statement.name] = statement.line
-            # A label is a basic-block boundary: any prior fall-through
-            # AX / SI tracking is invalid on the jump-arrival path.
-            self.ax_clear()
-            self.si_local = None
-            self.emit(f".user_{statement.name}:")
-        elif isinstance(statement, DoWhile):
-            self.ax_clear()
-            self.generate_do_while(statement)
-        elif isinstance(statement, For):
-            self.ax_clear()
-            self.generate_for(statement)
-        elif isinstance(statement, If):
-            self.generate_if(statement)
-        elif isinstance(statement, Switch):
-            self.ax_clear()
-            self.generate_switch(statement)
-        elif isinstance(statement, While):
-            self.ax_clear()
-            self.generate_while(statement)
-        elif isinstance(statement, Return):
-            self.generate_return(statement)
-        elif isinstance(statement, Call):
-            self.generate_call(statement, discard_return=True)
-            self.ax_clear()
         elif isinstance(statement, DerefAssign):
             if statement.pointer.name in self.out_register_locals:
                 reg = self.out_register_locals[statement.pointer.name]
@@ -3803,27 +3739,37 @@ class EmissionMixin:
             if statement.is_postfix:
                 self._emit_pointer_bump(delta=statement.delta, line=statement.line, name=target)
             self.ax_clear()
-        elif isinstance(statement, PointerDereferenceAssign):
-            self._emit_pointer_dereference_assign(statement)
+        elif isinstance(statement, DoWhile):
             self.ax_clear()
-        elif isinstance(statement, MemberAssign):
-            self.generate_member_assign(statement)
+            self.generate_do_while(statement)
+        elif isinstance(statement, ExtendedAsm):
+            self.generate_extended_asm(statement)
+        elif isinstance(statement, For):
             self.ax_clear()
-        elif isinstance(statement, MemberIndexAssign):
-            self.generate_member_index_assign(statement)
+            self.generate_for(statement)
+        elif isinstance(statement, Goto):
+            self.user_labels_referenced.setdefault(statement.name, statement.line)
+            self.emit(f"        jmp .user_{statement.name}")
+        elif isinstance(statement, If):
+            self.generate_if(statement)
+        elif isinstance(statement, IncrementDecrement):
+            # ``var++;`` / ``--var;`` etc. at statement scope — value
+            # discarded.  Share the expression-form codegen; the
+            # accumulator load it produces is unused, but
+            # ``ax_clear()`` invalidates the AX-tracking shortcut so a
+            # later read of ``var`` doesn't reuse a stale value.
+            self.generate_expression(statement)
             self.ax_clear()
+        elif isinstance(statement, IndexAssign):
+            self.generate_index_assign(statement)
         elif isinstance(statement, IndexMemberAssign):
             self.generate_index_member_assign(statement)
             self.ax_clear()
         elif isinstance(statement, IndexMemberIndexAssign):
             self.generate_index_member_index_assign(statement)
             self.ax_clear()
-        elif isinstance(statement, TailCall):
-            self.generate_tail_call(statement)
-        elif isinstance(statement, VaArg):
-            # ``va_arg(ap, T);`` at statement scope — advance the cursor
-            # (side effect) and discard the loaded value.
-            self.generate_expression(statement)
+        elif isinstance(statement, IndexedCall):
+            self.generate_indexed_call(statement, discard_return=True)
             self.ax_clear()
         elif isinstance(statement, InlineAsm):
             # Empty / inline-asm statement (produced by ``(void)expr;``
@@ -3832,8 +3778,57 @@ class EmissionMixin:
             # per line; empty content emits nothing.
             for line in decode_string_escapes(statement.content).splitlines():
                 self.emit(line)
-        elif isinstance(statement, ExtendedAsm):
-            self.generate_extended_asm(statement)
+        elif isinstance(statement, Label):
+            if statement.name in self.user_labels_defined:
+                message = f"duplicate label '{statement.name}'"
+                raise CompileError(message, line=statement.line)
+            self.user_labels_defined[statement.name] = statement.line
+            # A label is a basic-block boundary: any prior fall-through
+            # AX / SI tracking is invalid on the jump-arrival path.
+            self.ax_clear()
+            self.si_local = None
+            self.emit(f".user_{statement.name}:")
+        elif isinstance(statement, MemberAssign):
+            self.generate_member_assign(statement)
+            self.ax_clear()
+        elif isinstance(statement, MemberIncrementDecrement):
+            # ``s->f++;`` / ``--s.f;`` at statement scope — value
+            # discarded; route through the expression-form codegen.
+            self.generate_expression(statement)
+            self.ax_clear()
+        elif isinstance(statement, MemberIndexAssign):
+            self.generate_member_index_assign(statement)
+            self.ax_clear()
+        elif isinstance(statement, PointerDereferenceAssign):
+            self._emit_pointer_dereference_assign(statement)
+            self.ax_clear()
+        elif isinstance(statement, Return):
+            self.generate_return(statement)
+        elif isinstance(statement, Switch):
+            self.ax_clear()
+            self.generate_switch(statement)
+        elif isinstance(statement, TailCall):
+            self.generate_tail_call(statement)
+        elif isinstance(statement, VaArg):
+            # ``va_arg(ap, T);`` at statement scope — advance the cursor
+            # (side effect) and discard the loaded value.
+            self.generate_expression(statement)
+            self.ax_clear()
+        elif isinstance(statement, VarDecl):
+            self.visible_vars.add(statement.name)
+            self.variable_types[statement.name] = statement.type_name
+            if statement.name in self.constant_aliases:
+                return
+            if statement.init is not None:
+                if isinstance(statement.init, StructInitializer):
+                    self._emit_struct_initializer(statement.name, statement.init)
+                elif statement.name in self.zero_init_skippable:
+                    self.zero_init_skippable.discard(statement.name)
+                else:
+                    self.emit_store_local(expression=statement.init, name=statement.name)
+        elif isinstance(statement, While):
+            self.ax_clear()
+            self.generate_while(statement)
         else:
             message = f"unknown statement: {type(statement).__name__}"
             raise CompileError(message, line=statement.line)
@@ -4076,3 +4071,8 @@ class EmissionMixin:
         # if (prev[0] != ' ') break;`` leaves AX = prev, not end).
         # Invalidate ax_local so downstream code reloads from memory.
         self.ax_clear()
+
+    def lower_ir_body(self, body: list[ir.Instruction]) -> None:
+        """Generate x86 assembly from a flat IR instruction list."""
+        for instruction in body:
+            self._lower_ir_instruction(instruction)
