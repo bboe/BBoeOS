@@ -2342,15 +2342,197 @@ class EmissionMixin:
         # Skip load if AX already holds this variable's value.
         if isinstance(expression, Var) and expression.name == self.ax_local:
             return
-        if isinstance(expression, Int):
+        if isinstance(expression, AddressOf):
+            name = expression.var.name
+            if name in self.out_register_locals:
+                message = f"cannot take address of out_register parameter '{name}'"
+                raise CompileError(message, line=expression.line)
+            addr = self._local_address(name)
+            if name in self.locals:
+                self.emit(f"        lea {self.target.acc}, [{addr}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, {addr}")
+            self.ax_local = None
+            self.ax_is_byte = False
+        elif isinstance(expression, AssignExpr):
+            self._generate_assign_expr(expression)
+        elif isinstance(expression, BinaryOperation):
+            self._generate_binary_operation_expression(expression)
+        elif isinstance(expression, Call):
+            self.generate_call(expression)
+        elif isinstance(expression, Cast):
+            # Identity codegen: evaluate the inner expression; the target type
+            # is tracked in the AST node but cc.py's loose type system treats
+            # all register-sized values uniformly so no truncation is emitted.
+            self.generate_expression(expression.expression)
+        elif isinstance(expression, Conditional):
+            self._generate_conditional(expression)
+        elif isinstance(expression, DerefIncrement):
+            # ``*p++`` / ``*p--`` (postfix) as an rvalue: load ``*p``
+            # (pre-update value) into the accumulator first, then bump
+            # ``p`` by sizeof(*p) bytes *without* touching the
+            # accumulator.  ``*++p`` / ``*--p`` (prefix) reverses the
+            # order — bump first, then load through the post-incremented
+            # pointer.  Both paths share :meth:`_emit_pointer_bump`,
+            # which operates directly on the pinned register / frame
+            # slot.  After a prefix bump :meth:`ax_clear` is invoked so
+            # the subsequent load reloads from the updated slot.
+            target = expression.target_name
+            self._check_defined(target, line=expression.line)
+            if expression.is_postfix:
+                self.generate_expression(
+                    Index(
+                        array=Var(line=expression.line, name=target),
+                        index=Int(line=expression.line, value=0),
+                        line=expression.line,
+                    )
+                )
+                self._emit_pointer_bump(delta=expression.delta, line=expression.line, name=target)
+            else:
+                self._emit_pointer_bump(delta=expression.delta, line=expression.line, name=target)
+                self.ax_clear()
+                self.generate_expression(
+                    Index(
+                        array=Var(line=expression.line, name=target),
+                        index=Int(line=expression.line, value=0),
+                        line=expression.line,
+                    )
+                )
+        elif isinstance(expression, DoubleIndex):
+            self._generate_double_index_expression(expression)
+        elif isinstance(expression, IncrementDecrement):
+            # Lower ``var ± 1`` through the normal Assign store path so
+            # register-pinned locals, byte locals, frame-slot locals,
+            # and globals all share one codegen surface.  The store's
+            # fast paths (``inc reg``, ``add [mem], 1``) skip the
+            # accumulator entirely, so we reload ``var`` afterwards to
+            # guarantee acc holds the post-update value — what prefix
+            # ``++var`` evaluates to.  Postfix ``var++`` wants the
+            # pre-update value: ``sub acc, delta`` recovers it.
+            target = expression.target_name
+            self._check_defined(target, line=expression.line)
+            delta_value = abs(expression.delta)
+            update_expression = BinaryOperation(
+                left=Var(line=expression.line, name=target),
+                line=expression.line,
+                operation="+" if expression.delta > 0 else "-",
+                right=Int(line=expression.line, value=delta_value),
+            )
+            self.emit_store_local(expression=update_expression, name=target)
+            self.generate_expression(Var(line=expression.line, name=target))
+            if expression.is_postfix:
+                reverse = "sub" if expression.delta > 0 else "add"
+                self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
+                self.ax_clear()
+        elif isinstance(expression, Index):
+            self._generate_index_expression(expression)
+        elif isinstance(expression, IndexMemberAccess):
+            self.generate_index_member_access(expression)
+        elif isinstance(expression, IndexMemberIndex):
+            self.generate_index_member_index(expression)
+        elif isinstance(expression, IndexedCall):
+            self.generate_indexed_call(expression)
+        elif isinstance(expression, Int):
             self.ax_clear()
             if expression.value == 0:
                 self.emit(f"        xor {self.target.acc}, {self.target.acc}")
             else:
                 self.emit(f"        mov {self.target.acc}, {expression.value}")
+        elif isinstance(expression, (LogicalAnd, LogicalOr)):
+            self._generate_logical_value(expression)
+        elif isinstance(expression, MemberAccess):
+            self.generate_member_access(expression)
+        elif isinstance(expression, MemberAddressOf):
+            self.generate_member_address_of(expression)
+        elif isinstance(expression, MemberIncrementDecrement):
+            # Same lowering shape as IncrementDecrement, but for
+            # struct-member lvalues: synthesize ``s->f = s->f ± 1`` and
+            # route through generate_member_assign, then reload the
+            # member into acc so the surrounding expression sees the
+            # post-update value.  Postfix recovers the pre-value with
+            # one ``sub`` / ``add``.
+            delta_value = abs(expression.delta)
+            base_access = MemberAccess(
+                arrow=expression.arrow,
+                line=expression.line,
+                member_name=expression.member_name,
+                object_name=expression.object_name,
+            )
+            update_expression = BinaryOperation(
+                left=base_access,
+                line=expression.line,
+                operation="+" if expression.delta > 0 else "-",
+                right=Int(line=expression.line, value=delta_value),
+            )
+            self.generate_member_assign(
+                MemberAssign(
+                    arrow=expression.arrow,
+                    expr=update_expression,
+                    line=expression.line,
+                    member_name=expression.member_name,
+                    object_name=expression.object_name,
+                )
+            )
+            self.generate_expression(
+                MemberAccess(
+                    arrow=expression.arrow,
+                    line=expression.line,
+                    member_name=expression.member_name,
+                    object_name=expression.object_name,
+                )
+            )
+            if expression.is_postfix:
+                reverse = "sub" if expression.delta > 0 else "add"
+                self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
+                self.ax_clear()
+        elif isinstance(expression, MemberIndex):
+            self.generate_member_index(expression)
+        elif isinstance(expression, PointerDereference):
+            self._emit_pointer_dereference(expression)
+        elif isinstance(expression, SizeofExpr):
+            self.ax_clear()
+            inferred_type = self._expression_type(expression.expression)
+            self.emit(f"        mov {self.target.acc}, {self._type_size(inferred_type)}")
+        elif isinstance(expression, SizeofType):
+            self.ax_clear()
+            self.emit(f"        mov {self.target.acc}, {self._type_size(expression.type_name)}")
+        elif isinstance(expression, SizeofVar):
+            self.ax_clear()
+            vname = expression.name
+            if vname in self.global_arrays:
+                declaration = self.global_arrays[vname]
+                stride = 1 if declaration.type_name in self.BYTE_TYPES else self.target.int_size
+                if declaration.init is not None:
+                    size = len(declaration.init.elements) * stride
+                    self.emit(f"        mov {self.target.acc}, {size}")
+                else:
+                    size_expression = self._constant_expression(declaration.size)
+                    self.emit(f"        mov {self.target.acc}, ({size_expression})*{stride}")
+            elif vname in self.local_stack_arrays:
+                size = self.local_stack_arrays[vname]
+                self.emit(f"        mov {self.target.acc}, {size}")
+            elif vname in self.array_sizes:
+                size = self.array_sizes[vname] * self.target.int_size  # word-sized elements
+                self.emit(f"        mov {self.target.acc}, {size}")
+            elif (
+                vname in self.variable_types
+                and self.variable_types[vname].startswith("struct ")
+                and not self.variable_types[vname].endswith("]")
+            ):
+                tag = self.variable_types[vname][7:]
+                size = self.struct_sizes[tag]
+                self.emit(f"        mov {self.target.acc}, {size}")
+            else:
+                size = self.target.int_size  # all non-array variables are word-sized
+                self.emit(f"        mov {self.target.acc}, {size}")
         elif isinstance(expression, String):
             self.ax_clear()
             self.emit(f"        mov {self.target.acc}, {self.new_string_label(expression.content)}")
+        elif isinstance(expression, VaArg):
+            self.builtin___builtin_va_arg(
+                [expression.cursor],
+                advance_size=self._va_arg_advance_size(expression.type_name),
+            )
         elif isinstance(expression, Var):
             vname = expression.name
             if vname in self.NAMED_CONSTANTS:
@@ -2423,188 +2605,6 @@ class EmissionMixin:
                 self.emit(f"        mov {self.target.acc}, [{self._local_address(vname)}]")
                 self.ax_is_byte = False
             self.ax_local = vname
-        elif isinstance(expression, Index):
-            self._generate_index_expression(expression)
-        elif isinstance(expression, DoubleIndex):
-            self._generate_double_index_expression(expression)
-        elif isinstance(expression, SizeofExpr):
-            self.ax_clear()
-            inferred_type = self._expression_type(expression.expression)
-            self.emit(f"        mov {self.target.acc}, {self._type_size(inferred_type)}")
-        elif isinstance(expression, SizeofType):
-            self.ax_clear()
-            self.emit(f"        mov {self.target.acc}, {self._type_size(expression.type_name)}")
-        elif isinstance(expression, SizeofVar):
-            self.ax_clear()
-            vname = expression.name
-            if vname in self.global_arrays:
-                declaration = self.global_arrays[vname]
-                stride = 1 if declaration.type_name in self.BYTE_TYPES else self.target.int_size
-                if declaration.init is not None:
-                    size = len(declaration.init.elements) * stride
-                    self.emit(f"        mov {self.target.acc}, {size}")
-                else:
-                    size_expression = self._constant_expression(declaration.size)
-                    self.emit(f"        mov {self.target.acc}, ({size_expression})*{stride}")
-            elif vname in self.local_stack_arrays:
-                size = self.local_stack_arrays[vname]
-                self.emit(f"        mov {self.target.acc}, {size}")
-            elif vname in self.array_sizes:
-                size = self.array_sizes[vname] * self.target.int_size  # word-sized elements
-                self.emit(f"        mov {self.target.acc}, {size}")
-            elif (
-                vname in self.variable_types
-                and self.variable_types[vname].startswith("struct ")
-                and not self.variable_types[vname].endswith("]")
-            ):
-                tag = self.variable_types[vname][7:]
-                size = self.struct_sizes[tag]
-                self.emit(f"        mov {self.target.acc}, {size}")
-            else:
-                size = self.target.int_size  # all non-array variables are word-sized
-                self.emit(f"        mov {self.target.acc}, {size}")
-        elif isinstance(expression, VaArg):
-            self.builtin___builtin_va_arg(
-                [expression.cursor],
-                advance_size=self._va_arg_advance_size(expression.type_name),
-            )
-        elif isinstance(expression, Call):
-            self.generate_call(expression)
-        elif isinstance(expression, IndexedCall):
-            self.generate_indexed_call(expression)
-        elif isinstance(expression, BinaryOperation):
-            self._generate_binary_operation_expression(expression)
-        elif isinstance(expression, AddressOf):
-            name = expression.var.name
-            if name in self.out_register_locals:
-                message = f"cannot take address of out_register parameter '{name}'"
-                raise CompileError(message, line=expression.line)
-            addr = self._local_address(name)
-            if name in self.locals:
-                self.emit(f"        lea {self.target.acc}, [{addr}]")
-            else:
-                self.emit(f"        mov {self.target.acc}, {addr}")
-            self.ax_local = None
-            self.ax_is_byte = False
-        elif isinstance(expression, MemberAccess):
-            self.generate_member_access(expression)
-        elif isinstance(expression, MemberAddressOf):
-            self.generate_member_address_of(expression)
-        elif isinstance(expression, MemberIndex):
-            self.generate_member_index(expression)
-        elif isinstance(expression, IndexMemberAccess):
-            self.generate_index_member_access(expression)
-        elif isinstance(expression, IndexMemberIndex):
-            self.generate_index_member_index(expression)
-        elif isinstance(expression, Conditional):
-            self._generate_conditional(expression)
-        elif isinstance(expression, (LogicalAnd, LogicalOr)):
-            self._generate_logical_value(expression)
-        elif isinstance(expression, Cast):
-            # Identity codegen: evaluate the inner expression; the target type
-            # is tracked in the AST node but cc.py's loose type system treats
-            # all register-sized values uniformly so no truncation is emitted.
-            self.generate_expression(expression.expression)
-        elif isinstance(expression, PointerDereference):
-            self._emit_pointer_dereference(expression)
-        elif isinstance(expression, IncrementDecrement):
-            # Lower ``var ± 1`` through the normal Assign store path so
-            # register-pinned locals, byte locals, frame-slot locals,
-            # and globals all share one codegen surface.  The store's
-            # fast paths (``inc reg``, ``add [mem], 1``) skip the
-            # accumulator entirely, so we reload ``var`` afterwards to
-            # guarantee acc holds the post-update value — what prefix
-            # ``++var`` evaluates to.  Postfix ``var++`` wants the
-            # pre-update value: ``sub acc, delta`` recovers it.
-            target = expression.target_name
-            self._check_defined(target, line=expression.line)
-            delta_value = abs(expression.delta)
-            update_expression = BinaryOperation(
-                left=Var(line=expression.line, name=target),
-                line=expression.line,
-                operation="+" if expression.delta > 0 else "-",
-                right=Int(line=expression.line, value=delta_value),
-            )
-            self.emit_store_local(expression=update_expression, name=target)
-            self.generate_expression(Var(line=expression.line, name=target))
-            if expression.is_postfix:
-                reverse = "sub" if expression.delta > 0 else "add"
-                self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
-                self.ax_clear()
-        elif isinstance(expression, DerefIncrement):
-            # ``*p++`` / ``*p--`` (postfix) as an rvalue: load ``*p``
-            # (pre-update value) into the accumulator first, then bump
-            # ``p`` by sizeof(*p) bytes *without* touching the
-            # accumulator.  ``*++p`` / ``*--p`` (prefix) reverses the
-            # order — bump first, then load through the post-incremented
-            # pointer.  Both paths share :meth:`_emit_pointer_bump`,
-            # which operates directly on the pinned register / frame
-            # slot.  After a prefix bump :meth:`ax_clear` is invoked so
-            # the subsequent load reloads from the updated slot.
-            target = expression.target_name
-            self._check_defined(target, line=expression.line)
-            if expression.is_postfix:
-                self.generate_expression(
-                    Index(
-                        array=Var(line=expression.line, name=target),
-                        index=Int(line=expression.line, value=0),
-                        line=expression.line,
-                    )
-                )
-                self._emit_pointer_bump(delta=expression.delta, line=expression.line, name=target)
-            else:
-                self._emit_pointer_bump(delta=expression.delta, line=expression.line, name=target)
-                self.ax_clear()
-                self.generate_expression(
-                    Index(
-                        array=Var(line=expression.line, name=target),
-                        index=Int(line=expression.line, value=0),
-                        line=expression.line,
-                    )
-                )
-        elif isinstance(expression, MemberIncrementDecrement):
-            # Same lowering shape as IncrementDecrement, but for
-            # struct-member lvalues: synthesize ``s->f = s->f ± 1`` and
-            # route through generate_member_assign, then reload the
-            # member into acc so the surrounding expression sees the
-            # post-update value.  Postfix recovers the pre-value with
-            # one ``sub`` / ``add``.
-            delta_value = abs(expression.delta)
-            base_access = MemberAccess(
-                arrow=expression.arrow,
-                line=expression.line,
-                member_name=expression.member_name,
-                object_name=expression.object_name,
-            )
-            update_expression = BinaryOperation(
-                left=base_access,
-                line=expression.line,
-                operation="+" if expression.delta > 0 else "-",
-                right=Int(line=expression.line, value=delta_value),
-            )
-            self.generate_member_assign(
-                MemberAssign(
-                    arrow=expression.arrow,
-                    expr=update_expression,
-                    line=expression.line,
-                    member_name=expression.member_name,
-                    object_name=expression.object_name,
-                )
-            )
-            self.generate_expression(
-                MemberAccess(
-                    arrow=expression.arrow,
-                    line=expression.line,
-                    member_name=expression.member_name,
-                    object_name=expression.object_name,
-                )
-            )
-            if expression.is_postfix:
-                reverse = "sub" if expression.delta > 0 else "add"
-                self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
-                self.ax_clear()
-        elif isinstance(expression, AssignExpr):
-            self._generate_assign_expr(expression)
         else:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
