@@ -361,6 +361,43 @@ class EmissionMixin:
             ):
                 function.regparm_count = min(3, len(function.params))
 
+    def _classify_switch_arms(self, statement: Switch, /) -> tuple[SwitchCase | None, list[SwitchCase]]:
+        """Split a switch's cases into ``(default_case, case_arms)`` and check enum exhaustiveness.
+
+        Raises :class:`CompileError` when the discriminant has an
+        ``enum NAME`` static type, no ``default`` arm is present, and one or
+        more declared variants are missing from the case labels.  Arbitrary
+        integer discriminants (calls returning int, arithmetic, etc.) are
+        treated as plain int and skip the check.
+        """
+        default_case: SwitchCase | None = None
+        case_arms: list[SwitchCase] = []
+        for case in statement.cases:
+            if case.value is None:
+                default_case = case
+            else:
+                case_arms.append(case)
+        enum_tag: str | None = None
+        if isinstance(statement.discriminant, Var):
+            discriminant_type = self.variable_types.get(statement.discriminant.name)
+            if discriminant_type is not None and discriminant_type.startswith("enum "):
+                enum_tag = discriminant_type[5:]
+        if enum_tag is not None and default_case is None:
+            line = statement.line
+            declaration = self.enum_decls.get(enum_tag)
+            if declaration is None:
+                message = f"switch on undeclared enum '{enum_tag}'"
+                raise CompileError(message, line=line)
+            covered_values = {case.value for case in case_arms}
+            missing = [variant_name for variant_name, value in declaration.variants if value not in covered_values]
+            if missing:
+                missing_list = ", ".join(f"'{name}'" for name in missing)
+                # Match the spec's headline wording exactly so users searching for
+                # the error in the codebase find this site.
+                message = f"switch on enum '{enum_tag}' missing case for {missing_list}"
+                raise CompileError(message, line=line)
+        return default_case, case_arms
+
     def _emit_function_pointer_call(
         self,
         *,
@@ -4019,37 +4056,7 @@ class EmissionMixin:
         switch site that forgot it, at compile time, which is the
         whole motivation for fusing the two features.
         """
-        line = statement.line
-        # Determine the discriminant's enum tag, if any, for the
-        # exhaustiveness check.  Only ``Var`` discriminants whose type
-        # was declared ``enum NAME`` qualify; arbitrary integer
-        # expressions (calls returning int, arithmetic, etc.) are
-        # treated as plain int — no check fires.
-        enum_tag: str | None = None
-        if isinstance(statement.discriminant, Var):
-            discriminant_type = self.variable_types.get(statement.discriminant.name)
-            if discriminant_type is not None and discriminant_type.startswith("enum "):
-                enum_tag = discriminant_type[5:]
-        default_case: SwitchCase | None = None
-        case_arms: list[SwitchCase] = []
-        for case in statement.cases:
-            if case.value is None:
-                default_case = case
-            else:
-                case_arms.append(case)
-        if enum_tag is not None and default_case is None:
-            declaration = self.enum_decls.get(enum_tag)
-            if declaration is None:
-                message = f"switch on undeclared enum '{enum_tag}'"
-                raise CompileError(message, line=line)
-            covered_values = {case.value for case in case_arms}
-            missing = [variant_name for variant_name, value in declaration.variants if value not in covered_values]
-            if missing:
-                missing_list = ", ".join(f"'{name}'" for name in missing)
-                # Match the spec's headline wording exactly so users searching for
-                # the error in the codebase find this site.
-                message = f"switch on enum '{enum_tag}' missing case for {missing_list}"
-                raise CompileError(message, line=line)
+        default_case, case_arms = self._classify_switch_arms(statement)
         # Build the compare/jump chain via the existing condition
         # machinery: each ``case CONST:`` is lowered as a synthetic
         # ``discriminant == CONST`` true-jump.  Going through
