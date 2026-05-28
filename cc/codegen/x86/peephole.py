@@ -993,6 +993,24 @@ class Peepholer:
             del self.lines[i : i + 2]
             i = max(1, i - 1)
 
+    def _parse_load_acc(self, line: str, /) -> tuple[str, bool] | None:
+        """Match ``mov acc, <source>`` where source is memory or a 16-bit GP register.
+
+        Returns ``(source, is_memory)`` on a match, ``None`` otherwise.
+        Shared by the two passes of :meth:`peephole_memory_arithmetic`
+        (and any future pass that wants to recognize the same load
+        prefix).
+        """
+        mov_acc_prefix = f"mov {self.target.acc}, "
+        if not line.startswith(mov_acc_prefix):
+            return None
+        source = line[len(mov_acc_prefix) :]
+        is_memory = source.startswith("[") and source.endswith("]")
+        is_register = source in self.target.non_acc_registers
+        if not (is_memory or is_register):
+            return None
+        return source, is_memory
+
     def peephole_memory_arithmetic(self) -> None:
         """Fuse load/modify/store sequences into direct arithmetic.
 
@@ -1005,8 +1023,6 @@ class Peepholer:
         - ``mov ax, D / mov cx, imm / (add|sub) ax, cx /
           mov D, ax`` → ``(add|sub) D, imm``
         """
-        registers = self.target.non_acc_registers
-        mov_acc_prefix = f"mov {self.target.acc}, "
         mov_cx_prefix = f"mov {self.target.count_register}, "
         add_acc_cx = f"add {self.target.acc}, {self.target.count_register}"
         sub_acc_cx = f"sub {self.target.acc}, {self.target.count_register}"
@@ -1016,15 +1032,11 @@ class Peepholer:
             b = self.lines[i + 1].strip()
             c = self.lines[i + 2].strip()
             d = self.lines[i + 3].strip()
-            if not a.startswith(mov_acc_prefix):
+            parsed = self._parse_load_acc(a)
+            if parsed is None:
                 i += 1
                 continue
-            source = a[len(mov_acc_prefix) :]
-            is_memory = source.startswith("[") and source.endswith("]")
-            is_register = source in registers
-            if not (is_memory or is_register):
-                i += 1
-                continue
+            source, is_memory = parsed
             if not (b.startswith(mov_cx_prefix) and not b.endswith("]")):
                 i += 1
                 continue
@@ -1057,15 +1069,11 @@ class Peepholer:
             a = self.lines[i].strip()
             b = self.lines[i + 1].strip()
             c = self.lines[i + 2].strip()
-            if not a.startswith(mov_acc_prefix):
+            parsed = self._parse_load_acc(a)
+            if parsed is None:
                 i += 1
                 continue
-            source = a[len(mov_acc_prefix) :]
-            is_memory = source.startswith("[") and source.endswith("]")
-            is_register = source in registers
-            if not (is_memory or is_register):
-                i += 1
-                continue
+            source, is_memory = parsed
             operator = None
             operand = None
             if b == f"inc {self.target.acc}":
@@ -1113,13 +1121,12 @@ class Peepholer:
             a = self.lines[i].strip()
             b = self.lines[i + 1].strip()
             c = self.lines[i + 2].strip()
-            if not a.startswith(mov_acc_prefix):
+            parsed = self._parse_load_acc(a)
+            if parsed is None or not parsed[1]:
+                # Memory-only pass: skip register-source matches.
                 i += 1
                 continue
-            source = a[len(mov_acc_prefix) :]
-            if not (source.startswith("[") and source.endswith("]")):
-                i += 1
-                continue
+            source = parsed[0]
             operator = None
             rhs = None
             for operation in ("add", "sub", "and", "or", "xor"):
