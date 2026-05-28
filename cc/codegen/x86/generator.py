@@ -1932,7 +1932,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if not (base_type.startswith("struct ") and base_type.endswith("*")):
                 message = f"'->' requires a struct-pointer cast, got '{base_type}'"
                 raise CompileError(message, line=expression.line)
-            tag = base_type[7:-1].rstrip()
+            tag = base_type[7:-1]
         else:
             if not base_type.startswith("struct ") or base_type.endswith("*"):
                 message = f"'.' requires a struct value, got type '{base_type}'"
@@ -2015,7 +2015,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if not base_type.endswith("*") or not base_type.startswith("struct "):
                 message = f"'->' requires a pointer to struct, got type '{base_type}'"
                 raise CompileError(message, line=statement.line)
-            tag = base_type[7:-1].rstrip()
+            tag = base_type[7:-1]
         else:
             if not base_type.startswith("struct ") or base_type.endswith("*"):
                 message = f"'.' requires a struct value, got type '{base_type}'"
