@@ -962,6 +962,160 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         operand = f"byte [{si}+{offset}]" if offset else f"byte [{si}]"
         return (operand, guarded)
 
+    def _emit_comparison_against_constant(self, *, is_zero: bool, left: Node, literal: str) -> None:
+        """Emit a comparison whose right operand reduced to a constant immediate.
+
+        Four fast paths layered ahead of the generic
+        ``generate_expression`` + ``cmp/test ax, imm`` fallback:
+
+        * pinned-register ``left`` — ``cmp R, imm`` / ``test R, R`` in place.
+        * memory-backed scalar ``left`` — ``cmp [L], imm`` skips the
+          ``mov ax, [L]`` load (``byte`` width for byte-scalars).
+        * byte-indexed ``left`` — ``cmp byte [bx+N], imm`` skips the
+          AL load + zero-extend.
+        * everything else — load into AX, then ``cmp ax, imm`` /
+          ``test ax, ax``.
+        """
+        if isinstance(left, Var) and left.name in self.pinned_register:
+            register = self.pinned_register[left.name]
+            if is_zero:
+                self.emit(f"        test {register}, {register}")
+            else:
+                self.emit(f"        cmp {register}, {literal}")
+            return
+        # Memory-backed local compared to a constant: fuse into a
+        # direct ``cmp word [L], imm`` (or ``cmp byte [L], imm`` for
+        # byte-scalar locals / globals whose storage is a single
+        # ``db`` cell) so we skip the ``mov ax, [L]`` load.  Safe
+        # because the flags are consumed by the next conditional
+        # jump and AX's prior value was not promised.
+        if (
+            isinstance(left, Var)
+            and self._is_memory_scalar(left.name)
+            and left.name not in self.variable_arrays
+            and left.name != self.ax_local
+            and self.variable_types.get(left.name) != "unsigned long"
+        ):
+            address = self._local_address(left.name)
+            width = "byte" if self._is_byte_scalar(left.name) else self.target.word_size
+            if is_zero:
+                self.emit(f"        cmp {width} [{address}], 0")
+            else:
+                self.emit(f"        cmp {width} [{address}], {literal}")
+            return
+        # Byte-indexed variable compared to a constant: fuse into
+        # ``cmp byte [bx+N], imm`` so we skip the load-into-AL and
+        # the zero-extend into AX.
+        if self._is_byte_index(left):
+            operand, guarded = self._emit_byte_index_si(left)
+            if is_zero:
+                self.emit(f"        cmp {operand}, 0")
+            else:
+                self.emit(f"        cmp {operand}, {literal}")
+            self._si_scratch_guard_end(guarded=guarded)
+            return
+        self.generate_expression(left)
+        if is_zero:
+            self.emit("        test al, al" if self.ax_is_byte else f"        test {self.target.acc}, {self.target.acc}")
+        else:
+            register = "al" if self.ax_is_byte else self.target.acc
+            self.emit(f"        cmp {register}, {literal}")
+
+    def _emit_comparison_general(self, *, left: Node, right: Node) -> None:
+        """Emit a comparison whose right operand isn't a constant immediate.
+
+        Three fast paths, then the generic CX-scratch fallback:
+
+        * two byte-indexed vars — ``mov al, [bx+N]`` then ``cmp al,
+          [bx+M]`` (avoid the zero-extend + push/pop roundtrip).
+        * pinned-register right operand — compare AX against it
+          directly (no CX load).  Requires a leaf ``left`` when the
+          pin happens to live in CX.
+        * memory-backed right operand — ``cmp ax, [mem]`` skips the
+          CX load entirely.  Byte-scalar memory bails to the generic
+          path (word-sized ``cmp`` would read an adjacent byte).
+        * generic — :meth:`emit_binary_operator_operands` (AX = left,
+          CX = right), then ``cmp ax, cx``.  Saves CX around the
+          ``emit_binary_operator_operands`` clobber when a pinned
+          variable lives there.
+        """
+        # Two byte-indexed variables: load left byte into AL, then
+        # compare directly against the right byte in memory.  Saves
+        # the zero-extend, push/pop, and CX round-trip.
+        if self._is_byte_index(left) and self._is_byte_index(right):
+            left_operand, left_guarded = self._emit_byte_index_si(left)
+            left_mem = left_operand.removeprefix("byte ")
+            self.emit(f"        mov al, {left_mem}")
+            self._si_scratch_guard_end(guarded=left_guarded)
+            right_operand, right_guarded = self._emit_byte_index_si(right)
+            right_mem = right_operand.removeprefix("byte ")
+            self.emit(f"        cmp al, {right_mem}")
+            self._si_scratch_guard_end(guarded=right_guarded)
+            return
+        # Fast path: right is a pinned register variable.  Compare
+        # AX against it directly, skipping the CX load and any
+        # push/pop protection.  When the pinned register is CX we
+        # additionally require ``left`` to be a leaf expression so
+        # generate_expression can't clobber CX mid-compare.
+        if isinstance(right, Var) and right.name in self.pinned_register:
+            source = self.pinned_register[right.name]
+            if source != self.target.count_register or isinstance(left, (Int, Var, String)):
+                left_pinned = isinstance(left, Var) and left.name in self.pinned_register
+                self.generate_expression(left)
+                # Use matching-width operands for cmp: if source is
+                # narrower than acc (e.g., bp vs eax), compare ax/source.
+                cmp_acc = self.target.low_word(self.target.acc) if len(source) < len(self.target.acc) else self.target.acc
+                self.emit(f"        cmp {cmp_acc}, {source}")
+                # ``peephole_compare_through_register`` deletes the
+                # ``mov ax, <pin>`` emitted by ``generate_expression``
+                # above when a conditional jump follows the cmp.
+                # Without this clear, downstream reads of ``left``
+                # would skip their own load (``ax_local ==
+                # left.name``) and pick up whatever AX actually held
+                # — the peephole-deleted source register, not the
+                # pinned local.  Mirrors the memory-backed sibling.
+                if left_pinned:
+                    self.ax_clear()
+                return
+        # Fast path: right is a memory-backed local.  ``cmp ax, [mem]``
+        # skips the CX load entirely.  Byte-scalar locals / globals
+        # bail out — their storage is a single byte and a word-sized
+        # ``cmp ax, [mem]`` would read the adjacent byte into the
+        # high comparison byte.
+        if (
+            isinstance(right, Var)
+            and self._is_memory_scalar(right.name)
+            and right.name not in self.pinned_register
+            and right.name not in self.variable_arrays
+            and self.variable_types.get(right.name) != "unsigned long"
+            and not self._is_byte_scalar(right.name)
+        ):
+            # Invalidate ax_local when ``left`` is pinned — the
+            # ``mov ax, reg`` that generate_expression emits here
+            # will be removed by ``peephole_compare_through_register``
+            # once the caller emits a conditional jump after the
+            # cmp, leaving AX without the loaded value.  Without
+            # this clear, downstream reads of ``left`` would skip
+            # their own load (ax_local == left.name) and pick up
+            # whatever AX held from an unrelated earlier expression.
+            left_pinned = isinstance(left, Var) and left.name in self.pinned_register
+            self.generate_expression(left)
+            self.emit(f"        cmp {self.target.acc}, [{self._local_address(right.name)}]")
+            if left_pinned:
+                self.ax_clear()
+            return
+        # emit_binary_operator_operands clobbers CX; save it when a
+        # pinned variable lives there (push/pop don't modify flags,
+        # so the cmp's flags survive the restore for the caller's
+        # conditional jump).
+        count_pinned = any(register == self.target.count_register for register in self.pinned_register.values())
+        if count_pinned:
+            self.emit(f"        push {self.target.count_register}")
+        self.emit_binary_operator_operands(left, right)
+        self.emit(f"        cmp {self.target.acc}, {self.target.count_register}")
+        if count_pinned:
+            self.emit(f"        pop {self.target.count_register}")
+
     def _emit_constant_base_index_addr(
         self,
         *,
@@ -3626,127 +3780,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             literal = right.name
             is_zero = right.name == "NULL"
         if literal is not None:
-            if isinstance(left, Var) and left.name in self.pinned_register:
-                register = self.pinned_register[left.name]
-                if is_zero:
-                    self.emit(f"        test {register}, {register}")
-                else:
-                    self.emit(f"        cmp {register}, {literal}")
-                return
-            # Memory-backed local compared to a constant: fuse into a
-            # direct ``cmp word [L], imm`` (or ``cmp byte [L], imm`` for
-            # byte-scalar locals / globals whose storage is a single
-            # ``db`` cell) so we skip the ``mov ax, [L]`` load.  Safe
-            # because the flags are consumed by the next conditional
-            # jump and AX's prior value was not promised.
-            if (
-                isinstance(left, Var)
-                and self._is_memory_scalar(left.name)
-                and left.name not in self.variable_arrays
-                and left.name != self.ax_local
-                and self.variable_types.get(left.name) != "unsigned long"
-            ):
-                address = self._local_address(left.name)
-                width = "byte" if self._is_byte_scalar(left.name) else self.target.word_size
-                if is_zero:
-                    self.emit(f"        cmp {width} [{address}], 0")
-                else:
-                    self.emit(f"        cmp {width} [{address}], {literal}")
-                return
-            # Byte-indexed variable compared to a constant: fuse into
-            # ``cmp byte [bx+N], imm`` so we skip the load-into-AL and
-            # the zero-extend into AX.
-            if self._is_byte_index(left):
-                operand, guarded = self._emit_byte_index_si(left)
-                if is_zero:
-                    self.emit(f"        cmp {operand}, 0")
-                else:
-                    self.emit(f"        cmp {operand}, {literal}")
-                self._si_scratch_guard_end(guarded=guarded)
-                return
-            self.generate_expression(left)
-            if is_zero:
-                self.emit("        test al, al" if self.ax_is_byte else f"        test {self.target.acc}, {self.target.acc}")
-            else:
-                register = "al" if self.ax_is_byte else self.target.acc
-                self.emit(f"        cmp {register}, {literal}")
+            self._emit_comparison_against_constant(left=left, literal=literal, is_zero=is_zero)
         else:
-            # Two byte-indexed variables: load left byte into AL, then
-            # compare directly against the right byte in memory.  Saves
-            # the zero-extend, push/pop, and CX round-trip.
-            if self._is_byte_index(left) and self._is_byte_index(right):
-                left_operand, left_guarded = self._emit_byte_index_si(left)
-                left_mem = left_operand.removeprefix("byte ")
-                self.emit(f"        mov al, {left_mem}")
-                self._si_scratch_guard_end(guarded=left_guarded)
-                right_operand, right_guarded = self._emit_byte_index_si(right)
-                right_mem = right_operand.removeprefix("byte ")
-                self.emit(f"        cmp al, {right_mem}")
-                self._si_scratch_guard_end(guarded=right_guarded)
-                return
-            # Fast path: right is a pinned register variable.  Compare
-            # AX against it directly, skipping the CX load and any
-            # push/pop protection.  When the pinned register is CX we
-            # additionally require ``left`` to be a leaf expression so
-            # generate_expression can't clobber CX mid-compare.
-            if isinstance(right, Var) and right.name in self.pinned_register:
-                source = self.pinned_register[right.name]
-                if source != self.target.count_register or isinstance(left, (Int, Var, String)):
-                    left_pinned = isinstance(left, Var) and left.name in self.pinned_register
-                    self.generate_expression(left)
-                    # Use matching-width operands for cmp: if source is
-                    # narrower than acc (e.g., bp vs eax), compare ax/source.
-                    cmp_acc = self.target.low_word(self.target.acc) if len(source) < len(self.target.acc) else self.target.acc
-                    self.emit(f"        cmp {cmp_acc}, {source}")
-                    # ``peephole_compare_through_register`` deletes the
-                    # ``mov ax, <pin>`` emitted by ``generate_expression``
-                    # above when a conditional jump follows the cmp.
-                    # Without this clear, downstream reads of ``left``
-                    # would skip their own load (``ax_local ==
-                    # left.name``) and pick up whatever AX actually held
-                    # — the peephole-deleted source register, not the
-                    # pinned local.  Mirrors the memory-backed sibling.
-                    if left_pinned:
-                        self.ax_clear()
-                    return
-            # Fast path: right is a memory-backed local.  ``cmp ax, [mem]``
-            # skips the CX load entirely.  Byte-scalar locals / globals
-            # bail out — their storage is a single byte and a word-sized
-            # ``cmp ax, [mem]`` would read the adjacent byte into the
-            # high comparison byte.
-            if (
-                isinstance(right, Var)
-                and self._is_memory_scalar(right.name)
-                and right.name not in self.pinned_register
-                and right.name not in self.variable_arrays
-                and self.variable_types.get(right.name) != "unsigned long"
-                and not self._is_byte_scalar(right.name)
-            ):
-                # Invalidate ax_local when ``left`` is pinned — the
-                # ``mov ax, reg`` that generate_expression emits here
-                # will be removed by ``peephole_compare_through_register``
-                # once the caller emits a conditional jump after the
-                # cmp, leaving AX without the loaded value.  Without
-                # this clear, downstream reads of ``left`` would skip
-                # their own load (ax_local == left.name) and pick up
-                # whatever AX held from an unrelated earlier expression.
-                left_pinned = isinstance(left, Var) and left.name in self.pinned_register
-                self.generate_expression(left)
-                self.emit(f"        cmp {self.target.acc}, [{self._local_address(right.name)}]")
-                if left_pinned:
-                    self.ax_clear()
-                return
-            # emit_binary_operator_operands clobbers CX; save it when a
-            # pinned variable lives there (push/pop don't modify flags,
-            # so the cmp's flags survive the restore for the caller's
-            # conditional jump).
-            count_pinned = any(register == self.target.count_register for register in self.pinned_register.values())
-            if count_pinned:
-                self.emit(f"        push {self.target.count_register}")
-            self.emit_binary_operator_operands(left, right)
-            self.emit(f"        cmp {self.target.acc}, {self.target.count_register}")
-            if count_pinned:
-                self.emit(f"        pop {self.target.count_register}")
+            self._emit_comparison_general(left=left, right=right)
 
     def emit_condition(self, *, condition: Node, context: str) -> tuple[str, bool]:
         """Validate a condition, emit a comparison, and return ``(operator, unsigned)``.
