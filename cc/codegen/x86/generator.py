@@ -1157,6 +1157,23 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self.emit(f"        mov {self.target.acc}, {addr}")
 
+    def _emit_field_store(self, *, addr: str, field_size: int) -> None:
+        """Emit the struct-field store instruction matching *field_size*.
+
+        Mirror of :meth:`_emit_field_load`.  Byte fields use ``mov byte
+        [addr], al``; word fields on a 32-bit target use ``mov word
+        [addr], ax``; all other widths store the full accumulator.  The
+        source register is the width-matched accumulator slice, so
+        callers only need to evaluate the rhs into the accumulator
+        before calling.
+        """
+        if field_size == 1:
+            self.emit(f"        mov byte {addr}, al")
+        elif field_size == 2 and self.target.int_size == 4:
+            self.emit(f"        mov word {addr}, ax")
+        else:
+            self.emit(f"        mov {addr}, {self.target.acc}")
+
     def _emit_global_array(self, name: str, /) -> None:
         """Lay down storage for one file-scope array global.
 
@@ -2024,12 +2041,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.ax_clear()
         self.generate_expression(statement.expr)
         addr = f"[{self.target.bx_register}+{offset}]" if offset else f"[{self.target.bx_register}]"
-        if field_size == 1:
-            self.emit(f"        mov byte {addr}, al")
-        elif field_size == 2 and self.target.int_size == 4:
-            self.emit(f"        mov word {addr}, ax")
-        else:
-            self.emit(f"        mov {addr}, {self.target.acc}")
+        self._emit_field_store(addr=addr, field_size=field_size)
 
     def _has_remainder(self, left: Node, right: Node, /) -> bool:
         """Check if DX already holds left % right.
@@ -4233,12 +4245,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.emit(f"        pop {acc}")  # AX = value
         self.ax_clear()
         addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
-        if field_size == 1:
-            self.emit(f"        mov byte {addr}, al")
-        elif field_size == 2 and self.target.int_size == 4:
-            self.emit(f"        mov word {addr}, ax")
-        else:
-            self.emit(f"        mov {addr}, {acc}")
+        self._emit_field_store(addr=addr, field_size=field_size)
         if protect_bx:
             self.emit(f"        pop {bx}")  # restore pinned var
 
@@ -4562,12 +4569,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 raise CompileError(message, line=statement.line)
             self.ax_clear()
             self.generate_expression(statement.expr)
-            if field_size == 1:
-                self.emit(f"        mov byte {addr}, al")
-            elif field_size == 2 and self.target.int_size == 4:
-                self.emit(f"        mov word {addr}, ax")
-            else:
-                self.emit(f"        mov {addr}, {self.target.acc}")
+            self._emit_field_store(addr=addr, field_size=field_size)
             return
         info = self._resolve_member_index_layout(
             arrow=True,
@@ -4617,12 +4619,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self._emit_load_var(object_name, register=self.target.bx_register)
             base_reg = self.target.bx_register
         addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
-        if field_size == 1:
-            self.emit(f"        mov byte {addr}, al")
-        elif field_size == 2 and self.target.int_size == 4:
-            self.emit(f"        mov word {addr}, ax")
-        else:
-            self.emit(f"        mov {addr}, {self.target.acc}")
+        self._emit_field_store(addr=addr, field_size=field_size)
 
     def generate_member_index(self, expression: MemberIndex, /) -> None:
         """Generate code for ``ptr->field[index]`` or ``obj.field[index]``.
