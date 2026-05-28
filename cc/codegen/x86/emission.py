@@ -444,6 +444,64 @@ class EmissionMixin:
                     self.emit(f"        mov {register}, [{self.target.base_register}+{offset}]")
                 caller_push_index += 1
 
+    def _emit_main_exit_tail(self) -> None:
+        """Emit ``main``'s implicit-exit tail and any elided-frame local BSS cells.
+
+        Called from :meth:`generate_function` at the bottom of ``main``.
+        Sets the exit code to 0 (an explicit ``return N;`` earlier in the
+        body has already loaded the accumulator and jumped, so reaching
+        here means control fell off without a return), jumps to
+        ``FUNCTION_EXIT`` in libbboeos, and — when the frame is elided —
+        lays down each local's storage cell.
+
+        In flat mode the cells are emitted inline at the tail of the
+        function (zeros sit in ``.text`` under ``org 08048000h`` and the
+        program loader skips them).  In object mode they're collected
+        into ``self.elided_local_bss_vars`` and laid down later in
+        ``section .bss`` via ``resb`` reservations, so ``.text`` stays
+        code-only and the linker can pack ``.text`` from multiple
+        objects without dragging zero pads between them.
+        """
+        self.emit(f"        xor {self.target.acc}, {self.target.acc}")
+        self._emit_libbboeos_jmp("FUNCTION_EXIT")
+        if not self.elide_frame:
+            return
+        # Plain int / pointer locals get the target's native integer
+        # width (``dw`` / ``dd``); ``unsigned long`` always stays 4
+        # bytes (``dd``) regardless of mode; byte-scalar locals always
+        # stay 1 byte (``db``); local stack arrays reserve their full
+        # byte count.
+        int_directive = "dd 0" if self.target.int_size == 4 else "dw 0"
+        for vname in sorted(self.locals):
+            if vname in self.local_stack_arrays:
+                byte_count = self.local_stack_arrays[vname]
+                if self.object_mode:
+                    self.elided_local_bss_vars.append((vname, str(byte_count)))
+                else:
+                    self.emit(f"_l_{vname}: times {byte_count} db 0")
+            elif self.variable_types.get(vname) == "unsigned long":
+                if self.object_mode:
+                    self.elided_local_bss_vars.append((vname, "4"))
+                else:
+                    self.emit(f"_l_{vname}: dd 0")
+            elif vname in self.byte_scalar_locals:
+                if self.object_mode:
+                    self.elided_local_bss_vars.append((vname, "1"))
+                else:
+                    self.emit(f"_l_{vname}: db 0")
+            elif self.variable_types.get(vname, "").startswith("struct ") and not self.variable_types[vname].endswith("*"):
+                type_name = self.variable_types[vname]
+                tag = type_name[7:]
+                struct_byte_count = self.struct_sizes[tag]
+                if self.object_mode:
+                    self.elided_local_bss_vars.append((vname, str(struct_byte_count)))
+                else:
+                    self.emit(f"_l_{vname}: times {struct_byte_count} db 0")
+            elif self.object_mode:
+                self.elided_local_bss_vars.append((vname, str(self.target.int_size)))
+            else:
+                self.emit(f"_l_{vname}: {int_directive}")
+
     def _emit_pointer_bump(self, *, delta: int, line: int, name: str) -> None:
         """Advance pointer variable ``name`` by ``delta * sizeof(*name)`` bytes in place.
 
@@ -3183,59 +3241,7 @@ class EmissionMixin:
                 raise CompileError(message, line=ref_line)
 
         if name == "main":
-            # Implicit fall-off end of main: default the exit code to 0
-            # so chained shells (`cmd && next`) behave as expected.
-            # An explicit `return N;` earlier in the body has already
-            # set EAX via generate_return; reaching this point means
-            # control fell off without one, hence the zero default.
-            self.emit(f"        xor {self.target.acc}, {self.target.acc}")
-            self._emit_libbboeos_jmp("FUNCTION_EXIT")
-            if self.elide_frame:
-                # Plain int / pointer locals get the target's native
-                # integer width (``dw`` / ``dd``); ``unsigned long``
-                # always stays 4 bytes (``dd``) regardless of mode;
-                # byte-scalar locals always stay 1 byte (``db``);
-                # local stack arrays reserve their full byte count.
-                #
-                # In flat mode these cells are emitted inline at the
-                # tail of the function (zeros sit in .text under
-                # ``org 08048000h`` and the program loader skips them).
-                # In object mode they instead get collected into
-                # ``self.elided_local_bss_vars`` and laid down later in
-                # ``section .bss`` via ``resb`` reservations, so the
-                # .text section stays code-only and the linker can
-                # pack .text from multiple objects without dragging
-                # zero pads between them.
-                int_directive = "dd 0" if self.target.int_size == 4 else "dw 0"
-                for vname in sorted(self.locals):
-                    if vname in self.local_stack_arrays:
-                        byte_count = self.local_stack_arrays[vname]
-                        if self.object_mode:
-                            self.elided_local_bss_vars.append((vname, str(byte_count)))
-                        else:
-                            self.emit(f"_l_{vname}: times {byte_count} db 0")
-                    elif self.variable_types.get(vname) == "unsigned long":
-                        if self.object_mode:
-                            self.elided_local_bss_vars.append((vname, "4"))
-                        else:
-                            self.emit(f"_l_{vname}: dd 0")
-                    elif vname in self.byte_scalar_locals:
-                        if self.object_mode:
-                            self.elided_local_bss_vars.append((vname, "1"))
-                        else:
-                            self.emit(f"_l_{vname}: db 0")
-                    elif self.variable_types.get(vname, "").startswith("struct ") and not self.variable_types[vname].endswith("*"):
-                        type_name = self.variable_types[vname]
-                        tag = type_name[7:]
-                        struct_byte_count = self.struct_sizes[tag]
-                        if self.object_mode:
-                            self.elided_local_bss_vars.append((vname, str(struct_byte_count)))
-                        else:
-                            self.emit(f"_l_{vname}: times {struct_byte_count} db 0")
-                    elif self.object_mode:
-                        self.elided_local_bss_vars.append((vname, str(self.target.int_size)))
-                    else:
-                        self.emit(f"_l_{vname}: {int_directive}")
+            self._emit_main_exit_tail()
         elif ir_body is not None:
             # IR path: generate epilogue unless the body always exits.
             # Tail-call optimization is not yet applied on the IR path.
