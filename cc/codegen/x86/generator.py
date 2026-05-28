@@ -2123,67 +2123,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.NAMED_CONSTANT_VALUES[variant_name] = variant_value
                 continue
             if isinstance(declaration, StructDecl):
-                # Build a packed field layout: {field_name: FieldInfo}.
-                #
-                # Regular fields (bit_width is None): field_size from
-                # _type_size; array fields get field_size = element_size *
-                # count, element_size = per-element width.
-                #
-                # Bitfields (bit_width 1..8 from the parser): consecutive
-                # bitfields pack into a single byte run.  bit_offset tracks
-                # the next free bit within the current run; LSB-first.  An
-                # anonymous bitfield (field_name is None) advances run_bits
-                # but isn't entered in ``layout`` since it has no name to
-                # look up.  A regular field after a bitfield run closes the
-                # run (advances cursor by 1) before its own byte_offset is
-                # computed.
-                layout: dict[str, FieldInfo] = {}
-                cursor = 0
-                run_bits = 0  # bits already consumed in the current bitfield run
-                for field in declaration.fields:
-                    if field.bit_width is not None:
-                        if run_bits + field.bit_width > 8:
-                            message = f"bitfield run exceeds 8 bits in struct '{declaration.name}' at line {field.line}"
-                            raise CompileError(message, line=field.line)
-                        if field.field_name is not None:
-                            layout[field.field_name] = FieldInfo(
-                                bit_offset=run_bits,
-                                bit_width=field.bit_width,
-                                byte_offset=cursor,
-                                element_size=1,
-                                field_size=1,
-                                type_name="unsigned char",
-                            )
-                        run_bits += field.bit_width
-                        continue
-                    # Regular field: close any open bitfield run first.
-                    if run_bits > 0:
-                        cursor += 1
-                        run_bits = 0
-                    ftype = field.type_name
-                    if "[" in ftype:
-                        # "char[15]" → element_type="char", count=15
-                        bracket = ftype.index("[")
-                        element_type = ftype[:bracket]
-                        count = int(ftype[bracket + 1 : -1])
-                        element_size = self._type_size(element_type)
-                        field_size = element_size * count
-                    else:
-                        field_size = self._type_size(ftype)
-                        element_size = field_size
-                    layout[field.field_name] = FieldInfo(
-                        bit_offset=None,
-                        bit_width=None,
-                        byte_offset=cursor,
-                        element_size=element_size,
-                        field_size=field_size,
-                        type_name=ftype,
-                    )
-                    cursor += field_size
-                if run_bits > 0:
-                    cursor += 1
-                self.struct_layouts[declaration.name] = layout
-                self.struct_sizes[declaration.name] = cursor
+                self._register_struct_layout(declaration)
                 continue
             name = declaration.name
             if name in self.NAMED_CONSTANTS:
@@ -2299,6 +2239,75 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"always_inline function '{function.name}' asm() body must be a string literal"
             raise CompileError(message, line=function.line)
         self.inline_bodies[function.name] = asm_arg.content
+
+    def _register_struct_layout(self, declaration: StructDecl, /) -> None:
+        """Compute and record a struct's packed field layout and total byte size.
+
+        Extracted from :meth:`_register_globals` for the StructDecl
+        branch.  Builds a ``{field_name: FieldInfo}`` map stored in
+        :attr:`struct_layouts` and the total byte count in
+        :attr:`struct_sizes`.
+
+        Regular fields (``bit_width is None``) take their ``field_size``
+        from ``_type_size``; array fields get
+        ``field_size = element_size * count`` and
+        ``element_size = per-element width``.
+
+        Bitfields (``bit_width`` 1..8 from the parser) pack consecutive
+        bits LSB-first into a single byte run; ``bit_offset`` tracks
+        the next free bit within the current run.  Anonymous bitfields
+        (``field_name is None``) advance ``run_bits`` but don't enter
+        the layout map.  A regular field after a bitfield run closes
+        the run (advances cursor by 1) before its own ``byte_offset``
+        is computed.
+        """
+        layout: dict[str, FieldInfo] = {}
+        cursor = 0
+        run_bits = 0  # bits already consumed in the current bitfield run
+        for field in declaration.fields:
+            if field.bit_width is not None:
+                if run_bits + field.bit_width > 8:
+                    message = f"bitfield run exceeds 8 bits in struct '{declaration.name}' at line {field.line}"
+                    raise CompileError(message, line=field.line)
+                if field.field_name is not None:
+                    layout[field.field_name] = FieldInfo(
+                        bit_offset=run_bits,
+                        bit_width=field.bit_width,
+                        byte_offset=cursor,
+                        element_size=1,
+                        field_size=1,
+                        type_name="unsigned char",
+                    )
+                run_bits += field.bit_width
+                continue
+            # Regular field: close any open bitfield run first.
+            if run_bits > 0:
+                cursor += 1
+                run_bits = 0
+            ftype = field.type_name
+            if "[" in ftype:
+                # "char[15]" → element_type="char", count=15
+                bracket = ftype.index("[")
+                element_type = ftype[:bracket]
+                count = int(ftype[bracket + 1 : -1])
+                element_size = self._type_size(element_type)
+                field_size = element_size * count
+            else:
+                field_size = self._type_size(ftype)
+                element_size = field_size
+            layout[field.field_name] = FieldInfo(
+                bit_offset=None,
+                bit_width=None,
+                byte_offset=cursor,
+                element_size=element_size,
+                field_size=field_size,
+                type_name=ftype,
+            )
+            cursor += field_size
+        if run_bits > 0:
+            cursor += 1
+        self.struct_layouts[declaration.name] = layout
+        self.struct_sizes[declaration.name] = cursor
 
     def _resolve_index_member_layout(self, name: str, member_name: str, line: int, /) -> tuple[str, int, int, int, int]:
         """Return layout tuple for a struct array member access.
