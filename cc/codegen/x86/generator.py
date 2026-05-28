@@ -2703,6 +2703,23 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             raise CompileError(message, line=line)
         return layout[member_name]
 
+    def _resolve_struct_value_base(self, name: str, /, *, line: int) -> str:
+        """Return the memory operand naming the base of struct-value *name*.
+
+        Used by the dot path of :meth:`generate_member_access` and
+        :meth:`generate_member_assign` to resolve ``obj`` in ``obj.field``
+        to either ``_g_<name>`` (file-scope struct global) or
+        ``ebp-<frame_offset>`` (local struct value).  Raises
+        :class:`CompileError` for undefined names.
+        """
+        if name in self.global_scalars:
+            return self._local_address(name)
+        if name in self.locals:
+            frame_offset = self.locals[name]
+            return f"ebp-{frame_offset}"
+        message = f"undefined variable '{name}'"
+        raise CompileError(message, line=line)
+
     def _select_auto_pin_candidates(self, *, body: list[Node], parameters: list, apply_liveness_elision: bool = True) -> dict[str, str]:
         """Choose locals/parameters to auto-pin and match them to registers.
 
@@ -4342,14 +4359,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if struct_type.endswith("*") or not struct_type.startswith("struct "):
                 message = f"'.' requires a struct value, got type '{struct_type}'"
                 raise CompileError(message, line=expression.line)
-            if object_name in self.global_scalars:
-                base_operand = self._local_address(object_name)
-            elif object_name in self.locals:
-                frame_offset = self.locals[object_name]
-                base_operand = f"ebp-{frame_offset}"
-            else:
-                message = f"undefined variable '{object_name}'"
-                raise CompileError(message, line=expression.line)
+            base_operand = self._resolve_struct_value_base(object_name, line=expression.line)
             tag = struct_type[7:]
             layout = self.struct_layouts.get(tag)
             if layout is None:
@@ -4520,14 +4530,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if struct_type.endswith("*") or not struct_type.startswith("struct "):
                 message = f"'.' requires a struct value, got type '{struct_type}'"
                 raise CompileError(message, line=statement.line)
-            if object_name in self.global_scalars:
-                base_operand = self._local_address(object_name)
-            elif object_name in self.locals:
-                frame_offset = self.locals[object_name]
-                base_operand = f"ebp-{frame_offset}"
-            else:
-                message = f"undefined variable '{object_name}'"
-                raise CompileError(message, line=statement.line)
+            base_operand = self._resolve_struct_value_base(object_name, line=statement.line)
             tag = struct_type[7:]
             layout = self.struct_layouts.get(tag)
             if layout is None:
