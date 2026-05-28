@@ -2378,6 +2378,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 initialized.add(self.pinned_register[name])
         return initialized
 
+    @staticmethod
+    def _rank_candidates(items: list[tuple[str, int]], /, *, counts: dict[str, int]) -> list[tuple[str, int]]:
+        """Sort *items* by descending ref count then ascending declaration order.
+
+        The auto-pin allocator ranks each candidate class (body locals
+        first, parameters second) by ``counts`` so the top entry gets
+        the cheapest register; ties break by declaration order so the
+        result is deterministic across runs.
+        """
+        return sorted(items, key=lambda item: (-counts.get(item[0], 0), item[1]))
+
     def _register_globals(self, declarations: list[Node], /) -> None:
         """Record file-scope declarations and validate their shapes.
 
@@ -2973,10 +2984,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for statement in body:
             pre_store_visit(statement)
 
-        def rank(items: list[tuple[str, int]]) -> list[tuple[str, int]]:
-            return sorted(items, key=lambda item: (-counts.get(item[0], 0), item[1]))
-
-        combined = rank(body_candidates) + rank(param_candidates)
+        combined = self._rank_candidates(body_candidates, counts=counts) + self._rank_candidates(param_candidates, counts=counts)
         # Drop expression-temporary vars: pinning them adds a 2-byte
         # ``mov pin, ax`` after their single complex-expression
         # initializer without shrinking the comparisons that follow
