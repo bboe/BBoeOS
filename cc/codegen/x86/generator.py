@@ -2121,6 +2121,31 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         message = f"no address for '{name}' (not a local or global scalar)"
         raise CompileError(message)
 
+    @staticmethod
+    def _loop_assigned_names(statements: list[Node], /) -> set[str]:
+        """Return the set of names assigned anywhere within *statements*.
+
+        Pre-merge stores from loop bodies into the written set before
+        walking the body, mirroring the liveness pre-pass's loop-pre-
+        merge (a store inside a loop is live on every iteration
+        including the first, so calls BEFORE that store inside the body
+        still see a live pin).
+        """
+        found: set[str] = set()
+        for statement in statements:
+            if isinstance(statement, Assign) or (isinstance(statement, VarDecl) and statement.init is not None):
+                found.add(statement.name)
+            elif isinstance(statement, If):
+                found |= X86CodeGenerator._loop_assigned_names(statement.body)
+                if statement.else_body is not None:
+                    found |= X86CodeGenerator._loop_assigned_names(statement.else_body)
+            elif isinstance(statement, (Compound, DoWhile, While)):
+                found |= X86CodeGenerator._loop_assigned_names(statement.body)
+            elif isinstance(statement, Switch):
+                for case in statement.cases:
+                    found |= X86CodeGenerator._loop_assigned_names(case.body)
+        return found
+
     def _maybe_emit_data_header(self) -> None:
         """Emit the ``section .data`` (or flat-mode comment) header at most once per call to :meth:`_emit_global_storage`."""
         if self._data_header_emitted:
@@ -2886,33 +2911,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         pre_store_clobbers: dict[str, dict[str, int]] = {name: {} for name in candidate_names}
         written: dict[str, bool] = dict.fromkeys(candidate_names, False)
 
-        def loop_writes(stmts: list[Node]) -> set[str]:
-            """Return the set of candidate names assigned anywhere within *stmts*.
-
-            Pre-merge stores from loop bodies into the written set
-            before walking the body, mirroring the liveness pre-pass's
-            loop-pre-merge (a store inside a loop is live on every
-            iteration including the first, so calls BEFORE that store
-            inside the body still see a live pin).
-            """
-            found: set[str] = set()
-            for statement in stmts:
-                if isinstance(statement, Assign) or (isinstance(statement, VarDecl) and statement.init is not None):
-                    found.add(statement.name)
-                elif isinstance(statement, (Compound, DoWhile, While)):
-                    found |= loop_writes(statement.body)
-                elif isinstance(statement, If):
-                    found |= loop_writes(statement.body)
-                    if statement.else_body is not None:
-                        found |= loop_writes(statement.else_body)
-                elif isinstance(statement, Switch):
-                    for case in statement.cases:
-                        found |= loop_writes(case.body)
-            return found
-
         def pre_store_visit(node: Node) -> None:
             if isinstance(node, (DoWhile, While)):
-                for name in loop_writes(node.body):
+                for name in self._loop_assigned_names(node.body):
                     if name in candidate_names:
                         written[name] = True
                 for body_statement in node.body:
