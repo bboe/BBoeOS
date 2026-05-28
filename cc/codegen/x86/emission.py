@@ -1625,6 +1625,118 @@ class EmissionMixin:
         # is never used.
         return any(self._node_contains_var(stmt, param_name) for stmt in body)
 
+    @staticmethod
+    def _substitute_extended_asm_template(
+        text: str,
+        /,
+        *,
+        name_to_index: dict[str, int],
+        operand_byte_locations: list[str],
+        operand_locations: list[str],
+    ) -> str:
+        """Substitute ``%%``/``%N``/``%[name]``/``%bN``/``%b[name]`` in a template string.
+
+        Pulled out of :meth:`generate_extended_asm` (was a 74-line nested
+        closure) so the operand-resolution algorithm can be read and
+        modified independently of the surrounding parsing / register-
+        spill orchestration.
+
+        Args:
+            text: the template string from the ``asm("...")`` first
+                operand.
+            name_to_index: maps a symbolic operand name (the
+                ``[symname]`` form in the operand list) to its index
+                in ``operand_locations`` / ``operand_byte_locations``.
+            operand_locations: full-width register/memory operand for
+                each declared output / input (outputs first, then
+                inputs).
+            operand_byte_locations: byte-register alias for the same
+                operands; used for ``%b...`` substitutions.
+
+        Recognised forms:
+            ``%%``       → literal ``%``
+            ``%N``       → positional full-width substitution
+            ``%[name]``  → named full-width substitution
+            ``%bN``      → positional byte-alias substitution
+            ``%b[name]`` → named byte-alias substitution
+        Any unrecognised ``%`` sequence is passed through verbatim so
+        the underlying assembler can flag it.
+
+        """
+        result_parts: list[str] = []
+        position = 0
+        length = len(text)
+        while position < length:
+            character = text[position]
+            if character != "%":
+                result_parts.append(character)
+                position += 1
+                continue
+            # We are at a '%' — look ahead.
+            position += 1
+            if position >= length:
+                result_parts.append("%")
+                break
+            next_character = text[position]
+            if next_character == "%":
+                # %% -> literal %
+                result_parts.append("%")
+                position += 1
+            elif next_character == "b":
+                # Possible %b[name] or %bN (byte sub-register form).
+                position += 1
+                if position < length and text[position] == "[":
+                    # %b[name] form
+                    close_bracket = text.find("]", position + 1)
+                    if close_bracket == -1:
+                        result_parts.append("%b[")
+                        position += 1
+                    else:
+                        operand_name = text[position + 1 : close_bracket]
+                        position = close_bracket + 1
+                        operand_index = name_to_index.get(operand_name)
+                        if operand_index is not None and operand_index < len(operand_byte_locations):
+                            result_parts.append(operand_byte_locations[operand_index])
+                        else:
+                            result_parts.append(f"%b[{operand_name}]")
+                elif position < length and text[position].isdigit():
+                    # %bN form
+                    operand_index = int(text[position])
+                    position += 1
+                    if operand_index < len(operand_byte_locations):
+                        result_parts.append(operand_byte_locations[operand_index])
+                    else:
+                        result_parts.append(f"%b{operand_index}")
+                else:
+                    result_parts.append("%b")
+            elif next_character == "[":
+                # %[name] form
+                close_bracket = text.find("]", position + 1)
+                if close_bracket == -1:
+                    result_parts.append("%[")
+                    position += 1
+                else:
+                    operand_name = text[position + 1 : close_bracket]
+                    position = close_bracket + 1
+                    operand_index = name_to_index.get(operand_name)
+                    if operand_index is not None and operand_index < len(operand_locations):
+                        result_parts.append(operand_locations[operand_index])
+                    else:
+                        result_parts.append(f"%[{operand_name}]")
+            elif next_character.isdigit():
+                # %N positional form
+                operand_index = int(next_character)
+                position += 1
+                if operand_index < len(operand_locations):
+                    result_parts.append(operand_locations[operand_index])
+                else:
+                    result_parts.append(f"%{operand_index}")
+            else:
+                # Not a recognized escape — emit literally.
+                result_parts.append("%")
+                # Do not advance past next_character; it will be processed next iteration.
+        return "".join(result_parts)
+
     def _try_emit_conditional_via_cond_value(self, *, condition: Node, expression: Conditional) -> bool:
         """Elide the then-branch when it duplicates the comparison's left operand.
 
@@ -2650,82 +2762,6 @@ class EmissionMixin:
             name = _unwrap_var_name(expression)
             return _operand_location_for_var(name)
 
-        def _substitute_template(text: str) -> str:
-            """Substitute %%/%%N/%[name]/%bN/%N with resolved operand locations."""
-            result_parts: list[str] = []
-            position = 0
-            length = len(text)
-            while position < length:
-                character = text[position]
-                if character != "%":
-                    result_parts.append(character)
-                    position += 1
-                    continue
-                # We are at a '%' — look ahead.
-                position += 1
-                if position >= length:
-                    result_parts.append("%")
-                    break
-                next_character = text[position]
-                if next_character == "%":
-                    # %% -> literal %
-                    result_parts.append("%")
-                    position += 1
-                elif next_character == "b":
-                    # Possible %b[name] or %bN (byte sub-register form).
-                    position += 1
-                    if position < length and text[position] == "[":
-                        # %b[name] form
-                        close_bracket = text.find("]", position + 1)
-                        if close_bracket == -1:
-                            result_parts.append("%b[")
-                            position += 1
-                        else:
-                            operand_name = text[position + 1 : close_bracket]
-                            position = close_bracket + 1
-                            operand_index = name_to_index.get(operand_name)
-                            if operand_index is not None and operand_index < len(operand_byte_locations):
-                                result_parts.append(operand_byte_locations[operand_index])
-                            else:
-                                result_parts.append(f"%b[{operand_name}]")
-                    elif position < length and text[position].isdigit():
-                        # %bN form
-                        operand_index = int(text[position])
-                        position += 1
-                        if operand_index < len(operand_byte_locations):
-                            result_parts.append(operand_byte_locations[operand_index])
-                        else:
-                            result_parts.append(f"%b{operand_index}")
-                    else:
-                        result_parts.append("%b")
-                elif next_character == "[":
-                    # %[name] form
-                    close_bracket = text.find("]", position + 1)
-                    if close_bracket == -1:
-                        result_parts.append("%[")
-                        position += 1
-                    else:
-                        operand_name = text[position + 1 : close_bracket]
-                        position = close_bracket + 1
-                        operand_index = name_to_index.get(operand_name)
-                        if operand_index is not None and operand_index < len(operand_locations):
-                            result_parts.append(operand_locations[operand_index])
-                        else:
-                            result_parts.append(f"%[{operand_name}]")
-                elif next_character.isdigit():
-                    # %N positional form
-                    operand_index = int(next_character)
-                    position += 1
-                    if operand_index < len(operand_locations):
-                        result_parts.append(operand_locations[operand_index])
-                    else:
-                        result_parts.append(f"%{operand_index}")
-                else:
-                    # Not a recognized escape — emit literally.
-                    result_parts.append("%")
-                    # Do not advance past next_character; it will be processed next iteration.
-            return "".join(result_parts)
-
         def _unwrap_var_name(expression: Node) -> str:
             """Return the variable name from a Var or Cast(Var) node."""
             if isinstance(expression, Cast):
@@ -2849,7 +2885,12 @@ class EmissionMixin:
 
         # --- Phase 3: substitute template and emit ---
         template_text = decode_string_escapes(statement.template)
-        substituted = _substitute_template(template_text)
+        substituted = EmissionMixin._substitute_extended_asm_template(
+            template_text,
+            name_to_index=name_to_index,
+            operand_byte_locations=operand_byte_locations,
+            operand_locations=operand_locations,
+        )
         # GCC inline asm uses AT&T x87 register syntax (%st(N));
         # convert to NASM's stN form.
         substituted = re.sub(r"%st\((\d)\)", r"st\1", substituted)
