@@ -32,6 +32,49 @@ class BuiltinsMixin:
     memory/locals state initialized by ``CodeGeneratorBase.__init__``.
     """
 
+    def _emit_kernel_out(self, arguments: list[Node], /, *, is_word: bool, name: str) -> None:
+        """Lower ``kernel_outb(port, value)`` / ``kernel_outw(port, value)``.
+
+        Shared by :meth:`builtin_kernel_outb` and :meth:`builtin_kernel_outw`
+        — the two builtins differ only by the I/O operand width (``al`` vs
+        ``ax``), the mask applied to a constant value (``0xFF`` vs
+        ``0xFFFF``), and the load register for that constant (``al`` vs
+        the full accumulator).  Kernel-only — userland callers raise.
+
+        Constant ``value`` skips the push/pop guard around the port
+        evaluation (the value is already in ``al`` / ``ax`` once the port
+        is computed); a constant ``port`` lets the value evaluate
+        first and the port literal land via ``mov dx, imm`` afterwards;
+        the general case saves the value across the port evaluation
+        with the standard push/pop guard.
+        """
+        if self.target_mode != "kernel":
+            message = f"{name}() is kernel-only; not available in --target user"
+            raise CompileError(message)
+        self._check_argument_count(arguments=arguments, expected=2, name=name)
+        port_arg, value_arg = arguments
+        if is_word:
+            value_mask = 0xFFFF
+            constant_load_register = self.target.acc
+            io_operand = "ax"
+        else:
+            value_mask = 0xFF
+            constant_load_register = "al"
+            io_operand = "al"
+        if isinstance(value_arg, Int):
+            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
+            self.emit(f"        mov {constant_load_register}, {value_arg.value & value_mask}")
+        elif isinstance(port_arg, Int):
+            self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
+            self.emit(f"        mov {self.target.dx_register}, {port_arg.value & 0xFFFF}")
+        else:
+            self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
+            self.emit(f"        push {self.target.acc}")
+            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
+            self.emit(f"        pop {self.target.acc}")
+        self.emit(f"        out dx, {io_operand}")
+        self.ax_clear()
+
     def _va_list_destination(self, cursor: Node, *, builtin_name: str) -> tuple[str | None, str | None]:
         """Resolve ``ap`` to either a CPU register or a frame address.
 
@@ -655,24 +698,7 @@ class BuiltinsMixin:
         :meth:`builtin_far_write8` uses.  Kernel-only (see
         :meth:`builtin_kernel_inb` for the rationale).
         """
-        if self.target_mode != "kernel":
-            message = "kernel_outb() is kernel-only; not available in --target user"
-            raise CompileError(message)
-        self._check_argument_count(arguments=arguments, expected=2, name="kernel_outb")
-        port_arg, value_arg = arguments
-        if isinstance(value_arg, Int):
-            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
-            self.emit(f"        mov al, {value_arg.value & 0xFF}")
-        elif isinstance(port_arg, Int):
-            self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
-            self.emit(f"        mov {self.target.dx_register}, {port_arg.value & 0xFFFF}")
-        else:
-            self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
-            self.emit(f"        push {self.target.acc}")
-            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
-            self.emit(f"        pop {self.target.acc}")
-        self.emit("        out dx, al")
-        self.ax_clear()
+        self._emit_kernel_out(arguments, is_word=False, name="kernel_outb")
 
     def builtin_kernel_outsw(self, arguments: list[Node], /) -> None:
         """Generate code for kernel_outsw(port, buffer, count).
@@ -704,24 +730,7 @@ class BuiltinsMixin:
         (same rationale as :meth:`builtin_kernel_outb`).  General
         case keeps the save-around-eval guard.  Kernel-only.
         """
-        if self.target_mode != "kernel":
-            message = "kernel_outw() is kernel-only; not available in --target user"
-            raise CompileError(message)
-        self._check_argument_count(arguments=arguments, expected=2, name="kernel_outw")
-        port_arg, value_arg = arguments
-        if isinstance(value_arg, Int):
-            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
-            self.emit(f"        mov {self.target.acc}, {value_arg.value & 0xFFFF}")
-        elif isinstance(port_arg, Int):
-            self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
-            self.emit(f"        mov {self.target.dx_register}, {port_arg.value & 0xFFFF}")
-        else:
-            self.emit_register_from_argument(argument=value_arg, register=self.target.acc)
-            self.emit(f"        push {self.target.acc}")
-            self.emit_register_from_argument(argument=port_arg, register=self.target.dx_register)
-            self.emit(f"        pop {self.target.acc}")
-        self.emit("        out dx, ax")
-        self.ax_clear()
+        self._emit_kernel_out(arguments, is_word=True, name="kernel_outw")
 
     def builtin_mac(
         self,
