@@ -1034,6 +1034,90 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         addr += f"+{base_register}"
         return addr
 
+    def _emit_global_array(self, name: str, /) -> None:
+        """Lay down storage for one file-scope array global.
+
+        Skips extern arrays.  Zero-initialized arrays are deferred to
+        ``self.bss_vars``.  Initialized struct arrays unroll each
+        element's fields and pad to the declared size; primitive-typed
+        arrays use one ``db`` / ``dw`` / ``dd`` directive carrying every
+        element.
+        """
+        declaration = self.global_arrays[name]
+        if name in self.extern_globals:
+            # Storage lives in another translation unit; references
+            # to the bare ``_g_<name>`` label still resolve.
+            return
+        is_byte = declaration.type_name in self.BYTE_TYPES
+        is_struct = declaration.type_name.startswith("struct ")
+        # Stride is sizeof(element) for every shape: structs sum
+        # field widths, ``char`` / ``unsigned char`` resolve to 1,
+        # ``unsigned short`` to 2, pointer / ``int`` / ``unsigned int`` to
+        # ``int_size``.  Unifies what used to be a binary
+        # byte-vs-int_size switch that silently miscompiled
+        # ``unsigned short`` globals.
+        stride = self._type_size(declaration.type_name)
+        if is_struct and declaration.init is not None:
+            struct_name = declaration.type_name[len("struct ") :]
+            layout = self.struct_layouts[struct_name]
+            lines: list[str] = []
+            for element in declaration.init.elements:
+                assert isinstance(element, StructInitializer)
+                assert element.positional is not None, "array-of-struct globals require positional initializers"
+                for i, (field_name, info) in enumerate(layout.items()):
+                    field_size = info.field_size
+                    value = self._constant_expression(element.positional[i]) if i < len(element.positional) else "0"
+                    if field_size == 1:
+                        lines.append(f"db {value}")
+                    elif field_size == 2:
+                        lines.append(f"dw {value}")
+                    elif field_size == 4:
+                        lines.append(f"dd {value}")
+                    else:
+                        lines.append(f"times {field_size} db 0")
+            count = len(declaration.init.elements)
+            size_expression = self._constant_expression(declaration.size)
+            lines.append(f"times ({size_expression}-{count})*{stride} db 0")
+            self._maybe_emit_data_header()
+            self._emit_global_export(name)
+            self.emit(f"{self._global_label(name)}: {lines[0]}")
+            for line in lines[1:]:
+                self.emit(f"        {line}")
+            return
+        if declaration.init is not None:
+            # Match the data-cell width to the element width:
+            # ``db`` for byte, ``dw`` for halfword (``unsigned short``),
+            # ``dd`` / ``dw`` for full-int (``int_directive``).
+            int_directive = "dd" if self.target.int_size == 4 else "dw"
+            if is_byte:
+                directive = "db"
+            elif stride == 2 and stride < self.target.int_size:
+                directive = "dw"
+            else:
+                directive = int_directive
+            rendered = [
+                self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
+                for element in declaration.init.elements
+            ]
+            self._maybe_emit_data_header()
+            self._emit_global_export(name)
+            self.emit(f"{self._global_label(name)}: {directive} {', '.join(rendered)}")
+            return
+        size_expression = self._constant_expression(declaration.size)
+        # Fold ``size * stride`` at compile time when the size is a
+        # plain integer — the self-hosted assembler in user/programs/asm.c
+        # uses flat operator precedence, so emitting ``(N)*4`` next
+        # to surrounding ``+`` / ``-`` (as the BSS chain does) makes
+        # the self-host group ``(N) * (4 - <next_term>)`` instead of
+        # ``(N)*4`` first.  Pre-folding to a literal sidesteps that.
+        if stride == 1:
+            byte_count = size_expression
+        elif size_expression is not None and size_expression.isdigit():
+            byte_count = str(int(size_expression) * stride)
+        else:
+            byte_count = f"({size_expression})*{stride}"
+        self.bss_vars.append((name, byte_count))
+
     def _emit_global_export(self, name: str, /) -> None:
         """Emit the per-definition export directive matching the active mode.
 
@@ -1062,6 +1146,80 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self.emit(f"{name} equ _g_{name}")
 
+    def _emit_global_scalar(self, name: str, /) -> None:
+        """Lay down storage for one file-scope scalar global.
+
+        Skips register-aliased / asm-symbol / extern names (their
+        storage lives elsewhere).  Zero-initialized scalars are
+        appended to ``self.bss_vars``; struct initializers are unrolled
+        into per-field directives; everything else takes one ``db`` /
+        ``dw`` / ``dd`` cell.
+        """
+        declaration = self.global_scalars[name]
+        if name in self.register_aliased_globals:
+            # Storage lives in the aliased CPU register, not memory,
+            # so no ``_g_<name>`` label is emitted.
+            return
+        if name in self.asm_symbol_globals:
+            # Storage lives in an existing asm symbol, not here,
+            # so no ``_g_<name>`` label is emitted.
+            return
+        if name in self.extern_globals:
+            # Storage lives in another translation unit; references
+            # still resolve to ``_g_<name>`` (matching the symbol the
+            # owning .c file emits).
+            return
+        if declaration.init is None:
+            if declaration.type_name.startswith("struct ") and not declaration.type_name.endswith("*"):
+                stride = self.struct_sizes[declaration.type_name[len("struct ") :]]
+            elif self._is_byte_scalar_global(name):
+                stride = 1
+            else:
+                # Use _type_size so double (8 bytes), unsigned short (2 bytes),
+                # etc. get the correct allocation rather than always
+                # falling back to int_size (4 bytes on x86-32).
+                try:
+                    stride = self._type_size(declaration.type_name)
+                except CompileError:
+                    stride = self.target.int_size
+            self.bss_vars.append((name, str(stride)))
+            return
+        if isinstance(declaration.init, StructInitializer):
+            tag = declaration.type_name[len("struct ") :]
+            layout = self.struct_layouts[tag]
+            init = declaration.init
+            if init.designated is not None:
+                value_by_field = init.designated
+            else:
+                assert init.positional is not None
+                field_order = list(layout.keys())
+                value_by_field = dict(zip(field_order, init.positional, strict=False))
+            directives = []
+            for field_name, info in layout.items():
+                field_size = info.field_size
+                value_node = value_by_field.get(field_name)
+                value = self._constant_expression(value_node) if value_node is not None else "0"
+                if field_size == 1:
+                    directives.append(f"db {value}")
+                elif field_size == 2:
+                    directives.append(f"dw {value}")
+                elif field_size == 4:
+                    directives.append(f"dd {value}")
+                else:
+                    directives.append(f"times {field_size} db 0")
+            self._maybe_emit_data_header()
+            self._emit_global_export(name)
+            self.emit(f"{self._global_label(name)}: {directives[0]}")
+            for directive in directives[1:]:
+                self.emit(f"        {directive}")
+            return
+        init_expression = self._constant_expression(declaration.init)
+        int_directive = "dd" if self.target.int_size == 4 else "dw"
+        directive = "db" if self._is_byte_scalar_global(name) else int_directive
+        self._maybe_emit_data_header()
+        self._emit_global_export(name)
+        self.emit(f"{self._global_label(name)}: {directive} {init_expression}")
+
     def _emit_global_storage(self) -> None:
         """Emit ``_g_<name>`` data cells for every initialized global, once at tail.
 
@@ -1080,166 +1238,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """
         if not self.global_scalars and not self.global_arrays:
             return
-        int_directive = "dd" if self.target.int_size == 4 else "dw"
         # In object mode the initialized-globals chunk belongs in
         # ``section .data`` so the linker can place writable data
         # independently of code.  The switch + comment are emitted
-        # once, lazily, on the first initialized cell we actually
-        # write below — purely zero-init globals end up in
-        # ``self.bss_vars`` and never need ``.data``.  ``data_header_emitted``
-        # tracks whether we've written the header yet within this call.
-        # In flat mode the header is emitted eagerly up front, matching
-        # the long-standing layout.
-        data_header_emitted = False
-
-        def _emit_data_header() -> None:
-            nonlocal data_header_emitted
-            if data_header_emitted:
-                return
-            if self.object_mode:
-                self.emit()
-                self.emit("section .data")
-            self.emit(";; --- global data ---")
-            data_header_emitted = True
-
+        # once, lazily, on the first initialized cell — purely
+        # zero-init globals end up in ``self.bss_vars`` and never
+        # need ``.data``.  ``_data_header_emitted`` tracks whether
+        # we've written the header yet within this call.  In flat
+        # mode the header is emitted eagerly up front, matching the
+        # long-standing layout.
+        self._data_header_emitted = False
         if not self.object_mode:
-            _emit_data_header()
+            self._maybe_emit_data_header()
         for name in sorted(self.global_scalars):
-            declaration = self.global_scalars[name]
-            if name in self.register_aliased_globals:
-                # Storage lives in the aliased CPU register, not memory,
-                # so no ``_g_<name>`` label is emitted.
-                continue
-            if name in self.asm_symbol_globals:
-                # Storage lives in an existing asm symbol, not here,
-                # so no ``_g_<name>`` label is emitted.
-                continue
-            if name in self.extern_globals:
-                # Storage lives in another translation unit; references
-                # still resolve to ``_g_<name>`` (matching the symbol the
-                # owning .c file emits).
-                continue
-            if declaration.init is None:
-                if declaration.type_name.startswith("struct ") and not declaration.type_name.endswith("*"):
-                    stride = self.struct_sizes[declaration.type_name[len("struct ") :]]
-                elif self._is_byte_scalar_global(name):
-                    stride = 1
-                else:
-                    # Use _type_size so double (8 bytes), unsigned short (2 bytes),
-                    # etc. get the correct allocation rather than always
-                    # falling back to int_size (4 bytes on x86-32).
-                    try:
-                        stride = self._type_size(declaration.type_name)
-                    except CompileError:
-                        stride = self.target.int_size
-                self.bss_vars.append((name, str(stride)))
-            elif isinstance(declaration.init, StructInitializer):
-                tag = declaration.type_name[len("struct ") :]
-                layout = self.struct_layouts[tag]
-                init = declaration.init
-                if init.designated is not None:
-                    value_by_field = init.designated
-                else:
-                    assert init.positional is not None
-                    field_order = list(layout.keys())
-                    value_by_field = dict(zip(field_order, init.positional, strict=False))
-                directives = []
-                for field_name, info in layout.items():
-                    field_size = info.field_size
-                    value_node = value_by_field.get(field_name)
-                    value = self._constant_expression(value_node) if value_node is not None else "0"
-                    if field_size == 1:
-                        directives.append(f"db {value}")
-                    elif field_size == 2:
-                        directives.append(f"dw {value}")
-                    elif field_size == 4:
-                        directives.append(f"dd {value}")
-                    else:
-                        directives.append(f"times {field_size} db 0")
-                _emit_data_header()
-                self._emit_global_export(name)
-                self.emit(f"{self._global_label(name)}: {directives[0]}")
-                for directive in directives[1:]:
-                    self.emit(f"        {directive}")
-            else:
-                init_expression = self._constant_expression(declaration.init)
-                directive = "db" if self._is_byte_scalar_global(name) else int_directive
-                _emit_data_header()
-                self._emit_global_export(name)
-                self.emit(f"{self._global_label(name)}: {directive} {init_expression}")
+            self._emit_global_scalar(name)
         for name in sorted(self.global_arrays):
-            declaration = self.global_arrays[name]
-            if name in self.extern_globals:
-                # Storage lives in another translation unit; references
-                # to the bare ``_g_<name>`` label still resolve.
-                continue
-            is_byte = declaration.type_name in self.BYTE_TYPES
-            is_struct = declaration.type_name.startswith("struct ")
-            # Stride is sizeof(element) for every shape: structs sum
-            # field widths, ``char`` / ``unsigned char`` resolve to 1,
-            # ``unsigned short`` to 2, pointer / ``int`` / ``unsigned int`` to
-            # ``int_size``.  Unifies what used to be a binary
-            # byte-vs-int_size switch that silently miscompiled
-            # ``unsigned short`` globals.
-            stride = self._type_size(declaration.type_name)
-            if is_struct and declaration.init is not None:
-                struct_name = declaration.type_name[len("struct ") :]
-                layout = self.struct_layouts[struct_name]
-                lines: list[str] = []
-                for element in declaration.init.elements:
-                    assert isinstance(element, StructInitializer)
-                    assert element.positional is not None, "array-of-struct globals require positional initializers"
-                    for i, (field_name, info) in enumerate(layout.items()):
-                        field_size = info.field_size
-                        value = self._constant_expression(element.positional[i]) if i < len(element.positional) else "0"
-                        if field_size == 1:
-                            lines.append(f"db {value}")
-                        elif field_size == 2:
-                            lines.append(f"dw {value}")
-                        elif field_size == 4:
-                            lines.append(f"dd {value}")
-                        else:
-                            lines.append(f"times {field_size} db 0")
-                count = len(declaration.init.elements)
-                size_expression = self._constant_expression(declaration.size)
-                lines.append(f"times ({size_expression}-{count})*{stride} db 0")
-                _emit_data_header()
-                self._emit_global_export(name)
-                self.emit(f"{self._global_label(name)}: {lines[0]}")
-                for line in lines[1:]:
-                    self.emit(f"        {line}")
-            elif declaration.init is not None:
-                # Match the data-cell width to the element width:
-                # ``db`` for byte, ``dw`` for halfword (``unsigned short``),
-                # ``dd`` / ``dw`` for full-int (``int_directive``).
-                if is_byte:
-                    directive = "db"
-                elif stride == 2 and stride < self.target.int_size:
-                    directive = "dw"
-                else:
-                    directive = int_directive
-                rendered = [
-                    self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
-                    for element in declaration.init.elements
-                ]
-                _emit_data_header()
-                self._emit_global_export(name)
-                self.emit(f"{self._global_label(name)}: {directive} {', '.join(rendered)}")
-            else:
-                size_expression = self._constant_expression(declaration.size)
-                # Fold ``size * stride`` at compile time when the size is a
-                # plain integer — the self-hosted assembler in user/programs/asm.c
-                # uses flat operator precedence, so emitting ``(N)*4`` next
-                # to surrounding ``+`` / ``-`` (as the BSS chain does) makes
-                # the self-host group ``(N) * (4 - <next_term>)`` instead of
-                # ``(N)*4`` first.  Pre-folding to a literal sidesteps that.
-                if stride == 1:
-                    byte_count = size_expression
-                elif size_expression is not None and size_expression.isdigit():
-                    byte_count = str(int(size_expression) * stride)
-                else:
-                    byte_count = f"({size_expression})*{stride}"
-                self.bss_vars.append((name, byte_count))
+            self._emit_global_array(name)
 
     def _emit_inline_body(self, name: str, /) -> None:
         """Emit the stored body for an ``always_inline`` function.
@@ -1912,6 +1926,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return self._global_label(name)
         message = f"no address for '{name}' (not a local or global scalar)"
         raise CompileError(message)
+
+    def _maybe_emit_data_header(self) -> None:
+        """Emit the ``section .data`` (or flat-mode comment) header at most once per call to :meth:`_emit_global_storage`."""
+        if self._data_header_emitted:
+            return
+        if self.object_mode:
+            self.emit()
+            self.emit("section .data")
+        self.emit(";; --- global data ---")
+        self._data_header_emitted = True
 
     def _member_index_element_size(self, info: FieldInfo, /) -> tuple[int, bool]:
         """Return ``(element_size, is_pointer_field)`` for an indexed field access.
