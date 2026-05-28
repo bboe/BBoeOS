@@ -1157,6 +1157,23 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self.emit(f"        mov {self.target.acc}, {addr}")
 
+    def _emit_field_store(self, *, addr: str, field_size: int) -> None:
+        """Emit the struct-field store instruction matching *field_size*.
+
+        Mirror of :meth:`_emit_field_load`.  Byte fields use ``mov byte
+        [addr], al``; word fields on a 32-bit target use ``mov word
+        [addr], ax``; all other widths store the full accumulator.  The
+        source register is the width-matched accumulator slice, so
+        callers only need to evaluate the rhs into the accumulator
+        before calling.
+        """
+        if field_size == 1:
+            self.emit(f"        mov byte {addr}, al")
+        elif field_size == 2 and self.target.int_size == 4:
+            self.emit(f"        mov word {addr}, ax")
+        else:
+            self.emit(f"        mov {addr}, {self.target.acc}")
+
     def _emit_global_array(self, name: str, /) -> None:
         """Lay down storage for one file-scope array global.
 
@@ -1915,7 +1932,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if not (base_type.startswith("struct ") and base_type.endswith("*")):
                 message = f"'->' requires a struct-pointer cast, got '{base_type}'"
                 raise CompileError(message, line=expression.line)
-            tag = base_type[7:-1].rstrip()
+            tag = base_type[7:-1]
         else:
             if not base_type.startswith("struct ") or base_type.endswith("*"):
                 message = f"'.' requires a struct value, got type '{base_type}'"
@@ -1998,7 +2015,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if not base_type.endswith("*") or not base_type.startswith("struct "):
                 message = f"'->' requires a pointer to struct, got type '{base_type}'"
                 raise CompileError(message, line=statement.line)
-            tag = base_type[7:-1].rstrip()
+            tag = base_type[7:-1]
         else:
             if not base_type.startswith("struct ") or base_type.endswith("*"):
                 message = f"'.' requires a struct value, got type '{base_type}'"
@@ -2024,12 +2041,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.ax_clear()
         self.generate_expression(statement.expr)
         addr = f"[{self.target.bx_register}+{offset}]" if offset else f"[{self.target.bx_register}]"
-        if field_size == 1:
-            self.emit(f"        mov byte {addr}, al")
-        elif field_size == 2 and self.target.int_size == 4:
-            self.emit(f"        mov word {addr}, ax")
-        else:
-            self.emit(f"        mov {addr}, {self.target.acc}")
+        self._emit_field_store(addr=addr, field_size=field_size)
 
     def _has_remainder(self, left: Node, right: Node, /) -> bool:
         """Check if DX already holds left % right.
@@ -2690,6 +2702,23 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"struct '{tag}' has no field '{member_name}'"
             raise CompileError(message, line=line)
         return layout[member_name]
+
+    def _resolve_struct_value_base(self, name: str, /, *, line: int) -> str:
+        """Return the memory operand naming the base of struct-value *name*.
+
+        Used by the dot path of :meth:`generate_member_access` and
+        :meth:`generate_member_assign` to resolve ``obj`` in ``obj.field``
+        to either ``_g_<name>`` (file-scope struct global) or
+        ``ebp-<frame_offset>`` (local struct value).  Raises
+        :class:`CompileError` for undefined names.
+        """
+        if name in self.global_scalars:
+            return self._local_address(name)
+        if name in self.locals:
+            frame_offset = self.locals[name]
+            return f"ebp-{frame_offset}"
+        message = f"undefined variable '{name}'"
+        raise CompileError(message, line=line)
 
     def _select_auto_pin_candidates(self, *, body: list[Node], parameters: list, apply_liveness_elision: bool = True) -> dict[str, str]:
         """Choose locals/parameters to auto-pin and match them to registers.
@@ -4233,12 +4262,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.emit(f"        pop {acc}")  # AX = value
         self.ax_clear()
         addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
-        if field_size == 1:
-            self.emit(f"        mov byte {addr}, al")
-        elif field_size == 2 and self.target.int_size == 4:
-            self.emit(f"        mov word {addr}, ax")
-        else:
-            self.emit(f"        mov {addr}, {acc}")
+        self._emit_field_store(addr=addr, field_size=field_size)
         if protect_bx:
             self.emit(f"        pop {bx}")  # restore pinned var
 
@@ -4335,14 +4359,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if struct_type.endswith("*") or not struct_type.startswith("struct "):
                 message = f"'.' requires a struct value, got type '{struct_type}'"
                 raise CompileError(message, line=expression.line)
-            if object_name in self.global_scalars:
-                base_operand = self._local_address(object_name)
-            elif object_name in self.locals:
-                frame_offset = self.locals[object_name]
-                base_operand = f"ebp-{frame_offset}"
-            else:
-                message = f"undefined variable '{object_name}'"
-                raise CompileError(message, line=expression.line)
+            base_operand = self._resolve_struct_value_base(object_name, line=expression.line)
             tag = struct_type[7:]
             layout = self.struct_layouts.get(tag)
             if layout is None:
@@ -4513,14 +4530,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if struct_type.endswith("*") or not struct_type.startswith("struct "):
                 message = f"'.' requires a struct value, got type '{struct_type}'"
                 raise CompileError(message, line=statement.line)
-            if object_name in self.global_scalars:
-                base_operand = self._local_address(object_name)
-            elif object_name in self.locals:
-                frame_offset = self.locals[object_name]
-                base_operand = f"ebp-{frame_offset}"
-            else:
-                message = f"undefined variable '{object_name}'"
-                raise CompileError(message, line=statement.line)
+            base_operand = self._resolve_struct_value_base(object_name, line=statement.line)
             tag = struct_type[7:]
             layout = self.struct_layouts.get(tag)
             if layout is None:
@@ -4562,12 +4572,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 raise CompileError(message, line=statement.line)
             self.ax_clear()
             self.generate_expression(statement.expr)
-            if field_size == 1:
-                self.emit(f"        mov byte {addr}, al")
-            elif field_size == 2 and self.target.int_size == 4:
-                self.emit(f"        mov word {addr}, ax")
-            else:
-                self.emit(f"        mov {addr}, {self.target.acc}")
+            self._emit_field_store(addr=addr, field_size=field_size)
             return
         info = self._resolve_member_index_layout(
             arrow=True,
@@ -4617,12 +4622,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self._emit_load_var(object_name, register=self.target.bx_register)
             base_reg = self.target.bx_register
         addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
-        if field_size == 1:
-            self.emit(f"        mov byte {addr}, al")
-        elif field_size == 2 and self.target.int_size == 4:
-            self.emit(f"        mov word {addr}, ax")
-        else:
-            self.emit(f"        mov {addr}, {self.target.acc}")
+        self._emit_field_store(addr=addr, field_size=field_size)
 
     def generate_member_index(self, expression: MemberIndex, /) -> None:
         """Generate code for ``ptr->field[index]`` or ``obj.field[index]``.
