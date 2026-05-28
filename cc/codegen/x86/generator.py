@@ -1537,6 +1537,35 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for instruction in getattr(self.target, "LONG_AFTER_SYSCALL", ()):
             self.emit(f"        {instruction}")
 
+    def _emit_long_store(self, *, expression: Node, name: str) -> None:
+        """Generate a long-typed expression and spill it to local ``name``.
+
+        Used for both ``unsigned long`` locals and virtual-long locals
+        (where 32-bit targets fold ``unsigned long`` into ``unsigned int``
+        and ``discover_virtual_long_locals`` registers the name as
+        long-valued).  Virtual-long locals stay live in the target's
+        long register pair (EAX, or DX:AX in 16-bit) without a frame
+        spill; real ``unsigned long`` locals get their pair stored to
+        the dual-word frame slot.
+        """
+        self.ax_clear()
+        self.generate_long_expression(expression)
+        if name in self.virtual_long_locals:
+            self.live_long_local = name
+            return
+        address = self._local_address(name)
+        if self.elide_frame:
+            self.emit(f"        mov [{address}], {self.target.acc}")
+            if isinstance(self.target, X86CodegenTarget16):
+                self.emit(f"        mov [{address}+2], {self.target.dx_register}")
+        else:
+            low_offset = self.locals[name]
+            self.emit(f"        mov [{self.target.base_register}-{low_offset}], {self.target.acc}")
+            if isinstance(self.target, X86CodegenTarget16):
+                self.emit(f"        mov [{self.target.base_register}-{low_offset - 2}], {self.target.dx_register}")
+        self.ax_is_byte = False
+        self.ax_local = None
+
     def _emit_long_to_eax(self) -> None:
         """Place a long, currently in the target's shape, into EAX.
 
@@ -4049,23 +4078,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # path too — the value is produced by datetime() in EAX and
         # consumed directly by print_datetime() with no frame spill.
         if self.variable_types.get(name) == "unsigned long" or name in self.virtual_long_locals:
-            self.ax_clear()
-            self.generate_long_expression(expression)
-            if name in self.virtual_long_locals:
-                self.live_long_local = name
-                return
-            address = self._local_address(name)
-            if self.elide_frame:
-                self.emit(f"        mov [{address}], {self.target.acc}")
-                if isinstance(self.target, X86CodegenTarget16):
-                    self.emit(f"        mov [{address}+2], {self.target.dx_register}")
-            else:
-                low_offset = self.locals[name]
-                self.emit(f"        mov [{self.target.base_register}-{low_offset}], {self.target.acc}")
-                if isinstance(self.target, X86CodegenTarget16):
-                    self.emit(f"        mov [{self.target.base_register}-{low_offset - 2}], {self.target.dx_register}")
-            self.ax_is_byte = False
-            self.ax_local = None
+            self._emit_long_store(expression=expression, name=name)
             return
         direct_register: str | None = None
         if name in self.pinned_register:
