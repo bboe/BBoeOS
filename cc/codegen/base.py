@@ -979,28 +979,28 @@ class CodeGeneratorBase:
         leaves (Char, Int, String, AddressOf) and AST nodes that carry
         the :class:`IntegerOperand` mixin resolve inline.
         """
+        if isinstance(node, AddressOf):
+            return "pointer"
+        if isinstance(node, BinaryOperation):
+            return self._classify_binop_operand(node)
+        if isinstance(node, Cast):
+            return self._classify_cast_operand(node)
         if isinstance(node, Char):
             return "char"
+        if isinstance(node, DerefIncrement):
+            return self._classify_deref_increment_operand(node)
+        if isinstance(node, DoubleIndex):
+            return self._classify_double_index_operand(node)
+        if isinstance(node, Index):
+            return self._classify_index_operand(node)
         if isinstance(node, Int):
+            return "integer"
+        if isinstance(node, IntegerOperand):
             return "integer"
         if isinstance(node, String):
             return "pointer"
-        if isinstance(node, Index):
-            return self._classify_index_operand(node)
-        if isinstance(node, DoubleIndex):
-            return self._classify_double_index_operand(node)
         if isinstance(node, Var):
             return self._classify_var_operand(node)
-        if isinstance(node, BinaryOperation):
-            return self._classify_binop_operand(node)
-        if isinstance(node, DerefIncrement):
-            return self._classify_deref_increment_operand(node)
-        if isinstance(node, IntegerOperand):
-            return "integer"
-        if isinstance(node, Cast):
-            return self._classify_cast_operand(node)
-        if isinstance(node, AddressOf):
-            return "pointer"
         message = f"cannot classify operand type for comparison: {type(node).__name__}"
         raise CompileError(message, line=node.line)
 

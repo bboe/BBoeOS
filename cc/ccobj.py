@@ -30,6 +30,8 @@ DEFAULT_ALIGN: dict[str, int] = {"text": 16, "rodata": 4, "data": 4, "bss": 4}
 # error (keeps the format tight).
 KNOWN_SECTIONS: tuple[str, ...] = ("text", "rodata", "data", "bss")
 
+NASM_GLOBAL_PREFIX = "__nasm_global_"
+
 # NASM listing bytes-column tokens.  Each line's bytes column is a
 # sequence of these tokens:
 #   ``XXXX`` — plain hex pairs (real instruction bytes).
@@ -71,7 +73,6 @@ RE_LABEL = re.compile(r"^\$?([A-Za-z_.][A-Za-z0-9_.]*):")
 RE_LABEL_NO_COLON = re.compile(r"^([A-Za-z_.][A-Za-z0-9_.]*)(?=\s+(?:db|dw|dd|dq|do|resb|resw|resd|resq|reso|times|equ)\b)")
 RE_MACRO = re.compile(r"^(CCREL_[A-Z_]+)\s+([A-Za-z_][A-Za-z0-9_]*)\s*$")
 RE_SECTION = re.compile(r"^section\s+\.([A-Za-z_][A-Za-z0-9_]*)\s*$")
-_NASM_GLOBAL_PREFIX = "__nasm_global_"
 
 
 def _accumulate_bytes(*, bytes_column: bytes, offset: int, section_buffer: bytearray) -> None:
@@ -300,7 +301,7 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
         global_match = RE_GLOBAL.match(source_stripped)
         if global_match:
             global_name = global_match.group(1)
-            global_name = global_name.removeprefix(_NASM_GLOBAL_PREFIX)
+            global_name = global_name.removeprefix(NASM_GLOBAL_PREFIX)
             globals_declared.add(global_name)
             continue
 
