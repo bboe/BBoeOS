@@ -68,6 +68,7 @@ from cc.ast_nodes import (
     MemberIndex,
     MemberIndexAssign,
     Node,
+    Param,
     PointerDereference,
     PointerDereferenceAssign,
     Return,
@@ -252,6 +253,62 @@ class EmissionMixin:
     ``builtin_*`` / ``peephole`` dispatchers from sibling mixins.
     """
 
+    def _allocate_function_parameters(
+        self,
+        *,
+        function_line: int,
+        is_fastcall: bool,
+        name: str,
+        parameters: list[Param],
+        regparm_count: int,
+    ) -> None:
+        """Record parameter types / array flags and assign caller-pushed stack offsets.
+
+        Extracted from :meth:`generate_function`.  ``main`` is special-
+        cased (its parameters are handled by
+        :meth:`emit_argument_vector_startup`).  For non-main functions
+        this also rejects parameter names that shadow a file-scope global
+        and populates ``self.out_register_locals`` for output-only
+        register params; ``in_register`` and regparm params get their
+        stack slots allocated later (after this returns, in
+        ``generate_function``).
+        """
+        for param in parameters:
+            if param.name in self.global_scalars or param.name in self.global_arrays:
+                message = f"parameter '{param.name}' shadows a file-scope global"
+                raise CompileError(message, line=function_line)
+        if name == "main":
+            # main parameters are handled by emit_argument_vector_startup.
+            for param in parameters:
+                self.allocate_local(param.name)
+                self.variable_types[param.name] = param.type
+                if param.is_array:
+                    self.variable_arrays.add(param.name)
+            return
+        # Non-main: record parameter types; stack offsets are kept
+        # as fallbacks but parameters will be pinned to registers
+        # when safe_pin_registers has room.
+        caller_push_index = 0
+        for i, param in enumerate(parameters):
+            self.variable_types[param.name] = param.type
+            if param.is_array:
+                self.variable_arrays.add(param.name)
+            if param.out_register is not None:
+                # Output-only register param: no caller-pushed stack slot.
+                # Track it so DerefAssign in the body emits mov <reg>, <val>.
+                self.out_register_locals[param.name] = param.out_register
+                continue
+            if param.in_register is not None:
+                # Input register param: caller puts arg in named register (no push).
+                # Allocate a local slot below; spilled after sub sp,N in prologue.
+                continue
+            if is_fastcall and i < regparm_count:
+                # Register-passed params get local slots allocated
+                # below; they have no caller-pushed address.
+                continue
+            self.locals[param.name] = -(self.target.param_slot_base + caller_push_index * self.target.int_size)  # negative = above bp
+            caller_push_index += 1
+
     def _apply_default_regparm(self, functions: list[Node], /) -> None:
         """Stamp the implicit register-passing convention on eligible callees.
 
@@ -303,6 +360,147 @@ class EmissionMixin:
                 and all(parameter.out_register is None and parameter.in_register is None for parameter in function.params)
             ):
                 function.regparm_count = min(3, len(function.params))
+
+    def _emit_function_prologue(
+        self,
+        *,
+        body: list[Node],
+        function_line: int,
+        is_fastcall: bool,
+        parameters: list[Param],
+        regparm_count: int,
+        regparm_registers: tuple[str, ...],
+        register_convention: bool,
+    ) -> None:
+        """Emit the per-function prologue (push bp / mov bp,esp / sub sp,N).
+
+        Spills caller-supplied fastcall regparm registers and ``in_register``
+        params into their local stack slots, then loads any pinned-but-not-
+        in_register parameters from the caller-pushed cdecl slots into their
+        target registers.  Extracted from :meth:`generate_function`; called
+        only when ``self.elide_frame`` is False.
+        """
+        for reg in self.current_preserve_registers:
+            self.emit(f"        push {reg}")
+        self.emit(f"        push {self.target.base_register}")
+        self.emit(f"        mov {self.target.base_register}, {self.target.stack_register}")
+        if self.frame_size > 0:
+            self.emit(f"        sub {self.target.stack_register}, {self.frame_size}")
+        if is_fastcall:
+            # Spill the caller-supplied regparm registers into their
+            # local slots so the body can read them through the normal
+            # local path.
+            for i, register in enumerate(regparm_registers):
+                slot = self.locals[parameters[i].name]
+                self.emit(f"        mov [{self.target.base_register}-{slot}], {register}")
+        for param in parameters:
+            if param.in_register is not None:
+                if not self._param_slot_is_read(body, param.name):
+                    continue  # named register holds the value; skip the dead spill
+                slot = self.locals[param.name]
+                # Zero-extend narrower in_register values into the
+                # full int-width slot so subsequent reads (which load
+                # the whole slot via the accumulator) don't pick up
+                # uninitialised stack bytes.  For full-width E-register
+                # pins the named register already covers the slot.
+                #
+                # Byte-typed parameters (``char`` / ``unsigned char``) treat
+                # the named register as the *byte* alias — only AL is
+                # the value, AH is undefined per the asm-side calling
+                # convention (e.g. ``lodsb; call f``).  Widening from
+                # the byte alias scrubs AH-garbage out of the spilled
+                # slot.  Pinning a byte-typed parameter to a register
+                # without a byte alias (esi / edi / ebp / esp) is
+                # rejected at codegen time.
+                if param.type in self.BYTE_TYPES:
+                    source = self.target.low_byte(param.in_register)
+                    if source is None:
+                        message = (
+                            f"byte-typed parameter '{param.name}' cannot be pinned to register "
+                            f"'{param.in_register}' — no low-byte alias in the target encoding"
+                        )
+                        raise CompileError(message, line=function_line)
+                    self.emit(f"        movzx {self.target.acc}, {source}")
+                    self.emit(f"        mov [{self.target.base_register}-{slot}], {self.target.acc}")
+                    continue
+                widened = self.target.widen_gp(param.in_register)
+                if widened != param.in_register:
+                    self.emit(f"        movzx {widened}, {param.in_register}")
+                    self.emit(f"        mov [{self.target.base_register}-{slot}], {widened}")
+                else:
+                    self.emit(f"        mov [{self.target.base_register}-{slot}], {param.in_register}")
+        if not register_convention:
+            # Load pinned parameters from caller-pushed stack slots
+            # into their registers.
+            caller_push_index = 0
+            for i, param in enumerate(parameters):
+                if is_fastcall and i < regparm_count:
+                    continue
+                if param.out_register is not None:
+                    continue
+                if param.name in self.pinned_register:
+                    register = self.pinned_register[param.name]
+                    offset = self.target.param_slot_base + caller_push_index * self.target.int_size
+                    self.emit(f"        mov {register}, [{self.target.base_register}+{offset}]")
+                caller_push_index += 1
+
+    def _emit_main_exit_tail(self) -> None:
+        """Emit ``main``'s implicit-exit tail and any elided-frame local BSS cells.
+
+        Called from :meth:`generate_function` at the bottom of ``main``.
+        Sets the exit code to 0 (an explicit ``return N;`` earlier in the
+        body has already loaded the accumulator and jumped, so reaching
+        here means control fell off without a return), jumps to
+        ``FUNCTION_EXIT`` in libbboeos, and — when the frame is elided —
+        lays down each local's storage cell.
+
+        In flat mode the cells are emitted inline at the tail of the
+        function (zeros sit in ``.text`` under ``org 08048000h`` and the
+        program loader skips them).  In object mode they're collected
+        into ``self.elided_local_bss_vars`` and laid down later in
+        ``section .bss`` via ``resb`` reservations, so ``.text`` stays
+        code-only and the linker can pack ``.text`` from multiple
+        objects without dragging zero pads between them.
+        """
+        self.emit(f"        xor {self.target.acc}, {self.target.acc}")
+        self._emit_libbboeos_jmp("FUNCTION_EXIT")
+        if not self.elide_frame:
+            return
+        # Plain int / pointer locals get the target's native integer
+        # width (``dw`` / ``dd``); ``unsigned long`` always stays 4
+        # bytes (``dd``) regardless of mode; byte-scalar locals always
+        # stay 1 byte (``db``); local stack arrays reserve their full
+        # byte count.
+        int_directive = "dd 0" if self.target.int_size == 4 else "dw 0"
+        for vname in sorted(self.locals):
+            if vname in self.local_stack_arrays:
+                byte_count = self.local_stack_arrays[vname]
+                if self.object_mode:
+                    self.elided_local_bss_vars.append((vname, str(byte_count)))
+                else:
+                    self.emit(f"_l_{vname}: times {byte_count} db 0")
+            elif self.variable_types.get(vname) == "unsigned long":
+                if self.object_mode:
+                    self.elided_local_bss_vars.append((vname, "4"))
+                else:
+                    self.emit(f"_l_{vname}: dd 0")
+            elif vname in self.byte_scalar_locals:
+                if self.object_mode:
+                    self.elided_local_bss_vars.append((vname, "1"))
+                else:
+                    self.emit(f"_l_{vname}: db 0")
+            elif self.variable_types.get(vname, "").startswith("struct ") and not self.variable_types[vname].endswith("*"):
+                type_name = self.variable_types[vname]
+                tag = type_name[7:]
+                struct_byte_count = self.struct_sizes[tag]
+                if self.object_mode:
+                    self.elided_local_bss_vars.append((vname, str(struct_byte_count)))
+                else:
+                    self.emit(f"_l_{vname}: times {struct_byte_count} db 0")
+            elif self.object_mode:
+                self.elided_local_bss_vars.append((vname, str(self.target.int_size)))
+            else:
+                self.emit(f"_l_{vname}: {int_directive}")
 
     def _emit_pointer_bump(self, *, delta: int, line: int, name: str) -> None:
         """Advance pointer variable ``name`` by ``delta * sizeof(*name)`` bytes in place.
@@ -540,6 +738,316 @@ class EmissionMixin:
             self.ax_clear()
             self.generate_body(default_case.body, scoped=True)
 
+    def _generate_assign_expr(self, expression: AssignExpr, /) -> None:
+        """Lower an :class:'AssignExpr' (parenthesised assignment as an rvalue).
+
+        Extracted from :meth:`generate_expression` to keep that method readable.
+        """
+        # Parenthesized assignment used as an expression (AST path — only
+        # reached for ``main`` and other functions that bypass the IR
+        # builder).  The IR path handles ``AssignExpr`` correctly via
+        # ``cc.ir.Builder._lower_assign_expr`` (evaluates the RHS into a
+        # temp, rewrites the *Assign, emits it as a statement).
+        #
+        # For the AST path: every store function evaluates the RHS into AX
+        # first and writes AX to the destination.  After the store, AX
+        # physically holds the stored value even when ``ax_clear()`` was
+        # called internally (that call only clears the *tracking* metadata,
+        # not the register).  Calling the store function directly (not
+        # through ``generate_statement``, which appends another
+        # ``ax_clear()``) leaves AX = assigned value as required.
+        # Plain ``Assign`` is a special case: ``emit_store_local`` does the
+        # evaluation + store and tracks ``ax_local``; reading the variable
+        # via ``generate_expression(Var(...))`` is then a no-op.
+        inner = expression.inner
+        if isinstance(inner, Assign):
+            self._check_defined(inner.name, line=inner.line)
+            self.emit_store_local(expression=inner.expr, name=inner.name)
+            self.generate_expression(Var(line=inner.line, name=inner.name))
+        elif isinstance(inner, DerefAssign):
+            # ``generate_statement`` on DerefAssign evaluates expr → AX,
+            # stores, then calls ax_clear().  AX still holds the value
+            # after the store.  Call the statement path and then force AX
+            # back to the value with a direct load (no re-evaluation of
+            # the RHS — use the already-written pointee read).
+            self.generate_statement(inner)
+            # AX is cleared by tracking but physically holds the value;
+            # restore tracking so the caller can rely on AX.
+            # Re-evaluate expr only if it is a trivial constant/variable
+            # (avoids double function-call).  For non-trivial RHSs, the
+            # physical AX value is already correct — just re-mark it via
+            # generate_expression on a Var if we know the name.
+            if isinstance(inner.expr, (Int, Var)):
+                self.generate_expression(inner.expr)
+        elif isinstance(inner, DerefIncrementAssign):
+            # Same pattern as DerefAssign: the statement path evaluates
+            # expr → AX, stores, bumps pointer, clears AX tracking.  The
+            # assigned value (the expr value, not the post-bump pointer) is
+            # still physically in AX.  No re-evaluation needed.
+            self.generate_statement(inner)
+        elif isinstance(inner, PointerDereferenceAssign):
+            self._emit_pointer_dereference_assign(inner)
+        elif isinstance(inner, IndexAssign):
+            self.generate_index_assign(inner)
+        elif isinstance(inner, MemberAssign):
+            if self._member_assign_targets_bitfield(inner):
+                message = "assignment-as-expression to bitfield fields is not supported"
+                raise CompileError(message, line=expression.line)
+            self.generate_member_assign(inner)
+        elif isinstance(inner, MemberIndexAssign):
+            self.generate_member_index_assign(inner)
+        elif isinstance(inner, IndexMemberAssign):
+            self.generate_index_member_assign(inner)
+        elif isinstance(inner, IndexMemberIndexAssign):
+            self.generate_index_member_index_assign(inner)
+        else:
+            message = f"AssignExpr: unsupported inner node type '{type(inner).__name__}'"
+            raise CompileError(message, line=expression.line)
+
+    def _generate_binary_operation_expression(self, expression: BinaryOperation, /) -> None:
+        """Lower a :class:`BinaryOperation` expression into the accumulator.
+
+        Extracted from :meth:`generate_expression` to keep that method
+        readable.  Handles constant-fold short-circuit, pointer-arithmetic
+        scaling, immediate / pinned-register fast paths for ``+``/``-``/
+        ``&``/``|``/``^``/``<<``/``>>``, the byte-scalar split for ``+``/
+        ``-``, and the general CX-scratch path with optional save/restore
+        plus the comparison / division / multiplication tails.
+        """
+        # Fold an entirely-constant subtree (named constants and
+        # integer literals) into a single ``mov ax, <expr>`` so the
+        # assembler does the arithmetic.  Without this, expressions
+        # like ``O_WRONLY + O_CREAT + O_TRUNC`` build the value at
+        # runtime via push/pop chains.
+        if (constant_expr := self._constant_expression(expression)) is not None:
+            for name in self._collect_constant_references(expression):
+                self.emit_constant_reference(name)
+            self.emit(f"        mov {self.target.acc}, {constant_expr}")
+            self.ax_clear()
+            return
+        operator, left, right = expression.operation, expression.left, expression.right
+        # Pointer arithmetic: scale the right operand by the element size when
+        # the left side is a pointer or array variable.  ptr + N → ptr + N*sizeof(*ptr).
+        # For byte pointers (char*, unsigned char*) element_size is 1 so nothing changes.
+        if operator in ("+", "-") and isinstance(left, Var):
+            element_size = self._arithmetic_element_size(left.name)
+            if element_size > 1:
+                right = BinaryOperation(left=right, operation="*", right=Int(value=element_size))
+        if operator == "%" and self._has_remainder(left, right):
+            self.emit(f"        mov {self.target.acc}, {self.target.dx_register}")
+            self.ax_clear()
+            return
+        if operator in ("+", "-", "&", "|", "^") and isinstance(right, Int):
+            # Fast path: reg operation imm uses the immediate form, skipping
+            # the mov-into-cx scratch step.  Saves 2-3 bytes per site.
+            self.generate_expression(left)
+            # +1 and -1 fit in a 1-byte inc/dec.
+            if operator == "+" and right.value == 1:
+                self.emit(f"        inc {self.target.acc}")
+            elif operator == "-" and right.value == 1:
+                self.emit(f"        dec {self.target.acc}")
+            elif operator == "^" and (right.value & 0xFFFF) == 0xFFFF and isinstance(self.target, X86CodegenTarget16):
+                # ``x ^ 0xFFFF`` is the ``~x`` lowering — ``not ax``
+                # is 2 bytes vs. 3 for ``xor ax, 0xFFFF``.
+                self.emit(f"        not {self.target.acc}")
+            else:
+                mnemonic = {"+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor"}[operator]
+                self.emit(f"        {mnemonic} {self.target.acc}, {right.value}")
+            self.ax_clear()
+            return
+        if operator == "<<" and isinstance(right, Int):
+            shift = right.value & 0x1F
+            # Fast path: shl r, imm — one instruction, no CX scratch.
+            self.generate_expression(left)
+            if shift == 0:
+                pass
+            elif shift >= self.target.int_size * 8:
+                self.emit(f"        xor {self.target.acc}, {self.target.acc}")
+            else:
+                self.emit(f"        shl {self.target.acc}, {shift}")
+            self.ax_clear()
+            return
+        if operator == ">>" and isinstance(right, Int):
+            shift = right.value & 0x1F
+            # Special case: `local >> 8` when ``local`` lives in memory.
+            # Loading the high byte directly avoids one instruction
+            # over `mov ax, [local]` + `shr ax, 8`, and doesn't waste
+            # an ALU operation on a shift that's really a byte-select.
+            # Byte-scalar locals / globals have no high byte — their
+            # storage is a single ``db`` cell, so bail to the general
+            # shift path (which loads zero).
+            if (
+                shift == 8
+                and isinstance(self.target, X86CodegenTarget16)
+                and isinstance(left, Var)
+                and self._is_memory_scalar(left.name)
+                and left.name not in self.pinned_register
+                and left.name not in self.array_labels
+                and not self._is_byte_scalar(left.name)
+            ):
+                self.emit_byte_load_zx(f"[{self._local_address(left.name)}+1]")
+                self.ax_clear()
+                return
+            # Fast path: shr r, imm — one instruction, no CX scratch.
+            self.generate_expression(left)
+            if shift == 0:
+                pass
+            elif shift >= self.target.int_size * 8:
+                self.emit(f"        xor {self.target.acc}, {self.target.acc}")
+            else:
+                self.emit(f"        shr {self.target.acc}, {shift}")
+            self.ax_clear()
+            return
+        if operator == "*" and isinstance(right, Int):
+            n = right.value
+            self.generate_expression(left)
+            if n == 0:
+                self.emit(f"        xor {self.target.acc}, {self.target.acc}")
+            elif n > 0 and (n & (n - 1)) == 0:
+                shift = (n).bit_length() - 1
+                if shift > 0:
+                    self.emit(f"        shl {self.target.acc}, {shift}")
+            else:
+                self.emit(f"        imul {self.target.acc}, {n}")
+            self.ax_clear()
+            return
+        # Fast path for ``+`` / ``-`` with a stack-resident right
+        # operand: ``add ax, [mem]`` is shorter than ``mov cx,
+        # [mem] / add ax, cx``.  Logical ops could take the same
+        # shape, but expanding handle_and / handle_or / handle_xor
+        # in the self-host assembler to accept ``r, [reg+disp]``
+        # costs more bytes in asm.c than the ~74 bytes reclaimed
+        # across the 37 eligible callsites, so those stay on the
+        # CX fallback path.
+        if (
+            operator in ("+", "-")
+            and isinstance(right, Var)
+            and self._is_memory_scalar(right.name)
+            and right.name not in self.pinned_register
+            and right.name not in self.variable_arrays
+            and self.variable_types.get(right.name) != "unsigned long"
+            and not self._is_byte_scalar(right.name)
+        ):
+            self.generate_expression(left)
+            mnemonic = "add" if operator == "+" else "sub"
+            self.emit(f"        {mnemonic} {self.target.acc}, [{self._local_address(right.name)}]")
+            self.ax_clear()
+            return
+        # Byte-scalar right operand for ``+`` / ``-``: a word-
+        # sized ``add ax, [mem]`` / ``sub ax, [mem]`` would read
+        # the adjacent byte into the high byte, so split into
+        # ``add al, [mem] / adc ah, 0`` (or ``sub`` / ``sbb``).
+        # The byte-wide operation on AL with the carry / borrow propagate
+        # on AH matches word semantics for an unsigned-byte
+        # operand: its high byte is known zero, so adding or
+        # subtracting zero from AH and folding in the carry /
+        # borrow out of AL produces the same 16-bit result as
+        # the word operation would.  5 bytes vs 11+ bytes of the CX
+        # fallback.
+        if (
+            operator in ("+", "-")
+            and isinstance(right, Var)
+            and self._is_byte_scalar(right.name)
+            and right.name not in self.variable_arrays
+        ):
+            self.generate_expression(left)
+            address = self._local_address(right.name)
+            if operator == "+":
+                self.emit(f"        add al, [{address}]")
+                self.emit("        adc ah, 0")
+            else:
+                self.emit(f"        sub al, [{address}]")
+                self.emit("        sbb ah, 0")
+            self.ax_clear()
+            return
+        # Fast path for ``+``/``-``/``&``/``|``/``^`` with a
+        # pinned-register right operand: arithmetic targets the
+        # register directly, skipping the `mov cx, <reg>` load and
+        # any CX save/restore.  When the pinned register is CX,
+        # require ``left`` to be a leaf so generate_expression
+        # can't clobber it mid-compute.
+        if operator in ("+", "-", "&", "|", "^") and isinstance(right, Var) and right.name in self.pinned_register:
+            source = self.pinned_register[right.name]
+            if source != self.target.count_register or isinstance(left, (Int, Var, String)):
+                self.generate_expression(left)
+                mnemonic = {"+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor"}[operator]
+                if len(source) < len(self.target.acc):
+                    # 16-bit pinned reg into 32-bit acc: push into count_register first.
+                    self.emit(f"        movzx {self.target.count_register}, {source}")
+                    self.emit(f"        {mnemonic} {self.target.acc}, {self.target.count_register}")
+                else:
+                    self.emit(f"        {mnemonic} {self.target.acc}, {source}")
+                self.ax_clear()
+                return
+        count_pinned_var = next(
+            (name for name, register in self.pinned_register.items() if register == self.target.count_register),
+            None,
+        )
+        # Skip the CX save when an enclosing store is about to
+        # overwrite CX anyway — its original value is dead.
+        protect_count = count_pinned_var is not None and self.store_target_register != self.target.count_register
+        if protect_count:
+            self.emit(f"        push {self.target.count_register}")
+        self.emit_binary_operator_operands(left, right)  # AX = left, CX = right
+        if operator == "+":
+            self.emit(f"        add {self.target.acc}, {self.target.count_register}")
+        elif operator == "-":
+            self.emit(f"        sub {self.target.acc}, {self.target.count_register}")
+        elif operator == "&":
+            self.emit(f"        and {self.target.acc}, {self.target.count_register}")
+        elif operator == "|":
+            self.emit(f"        or {self.target.acc}, {self.target.count_register}")
+        elif operator == "^":
+            self.emit(f"        xor {self.target.acc}, {self.target.count_register}")
+        elif operator == "<<":
+            self.emit(f"        shl {self.target.acc}, cl")
+        elif operator == ">>":
+            self.emit(f"        shr {self.target.acc}, cl")
+        elif operator == "*":
+            protect_dx = (
+                any(register == self.target.dx_register for register in self.pinned_register.values())
+                and self.store_target_register != self.target.dx_register
+            )
+            if protect_dx:
+                self.emit(f"        push {self.target.dx_register}")
+            self.emit(f"        mul {self.target.count_register}")
+            if protect_dx:
+                self.emit(f"        pop {self.target.dx_register}")
+            self.division_remainder = None
+        elif operator in {"/", "%"}:
+            dx_pinned = any(register == self.target.dx_register for register in self.pinned_register.values())
+            protect_dx = dx_pinned and self.store_target_register != self.target.dx_register
+            if protect_dx:
+                self.emit(f"        push {self.target.dx_register}")
+            self.emit(f"        xor {self.target.dx_register}, {self.target.dx_register}")
+            self.emit(f"        div {self.target.count_register}")
+            if operator == "%":
+                self.emit(f"        mov {self.target.acc}, {self.target.dx_register}")
+            if protect_dx:
+                self.emit(f"        pop {self.target.dx_register}")
+            if dx_pinned:
+                self.division_remainder = None
+            else:
+                self.division_remainder = (left, right)
+        elif operator in JUMP_WHEN_FALSE:
+            # Booleanize the comparison: AX = 1 if ``left <operation> right``,
+            # else 0.  ``mov ax, 0`` preserves the flags set by ``cmp``
+            # (unlike ``xor ax, ax``), so the jump-when-false branch
+            # reads the right condition.
+            skip_label = f".bool_{self.new_label()}"
+            self.emit(f"        cmp {self.target.acc}, {self.target.count_register}")
+            self.emit(f"        mov {self.target.acc}, 0")
+            table = JUMP_WHEN_FALSE_UNSIGNED if self._is_unsigned_comparison(left, right) else JUMP_WHEN_FALSE
+            self.emit(f"        {table[operator]} {skip_label}")
+            self.emit(f"        inc {self.target.acc}")
+            self.emit(f"{skip_label}:")
+        else:
+            message = f"unknown operator: {operator}"
+            raise CompileError(message, line=expression.line)
+        if protect_count:
+            self.emit(f"        pop {self.target.count_register}")
+        self.ax_clear()
+
     def _generate_conditional(self, expression: Conditional, /) -> None:
         """Lower a ternary ``c ? t : e`` to a conditional branch.
 
@@ -586,6 +1094,224 @@ class EmissionMixin:
         # At the merge, AX holds the result of whichever branch ran;
         # neither branch's variable-tracking is guaranteed.
         self.ax_clear()
+
+    def _generate_double_index_expression(self, expression: DoubleIndex, /) -> None:
+        """Lower a :class:'DoubleIndex' (chained subscript) rvalue.
+
+        Extracted from :meth:`generate_expression` to keep that method readable.
+        """
+        self.ax_clear()
+        vname = expression.array.name
+        self._check_defined(vname, line=expression.line)
+        # Stage 1: load name[outer_index] into AX via the existing
+        # Index path (handles constant-base, pinned-SI, byte vs word
+        # widths uniformly).  For ``char *foo[N]`` this is a 4-byte
+        # pointer load; for ``int *foo[N]`` likewise.
+        outer_load = Index(array=expression.array, index=expression.outer_index, line=expression.line)
+        self.generate_expression(outer_load)
+        # Stage 2: index into the pointer in AX.  Element width is
+        # the pointee of the outer-array's element type — i.e.
+        # ``sizeof(*element)``.  For ``char *arr[N]`` the element
+        # type is ``"char*"`` so the inner stride is
+        # ``sizeof(char) == 1``.  ``_index_pointee_size`` is
+        # array-aware (returns sizeof(element)), so for DoubleIndex
+        # we strip the recorded element type's trailing ``*`` and
+        # consult ``target.type_size`` directly.
+        si = self.target.si_register
+        self.emit(f"        mov {si}, {self.target.acc}")
+        element_type = self.variable_types.get(vname, "")
+        if element_type.endswith("*"):
+            pointee = element_type[:-1].rstrip()
+            try:
+                inner_size = self.target.type_size(pointee)
+            except KeyError:
+                inner_size = self.target.int_size
+        else:
+            inner_size = self.target.int_size
+        is_byte_inner = inner_size == 1
+        inner = expression.inner_index
+        if isinstance(inner, Int):
+            offset = inner.value * (1 if is_byte_inner else inner_size)
+            mem = f"{si}+{offset}" if offset else si
+            if is_byte_inner:
+                self.emit_byte_load_zx(f"[{mem}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, [{mem}]")
+        elif isinstance(inner, Var):
+            # Var load doesn't touch SI, so no push/pop round-trip.
+            self.generate_expression(inner)
+            if not is_byte_inner:
+                if inner_size == self.target.int_size:
+                    self._emit_scale_int_index(self.target.acc)
+                else:
+                    self.emit(f"        imul {self.target.acc}, {self.target.acc}, {inner_size}")
+            self.emit(f"        add {si}, {self.target.acc}")
+            if is_byte_inner:
+                self.emit_byte_load_zx(f"[{si}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, [{si}]")
+        else:
+            # General inner expression — preserve SI across evaluation.
+            self.emit(f"        push {si}")
+            self.generate_expression(inner)
+            if not is_byte_inner:
+                if inner_size == self.target.int_size:
+                    self._emit_scale_int_index(self.target.acc)
+                else:
+                    self.emit(f"        imul {self.target.acc}, {self.target.acc}, {inner_size}")
+            self.emit(f"        pop {si}")
+            self.emit(f"        add {si}, {self.target.acc}")
+            if is_byte_inner:
+                self.emit_byte_load_zx(f"[{si}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, [{si}]")
+        self.ax_clear()
+
+    def _generate_index_expression(self, expression: Index, /) -> None:
+        """Lower an :class: (array subscript) rvalue load into the accumulator.
+
+        Extracted from :meth:`generate_expression` to keep that method readable.
+        """
+        self.ax_clear()
+        vname = expression.array.name
+        index_expression = expression.index
+        self._check_defined(vname, line=expression.line)
+        # Pointee / element width selects the load encoding.  For
+        # ``unsigned short *p`` on the 32-bit target ``mov eax, [esi]``
+        # would read 4 bytes; we must emit ``movzx eax, word [esi]``
+        # to read exactly the 2-byte element.  Constant-index
+        # offsets also scale by the pointee width, not the target
+        # int_size.  Byte loads stay on their dedicated fast path
+        # (``emit_byte_load_zx``) because that also clears AH.
+        is_byte = self._is_byte_var(vname)
+        if vname in self.array_labels:
+            pointee_size = self.target.int_size
+        else:
+            pointee_size = self._index_pointee_size(vname)
+        # 4-byte pointee on a 16-bit target needs DX:AX; that's the
+        # long-pointee case the IR routes through generate_long_expression
+        # — fall back to the historical full-acc load here and let the
+        # caller diagnose the type mismatch.  Otherwise, clamp the
+        # load width to min(pointee_size, int_size).
+        narrow_word = (not is_byte) and 1 < pointee_size < self.target.int_size
+
+        emitter = self
+
+        def _word_load(address: str) -> None:
+            # Use the 16-bit alias of acc (``ax`` on 32-bit) to emit
+            # ``movzx eax, word [...]``; on 16-bit acc is already 2
+            # bytes so a plain ``mov ax, [...]`` is correct.
+            if emitter.target.int_size > 2:
+                emitter.emit(f"        movzx {emitter.target.acc}, word [{address}]")
+            else:
+                emitter.emit(f"        mov {emitter.target.acc}, [{address}]")
+
+        if isinstance(index_expression, Int) and vname in self.array_labels:
+            offset = index_expression.value * self.target.int_size
+            label = self.array_labels[vname]
+            addr = f"{label}+{offset}" if offset else label
+            self.emit(f"        mov {self.target.acc}, [{addr}]")
+        elif isinstance(index_expression, Int):
+            if is_byte:
+                stride = 1
+            else:
+                stride = pointee_size if narrow_word else self.target.int_size
+            offset = index_expression.value * stride
+            # Direct memory access for constant/aliased bases:
+            # emit `mov ax, [CONST+N]` instead of `mov bx, CONST / mov ax, [bx+N]`.
+            const_base = self._resolve_constant(vname)
+            if const_base is not None:
+                addr = f"{const_base}+{offset}" if offset else const_base
+                if is_byte:
+                    self.emit_byte_load_zx(f"[{addr}]")
+                elif narrow_word:
+                    _word_load(addr)
+                else:
+                    self.emit(f"        mov {self.target.acc}, [{addr}]")
+            else:
+                guarded = self._si_scratch_guard_begin(vname)
+                self._emit_load_var(vname, register=self.target.si_register)
+                si = self.target.si_register
+                mem_inner = f"{si}+{offset}" if offset else si
+                if is_byte:
+                    self.emit_byte_load_zx(f"[{mem_inner}]")
+                elif narrow_word:
+                    _word_load(mem_inner)
+                else:
+                    self.emit(f"        mov {self.target.acc}, [{mem_inner}]")
+                self._si_scratch_guard_end(guarded=guarded)
+        else:
+            const_base = self._resolve_constant(vname)
+            if const_base is not None:
+                self.emit_constant_reference(vname)
+                guarded = self._si_scratch_guard_begin(vname)
+                addr = self._emit_constant_base_index_addr(
+                    const_base=const_base,
+                    element_size=1 if is_byte else (pointee_size if narrow_word else self.target.int_size),
+                    index=index_expression,
+                    preserve_ax=False,
+                )
+                if is_byte:
+                    self.emit_byte_load_zx(f"[{addr}]")
+                elif narrow_word:
+                    _word_load(addr)
+                else:
+                    self.emit(f"        mov {self.target.acc}, [{addr}]")
+                self._si_scratch_guard_end(guarded=guarded)
+                self.ax_clear()
+            else:
+                guarded = self._si_scratch_guard_begin(vname)
+                self._emit_load_var(vname, register=self.target.si_register)
+                si = self.target.si_register
+                # Index scaling: ``p[i]`` advances by sizeof(*p)
+                # bytes per ``i``, so a narrow pointee (unsigned short* on
+                # the 32-bit target) needs scale=2 not the acc's 4.
+                if narrow_word:
+                    scale_size = pointee_size
+                elif is_byte:
+                    scale_size = 1
+                else:
+                    scale_size = self.target.int_size
+
+                def _scale(register: str, /) -> None:
+                    if scale_size == 1:
+                        return
+                    if scale_size == 2:
+                        emitter.emit(f"        add {register}, {register}")
+                    elif scale_size == 4:
+                        emitter.emit(f"        shl {register}, 2")
+                    else:
+                        emitter.emit(f"        imul {register}, {register}, {scale_size}")
+
+                # If the index is a pinned variable and the access is
+                # byte-sized, load it without clobbering SI.
+                if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
+                    ireg = self.pinned_register[index_expression.name]
+                    self.emit(f"        add {si}, {ireg}")
+                elif isinstance(index_expression, (Var, Int)):
+                    # Simple Var/Int load doesn't touch SI, so skip the
+                    # push/pop round-trip.
+                    self.generate_expression(index_expression)
+                    if not is_byte:
+                        _scale(self.target.acc)
+                    self.emit(f"        add {si}, {self.target.acc}")
+                else:
+                    self.emit(f"        push {si}")
+                    self.generate_expression(index_expression)
+                    if not is_byte:
+                        _scale(self.target.acc)
+                    self.emit(f"        pop {si}")
+                    self.emit(f"        add {si}, {self.target.acc}")
+                if is_byte:
+                    self.emit_byte_load_zx(f"[{si}]")
+                elif narrow_word:
+                    _word_load(si)
+                else:
+                    self.emit(f"        mov {self.target.acc}, [{si}]")
+                self._si_scratch_guard_end(guarded=guarded)
+                # AX now holds the subscript result, not the index —
+                # invalidate the tracking that generate_expression set.
+                self.ax_clear()
 
     def _generate_logical_value(self, expression: Node, /) -> None:
         """Materialize a ``LogicalAnd`` / ``LogicalOr`` into the accumulator as 0 or 1.
@@ -1698,213 +2424,9 @@ class EmissionMixin:
                 self.ax_is_byte = False
             self.ax_local = vname
         elif isinstance(expression, Index):
-            self.ax_clear()
-            vname = expression.array.name
-            index_expression = expression.index
-            self._check_defined(vname, line=expression.line)
-            # Pointee / element width selects the load encoding.  For
-            # ``unsigned short *p`` on the 32-bit target ``mov eax, [esi]``
-            # would read 4 bytes; we must emit ``movzx eax, word [esi]``
-            # to read exactly the 2-byte element.  Constant-index
-            # offsets also scale by the pointee width, not the target
-            # int_size.  Byte loads stay on their dedicated fast path
-            # (``emit_byte_load_zx``) because that also clears AH.
-            is_byte = self._is_byte_var(vname)
-            if vname in self.array_labels:
-                pointee_size = self.target.int_size
-            else:
-                pointee_size = self._index_pointee_size(vname)
-            # 4-byte pointee on a 16-bit target needs DX:AX; that's the
-            # long-pointee case the IR routes through generate_long_expression
-            # — fall back to the historical full-acc load here and let the
-            # caller diagnose the type mismatch.  Otherwise, clamp the
-            # load width to min(pointee_size, int_size).
-            narrow_word = (not is_byte) and 1 < pointee_size < self.target.int_size
-
-            emitter = self
-
-            def _word_load(address: str) -> None:
-                # Use the 16-bit alias of acc (``ax`` on 32-bit) to emit
-                # ``movzx eax, word [...]``; on 16-bit acc is already 2
-                # bytes so a plain ``mov ax, [...]`` is correct.
-                if emitter.target.int_size > 2:
-                    emitter.emit(f"        movzx {emitter.target.acc}, word [{address}]")
-                else:
-                    emitter.emit(f"        mov {emitter.target.acc}, [{address}]")
-
-            if isinstance(index_expression, Int) and vname in self.array_labels:
-                offset = index_expression.value * self.target.int_size
-                label = self.array_labels[vname]
-                addr = f"{label}+{offset}" if offset else label
-                self.emit(f"        mov {self.target.acc}, [{addr}]")
-            elif isinstance(index_expression, Int):
-                if is_byte:
-                    stride = 1
-                else:
-                    stride = pointee_size if narrow_word else self.target.int_size
-                offset = index_expression.value * stride
-                # Direct memory access for constant/aliased bases:
-                # emit `mov ax, [CONST+N]` instead of `mov bx, CONST / mov ax, [bx+N]`.
-                const_base = self._resolve_constant(vname)
-                if const_base is not None:
-                    addr = f"{const_base}+{offset}" if offset else const_base
-                    if is_byte:
-                        self.emit_byte_load_zx(f"[{addr}]")
-                    elif narrow_word:
-                        _word_load(addr)
-                    else:
-                        self.emit(f"        mov {self.target.acc}, [{addr}]")
-                else:
-                    guarded = self._si_scratch_guard_begin(vname)
-                    self._emit_load_var(vname, register=self.target.si_register)
-                    si = self.target.si_register
-                    mem_inner = f"{si}+{offset}" if offset else si
-                    if is_byte:
-                        self.emit_byte_load_zx(f"[{mem_inner}]")
-                    elif narrow_word:
-                        _word_load(mem_inner)
-                    else:
-                        self.emit(f"        mov {self.target.acc}, [{mem_inner}]")
-                    self._si_scratch_guard_end(guarded=guarded)
-            else:
-                const_base = self._resolve_constant(vname)
-                if const_base is not None:
-                    self.emit_constant_reference(vname)
-                    guarded = self._si_scratch_guard_begin(vname)
-                    addr = self._emit_constant_base_index_addr(
-                        const_base=const_base,
-                        element_size=1 if is_byte else (pointee_size if narrow_word else self.target.int_size),
-                        index=index_expression,
-                        preserve_ax=False,
-                    )
-                    if is_byte:
-                        self.emit_byte_load_zx(f"[{addr}]")
-                    elif narrow_word:
-                        _word_load(addr)
-                    else:
-                        self.emit(f"        mov {self.target.acc}, [{addr}]")
-                    self._si_scratch_guard_end(guarded=guarded)
-                    self.ax_clear()
-                else:
-                    guarded = self._si_scratch_guard_begin(vname)
-                    self._emit_load_var(vname, register=self.target.si_register)
-                    si = self.target.si_register
-                    # Index scaling: ``p[i]`` advances by sizeof(*p)
-                    # bytes per ``i``, so a narrow pointee (unsigned short* on
-                    # the 32-bit target) needs scale=2 not the acc's 4.
-                    if narrow_word:
-                        scale_size = pointee_size
-                    elif is_byte:
-                        scale_size = 1
-                    else:
-                        scale_size = self.target.int_size
-
-                    def _scale(register: str, /) -> None:
-                        if scale_size == 1:
-                            return
-                        if scale_size == 2:
-                            emitter.emit(f"        add {register}, {register}")
-                        elif scale_size == 4:
-                            emitter.emit(f"        shl {register}, 2")
-                        else:
-                            emitter.emit(f"        imul {register}, {register}, {scale_size}")
-
-                    # If the index is a pinned variable and the access is
-                    # byte-sized, load it without clobbering SI.
-                    if is_byte and isinstance(index_expression, Var) and index_expression.name in self.pinned_register:
-                        ireg = self.pinned_register[index_expression.name]
-                        self.emit(f"        add {si}, {ireg}")
-                    elif isinstance(index_expression, (Var, Int)):
-                        # Simple Var/Int load doesn't touch SI, so skip the
-                        # push/pop round-trip.
-                        self.generate_expression(index_expression)
-                        if not is_byte:
-                            _scale(self.target.acc)
-                        self.emit(f"        add {si}, {self.target.acc}")
-                    else:
-                        self.emit(f"        push {si}")
-                        self.generate_expression(index_expression)
-                        if not is_byte:
-                            _scale(self.target.acc)
-                        self.emit(f"        pop {si}")
-                        self.emit(f"        add {si}, {self.target.acc}")
-                    if is_byte:
-                        self.emit_byte_load_zx(f"[{si}]")
-                    elif narrow_word:
-                        _word_load(si)
-                    else:
-                        self.emit(f"        mov {self.target.acc}, [{si}]")
-                    self._si_scratch_guard_end(guarded=guarded)
-                    # AX now holds the subscript result, not the index —
-                    # invalidate the tracking that generate_expression set.
-                    self.ax_clear()
+            self._generate_index_expression(expression)
         elif isinstance(expression, DoubleIndex):
-            self.ax_clear()
-            vname = expression.array.name
-            self._check_defined(vname, line=expression.line)
-            # Stage 1: load name[outer_index] into AX via the existing
-            # Index path (handles constant-base, pinned-SI, byte vs word
-            # widths uniformly).  For ``char *foo[N]`` this is a 4-byte
-            # pointer load; for ``int *foo[N]`` likewise.
-            outer_load = Index(array=expression.array, index=expression.outer_index, line=expression.line)
-            self.generate_expression(outer_load)
-            # Stage 2: index into the pointer in AX.  Element width is
-            # the pointee of the outer-array's element type — i.e.
-            # ``sizeof(*element)``.  For ``char *arr[N]`` the element
-            # type is ``"char*"`` so the inner stride is
-            # ``sizeof(char) == 1``.  ``_index_pointee_size`` is
-            # array-aware (returns sizeof(element)), so for DoubleIndex
-            # we strip the recorded element type's trailing ``*`` and
-            # consult ``target.type_size`` directly.
-            si = self.target.si_register
-            self.emit(f"        mov {si}, {self.target.acc}")
-            element_type = self.variable_types.get(vname, "")
-            if element_type.endswith("*"):
-                pointee = element_type[:-1].rstrip()
-                try:
-                    inner_size = self.target.type_size(pointee)
-                except KeyError:
-                    inner_size = self.target.int_size
-            else:
-                inner_size = self.target.int_size
-            is_byte_inner = inner_size == 1
-            inner = expression.inner_index
-            if isinstance(inner, Int):
-                offset = inner.value * (1 if is_byte_inner else inner_size)
-                mem = f"{si}+{offset}" if offset else si
-                if is_byte_inner:
-                    self.emit_byte_load_zx(f"[{mem}]")
-                else:
-                    self.emit(f"        mov {self.target.acc}, [{mem}]")
-            elif isinstance(inner, Var):
-                # Var load doesn't touch SI, so no push/pop round-trip.
-                self.generate_expression(inner)
-                if not is_byte_inner:
-                    if inner_size == self.target.int_size:
-                        self._emit_scale_int_index(self.target.acc)
-                    else:
-                        self.emit(f"        imul {self.target.acc}, {self.target.acc}, {inner_size}")
-                self.emit(f"        add {si}, {self.target.acc}")
-                if is_byte_inner:
-                    self.emit_byte_load_zx(f"[{si}]")
-                else:
-                    self.emit(f"        mov {self.target.acc}, [{si}]")
-            else:
-                # General inner expression — preserve SI across evaluation.
-                self.emit(f"        push {si}")
-                self.generate_expression(inner)
-                if not is_byte_inner:
-                    if inner_size == self.target.int_size:
-                        self._emit_scale_int_index(self.target.acc)
-                    else:
-                        self.emit(f"        imul {self.target.acc}, {self.target.acc}, {inner_size}")
-                self.emit(f"        pop {si}")
-                self.emit(f"        add {si}, {self.target.acc}")
-                if is_byte_inner:
-                    self.emit_byte_load_zx(f"[{si}]")
-                else:
-                    self.emit(f"        mov {self.target.acc}, [{si}]")
-            self.ax_clear()
+            self._generate_double_index_expression(expression)
         elif isinstance(expression, SizeofExpr):
             self.ax_clear()
             inferred_type = self._expression_type(expression.expression)
@@ -1951,239 +2473,7 @@ class EmissionMixin:
         elif isinstance(expression, IndexedCall):
             self.generate_indexed_call(expression)
         elif isinstance(expression, BinaryOperation):
-            # Fold an entirely-constant subtree (named constants and
-            # integer literals) into a single ``mov ax, <expr>`` so the
-            # assembler does the arithmetic.  Without this, expressions
-            # like ``O_WRONLY + O_CREAT + O_TRUNC`` build the value at
-            # runtime via push/pop chains.
-            if (constant_expr := self._constant_expression(expression)) is not None:
-                for name in self._collect_constant_references(expression):
-                    self.emit_constant_reference(name)
-                self.emit(f"        mov {self.target.acc}, {constant_expr}")
-                self.ax_clear()
-                return
-            operator, left, right = expression.operation, expression.left, expression.right
-            # Pointer arithmetic: scale the right operand by the element size when
-            # the left side is a pointer or array variable.  ptr + N → ptr + N*sizeof(*ptr).
-            # For byte pointers (char*, unsigned char*) element_size is 1 so nothing changes.
-            if operator in ("+", "-") and isinstance(left, Var):
-                element_size = self._arithmetic_element_size(left.name)
-                if element_size > 1:
-                    right = BinaryOperation(left=right, operation="*", right=Int(value=element_size))
-            if operator == "%" and self._has_remainder(left, right):
-                self.emit(f"        mov {self.target.acc}, {self.target.dx_register}")
-                self.ax_clear()
-                return
-            if operator in ("+", "-", "&", "|", "^") and isinstance(right, Int):
-                # Fast path: reg operation imm uses the immediate form, skipping
-                # the mov-into-cx scratch step.  Saves 2-3 bytes per site.
-                self.generate_expression(left)
-                # +1 and -1 fit in a 1-byte inc/dec.
-                if operator == "+" and right.value == 1:
-                    self.emit(f"        inc {self.target.acc}")
-                elif operator == "-" and right.value == 1:
-                    self.emit(f"        dec {self.target.acc}")
-                elif operator == "^" and (right.value & 0xFFFF) == 0xFFFF and isinstance(self.target, X86CodegenTarget16):
-                    # ``x ^ 0xFFFF`` is the ``~x`` lowering — ``not ax``
-                    # is 2 bytes vs. 3 for ``xor ax, 0xFFFF``.
-                    self.emit(f"        not {self.target.acc}")
-                else:
-                    mnemonic = {"+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor"}[operator]
-                    self.emit(f"        {mnemonic} {self.target.acc}, {right.value}")
-                self.ax_clear()
-                return
-            if operator == "<<" and isinstance(right, Int):
-                shift = right.value & 0x1F
-                # Fast path: shl r, imm — one instruction, no CX scratch.
-                self.generate_expression(left)
-                if shift == 0:
-                    pass
-                elif shift >= self.target.int_size * 8:
-                    self.emit(f"        xor {self.target.acc}, {self.target.acc}")
-                else:
-                    self.emit(f"        shl {self.target.acc}, {shift}")
-                self.ax_clear()
-                return
-            if operator == ">>" and isinstance(right, Int):
-                shift = right.value & 0x1F
-                # Special case: `local >> 8` when ``local`` lives in memory.
-                # Loading the high byte directly avoids one instruction
-                # over `mov ax, [local]` + `shr ax, 8`, and doesn't waste
-                # an ALU operation on a shift that's really a byte-select.
-                # Byte-scalar locals / globals have no high byte — their
-                # storage is a single ``db`` cell, so bail to the general
-                # shift path (which loads zero).
-                if (
-                    shift == 8
-                    and isinstance(self.target, X86CodegenTarget16)
-                    and isinstance(left, Var)
-                    and self._is_memory_scalar(left.name)
-                    and left.name not in self.pinned_register
-                    and left.name not in self.array_labels
-                    and not self._is_byte_scalar(left.name)
-                ):
-                    self.emit_byte_load_zx(f"[{self._local_address(left.name)}+1]")
-                    self.ax_clear()
-                    return
-                # Fast path: shr r, imm — one instruction, no CX scratch.
-                self.generate_expression(left)
-                if shift == 0:
-                    pass
-                elif shift >= self.target.int_size * 8:
-                    self.emit(f"        xor {self.target.acc}, {self.target.acc}")
-                else:
-                    self.emit(f"        shr {self.target.acc}, {shift}")
-                self.ax_clear()
-                return
-            if operator == "*" and isinstance(right, Int):
-                n = right.value
-                self.generate_expression(left)
-                if n == 0:
-                    self.emit(f"        xor {self.target.acc}, {self.target.acc}")
-                elif n > 0 and (n & (n - 1)) == 0:
-                    shift = (n).bit_length() - 1
-                    if shift > 0:
-                        self.emit(f"        shl {self.target.acc}, {shift}")
-                else:
-                    self.emit(f"        imul {self.target.acc}, {n}")
-                self.ax_clear()
-                return
-            # Fast path for ``+`` / ``-`` with a stack-resident right
-            # operand: ``add ax, [mem]`` is shorter than ``mov cx,
-            # [mem] / add ax, cx``.  Logical ops could take the same
-            # shape, but expanding handle_and / handle_or / handle_xor
-            # in the self-host assembler to accept ``r, [reg+disp]``
-            # costs more bytes in asm.c than the ~74 bytes reclaimed
-            # across the 37 eligible callsites, so those stay on the
-            # CX fallback path.
-            if (
-                operator in ("+", "-")
-                and isinstance(right, Var)
-                and self._is_memory_scalar(right.name)
-                and right.name not in self.pinned_register
-                and right.name not in self.variable_arrays
-                and self.variable_types.get(right.name) != "unsigned long"
-                and not self._is_byte_scalar(right.name)
-            ):
-                self.generate_expression(left)
-                mnemonic = "add" if operator == "+" else "sub"
-                self.emit(f"        {mnemonic} {self.target.acc}, [{self._local_address(right.name)}]")
-                self.ax_clear()
-                return
-            # Byte-scalar right operand for ``+`` / ``-``: a word-
-            # sized ``add ax, [mem]`` / ``sub ax, [mem]`` would read
-            # the adjacent byte into the high byte, so split into
-            # ``add al, [mem] / adc ah, 0`` (or ``sub`` / ``sbb``).
-            # The byte-wide operation on AL with the carry / borrow propagate
-            # on AH matches word semantics for an unsigned-byte
-            # operand: its high byte is known zero, so adding or
-            # subtracting zero from AH and folding in the carry /
-            # borrow out of AL produces the same 16-bit result as
-            # the word operation would.  5 bytes vs 11+ bytes of the CX
-            # fallback.
-            if (
-                operator in ("+", "-")
-                and isinstance(right, Var)
-                and self._is_byte_scalar(right.name)
-                and right.name not in self.variable_arrays
-            ):
-                self.generate_expression(left)
-                address = self._local_address(right.name)
-                if operator == "+":
-                    self.emit(f"        add al, [{address}]")
-                    self.emit("        adc ah, 0")
-                else:
-                    self.emit(f"        sub al, [{address}]")
-                    self.emit("        sbb ah, 0")
-                self.ax_clear()
-                return
-            # Fast path for ``+``/``-``/``&``/``|``/``^`` with a
-            # pinned-register right operand: arithmetic targets the
-            # register directly, skipping the `mov cx, <reg>` load and
-            # any CX save/restore.  When the pinned register is CX,
-            # require ``left`` to be a leaf so generate_expression
-            # can't clobber it mid-compute.
-            if operator in ("+", "-", "&", "|", "^") and isinstance(right, Var) and right.name in self.pinned_register:
-                source = self.pinned_register[right.name]
-                if source != self.target.count_register or isinstance(left, (Int, Var, String)):
-                    self.generate_expression(left)
-                    mnemonic = {"+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor"}[operator]
-                    if len(source) < len(self.target.acc):
-                        # 16-bit pinned reg into 32-bit acc: push into count_register first.
-                        self.emit(f"        movzx {self.target.count_register}, {source}")
-                        self.emit(f"        {mnemonic} {self.target.acc}, {self.target.count_register}")
-                    else:
-                        self.emit(f"        {mnemonic} {self.target.acc}, {source}")
-                    self.ax_clear()
-                    return
-            count_pinned_var = next(
-                (name for name, register in self.pinned_register.items() if register == self.target.count_register),
-                None,
-            )
-            # Skip the CX save when an enclosing store is about to
-            # overwrite CX anyway — its original value is dead.
-            protect_count = count_pinned_var is not None and self.store_target_register != self.target.count_register
-            if protect_count:
-                self.emit(f"        push {self.target.count_register}")
-            self.emit_binary_operator_operands(left, right)  # AX = left, CX = right
-            if operator == "+":
-                self.emit(f"        add {self.target.acc}, {self.target.count_register}")
-            elif operator == "-":
-                self.emit(f"        sub {self.target.acc}, {self.target.count_register}")
-            elif operator == "&":
-                self.emit(f"        and {self.target.acc}, {self.target.count_register}")
-            elif operator == "|":
-                self.emit(f"        or {self.target.acc}, {self.target.count_register}")
-            elif operator == "^":
-                self.emit(f"        xor {self.target.acc}, {self.target.count_register}")
-            elif operator == "<<":
-                self.emit(f"        shl {self.target.acc}, cl")
-            elif operator == ">>":
-                self.emit(f"        shr {self.target.acc}, cl")
-            elif operator == "*":
-                protect_dx = (
-                    any(register == self.target.dx_register for register in self.pinned_register.values())
-                    and self.store_target_register != self.target.dx_register
-                )
-                if protect_dx:
-                    self.emit(f"        push {self.target.dx_register}")
-                self.emit(f"        mul {self.target.count_register}")
-                if protect_dx:
-                    self.emit(f"        pop {self.target.dx_register}")
-                self.division_remainder = None
-            elif operator in {"/", "%"}:
-                dx_pinned = any(register == self.target.dx_register for register in self.pinned_register.values())
-                protect_dx = dx_pinned and self.store_target_register != self.target.dx_register
-                if protect_dx:
-                    self.emit(f"        push {self.target.dx_register}")
-                self.emit(f"        xor {self.target.dx_register}, {self.target.dx_register}")
-                self.emit(f"        div {self.target.count_register}")
-                if operator == "%":
-                    self.emit(f"        mov {self.target.acc}, {self.target.dx_register}")
-                if protect_dx:
-                    self.emit(f"        pop {self.target.dx_register}")
-                if dx_pinned:
-                    self.division_remainder = None
-                else:
-                    self.division_remainder = (left, right)
-            elif operator in JUMP_WHEN_FALSE:
-                # Booleanize the comparison: AX = 1 if ``left <operation> right``,
-                # else 0.  ``mov ax, 0`` preserves the flags set by ``cmp``
-                # (unlike ``xor ax, ax``), so the jump-when-false branch
-                # reads the right condition.
-                skip_label = f".bool_{self.new_label()}"
-                self.emit(f"        cmp {self.target.acc}, {self.target.count_register}")
-                self.emit(f"        mov {self.target.acc}, 0")
-                table = JUMP_WHEN_FALSE_UNSIGNED if self._is_unsigned_comparison(left, right) else JUMP_WHEN_FALSE
-                self.emit(f"        {table[operator]} {skip_label}")
-                self.emit(f"        inc {self.target.acc}")
-                self.emit(f"{skip_label}:")
-            else:
-                message = f"unknown operator: {operator}"
-                raise CompileError(message, line=expression.line)
-            if protect_count:
-                self.emit(f"        pop {self.target.count_register}")
-            self.ax_clear()
+            self._generate_binary_operation_expression(expression)
         elif isinstance(expression, AddressOf):
             name = expression.var.name
             if name in self.out_register_locals:
@@ -2314,66 +2604,7 @@ class EmissionMixin:
                 self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
                 self.ax_clear()
         elif isinstance(expression, AssignExpr):
-            # Parenthesized assignment used as an expression (AST path — only
-            # reached for ``main`` and other functions that bypass the IR
-            # builder).  The IR path handles ``AssignExpr`` correctly via
-            # ``cc.ir.Builder._lower_assign_expr`` (evaluates the RHS into a
-            # temp, rewrites the *Assign, emits it as a statement).
-            #
-            # For the AST path: every store function evaluates the RHS into AX
-            # first and writes AX to the destination.  After the store, AX
-            # physically holds the stored value even when ``ax_clear()`` was
-            # called internally (that call only clears the *tracking* metadata,
-            # not the register).  Calling the store function directly (not
-            # through ``generate_statement``, which appends another
-            # ``ax_clear()``) leaves AX = assigned value as required.
-            # Plain ``Assign`` is a special case: ``emit_store_local`` does the
-            # evaluation + store and tracks ``ax_local``; reading the variable
-            # via ``generate_expression(Var(...))`` is then a no-op.
-            inner = expression.inner
-            if isinstance(inner, Assign):
-                self._check_defined(inner.name, line=inner.line)
-                self.emit_store_local(expression=inner.expr, name=inner.name)
-                self.generate_expression(Var(line=inner.line, name=inner.name))
-            elif isinstance(inner, DerefAssign):
-                # ``generate_statement`` on DerefAssign evaluates expr → AX,
-                # stores, then calls ax_clear().  AX still holds the value
-                # after the store.  Call the statement path and then force AX
-                # back to the value with a direct load (no re-evaluation of
-                # the RHS — use the already-written pointee read).
-                self.generate_statement(inner)
-                # AX is cleared by tracking but physically holds the value;
-                # restore tracking so the caller can rely on AX.
-                # Re-evaluate expr only if it is a trivial constant/variable
-                # (avoids double function-call).  For non-trivial RHSs, the
-                # physical AX value is already correct — just re-mark it via
-                # generate_expression on a Var if we know the name.
-                if isinstance(inner.expr, (Int, Var)):
-                    self.generate_expression(inner.expr)
-            elif isinstance(inner, DerefIncrementAssign):
-                # Same pattern as DerefAssign: the statement path evaluates
-                # expr → AX, stores, bumps pointer, clears AX tracking.  The
-                # assigned value (the expr value, not the post-bump pointer) is
-                # still physically in AX.  No re-evaluation needed.
-                self.generate_statement(inner)
-            elif isinstance(inner, PointerDereferenceAssign):
-                self._emit_pointer_dereference_assign(inner)
-            elif isinstance(inner, IndexAssign):
-                self.generate_index_assign(inner)
-            elif isinstance(inner, MemberAssign):
-                if self._member_assign_targets_bitfield(inner):
-                    message = "assignment-as-expression to bitfield fields is not supported"
-                    raise CompileError(message, line=expression.line)
-                self.generate_member_assign(inner)
-            elif isinstance(inner, MemberIndexAssign):
-                self.generate_member_index_assign(inner)
-            elif isinstance(inner, IndexMemberAssign):
-                self.generate_index_member_assign(inner)
-            elif isinstance(inner, IndexMemberIndexAssign):
-                self.generate_index_member_index_assign(inner)
-            else:
-                message = f"AssignExpr: unsupported inner node type '{type(inner).__name__}'"
-                raise CompileError(message, line=expression.line)
+            self._generate_assign_expr(expression)
         else:
             message = f"unknown expression: {type(expression).__name__}"
             raise CompileError(message, line=expression.line)
@@ -2833,42 +3064,13 @@ class EmissionMixin:
         is_fastcall = name != "main" and function.regparm_count > 0
         regparm_count = function.regparm_count if is_fastcall else 0
         regparm_registers = (self.target.acc, self.target.dx_register, self.target.count_register)[:regparm_count]
-        # Allocate parameters and record their types.
-        for param in parameters:
-            if param.name in self.global_scalars or param.name in self.global_arrays:
-                message = f"parameter '{param.name}' shadows a file-scope global"
-                raise CompileError(message, line=function.line)
-        if name == "main":
-            # main parameters are handled by emit_argument_vector_startup.
-            for param in parameters:
-                self.allocate_local(param.name)
-                self.variable_types[param.name] = param.type
-                if param.is_array:
-                    self.variable_arrays.add(param.name)
-        else:
-            # Non-main: record parameter types; stack offsets are kept
-            # as fallbacks but parameters will be pinned to registers
-            # when safe_pin_registers has room.
-            caller_push_index = 0
-            for i, param in enumerate(parameters):
-                self.variable_types[param.name] = param.type
-                if param.is_array:
-                    self.variable_arrays.add(param.name)
-                if param.out_register is not None:
-                    # Output-only register param: no caller-pushed stack slot.
-                    # Track it so DerefAssign in the body emits mov <reg>, <val>.
-                    self.out_register_locals[param.name] = param.out_register
-                    continue
-                if param.in_register is not None:
-                    # Input register param: caller puts arg in named register (no push).
-                    # Allocate a local slot below; spilled after sub sp,N in prologue.
-                    continue
-                if is_fastcall and i < regparm_count:
-                    # Register-passed params get local slots allocated
-                    # below; they have no caller-pushed address.
-                    continue
-                self.locals[param.name] = -(self.target.param_slot_base + caller_push_index * self.target.int_size)  # negative = above bp
-                caller_push_index += 1
+        self._allocate_function_parameters(
+            function_line=function.line,
+            is_fastcall=is_fastcall,
+            name=name,
+            parameters=parameters,
+            regparm_count=regparm_count,
+        )
 
         self.discover_virtual_long_locals(body)
         self.safe_pin_registers = self.compute_safe_pin_registers(body, parameters=parameters)
@@ -2989,69 +3191,15 @@ class EmissionMixin:
         else:
             self.emit(f"{name}:")
         if not self.elide_frame:
-            for reg in self.current_preserve_registers:
-                self.emit(f"        push {reg}")
-            self.emit(f"        push {self.target.base_register}")
-            self.emit(f"        mov {self.target.base_register}, {self.target.stack_register}")
-            if self.frame_size > 0:
-                self.emit(f"        sub {self.target.stack_register}, {self.frame_size}")
-            if is_fastcall:
-                # Spill the caller-supplied regparm registers into their
-                # local slots so the body can read them through the normal
-                # local path.
-                for i, register in enumerate(regparm_registers):
-                    slot = self.locals[parameters[i].name]
-                    self.emit(f"        mov [{self.target.base_register}-{slot}], {register}")
-            for param in parameters:
-                if param.in_register is not None:
-                    if not self._param_slot_is_read(body, param.name):
-                        continue  # named register holds the value; skip the dead spill
-                    slot = self.locals[param.name]
-                    # Zero-extend narrower in_register values into the
-                    # full int-width slot so subsequent reads (which load
-                    # the whole slot via the accumulator) don't pick up
-                    # uninitialised stack bytes.  For full-width E-register
-                    # pins the named register already covers the slot.
-                    #
-                    # Byte-typed parameters (``char`` / ``unsigned char``) treat
-                    # the named register as the *byte* alias — only AL is
-                    # the value, AH is undefined per the asm-side calling
-                    # convention (e.g. ``lodsb; call f``).  Widening from
-                    # the byte alias scrubs AH-garbage out of the spilled
-                    # slot.  Pinning a byte-typed parameter to a register
-                    # without a byte alias (esi / edi / ebp / esp) is
-                    # rejected at codegen time.
-                    if param.type in self.BYTE_TYPES:
-                        source = self.target.low_byte(param.in_register)
-                        if source is None:
-                            message = (
-                                f"byte-typed parameter '{param.name}' cannot be pinned to register "
-                                f"'{param.in_register}' — no low-byte alias in the target encoding"
-                            )
-                            raise CompileError(message, line=function.line)
-                        self.emit(f"        movzx {self.target.acc}, {source}")
-                        self.emit(f"        mov [{self.target.base_register}-{slot}], {self.target.acc}")
-                        continue
-                    widened = self.target.widen_gp(param.in_register)
-                    if widened != param.in_register:
-                        self.emit(f"        movzx {widened}, {param.in_register}")
-                        self.emit(f"        mov [{self.target.base_register}-{slot}], {widened}")
-                    else:
-                        self.emit(f"        mov [{self.target.base_register}-{slot}], {param.in_register}")
-            if not register_convention:
-                # Load pinned parameters from caller-pushed stack slots
-                # into their registers.
-                caller_push_index = 0
-                for i, param in enumerate(parameters):
-                    if is_fastcall and i < regparm_count:
-                        continue
-                    if param.out_register is not None:
-                        continue
-                    if param.name in self.pinned_register:
-                        register = self.pinned_register[param.name]
-                        offset = self.target.param_slot_base + caller_push_index * self.target.int_size
-                        self.emit(f"        mov {register}, [{self.target.base_register}+{offset}]")
-                    caller_push_index += 1
+            self._emit_function_prologue(
+                body=body,
+                function_line=function.line,
+                is_fastcall=is_fastcall,
+                parameters=parameters,
+                regparm_count=regparm_count,
+                regparm_registers=regparm_registers,
+                register_convention=register_convention,
+            )
 
         # IR path: register string literals discovered during IR building.
         self._ir_string_map: dict[str, str] = {}
@@ -3093,59 +3241,7 @@ class EmissionMixin:
                 raise CompileError(message, line=ref_line)
 
         if name == "main":
-            # Implicit fall-off end of main: default the exit code to 0
-            # so chained shells (`cmd && next`) behave as expected.
-            # An explicit `return N;` earlier in the body has already
-            # set EAX via generate_return; reaching this point means
-            # control fell off without one, hence the zero default.
-            self.emit(f"        xor {self.target.acc}, {self.target.acc}")
-            self._emit_libbboeos_jmp("FUNCTION_EXIT")
-            if self.elide_frame:
-                # Plain int / pointer locals get the target's native
-                # integer width (``dw`` / ``dd``); ``unsigned long``
-                # always stays 4 bytes (``dd``) regardless of mode;
-                # byte-scalar locals always stay 1 byte (``db``);
-                # local stack arrays reserve their full byte count.
-                #
-                # In flat mode these cells are emitted inline at the
-                # tail of the function (zeros sit in .text under
-                # ``org 08048000h`` and the program loader skips them).
-                # In object mode they instead get collected into
-                # ``self.elided_local_bss_vars`` and laid down later in
-                # ``section .bss`` via ``resb`` reservations, so the
-                # .text section stays code-only and the linker can
-                # pack .text from multiple objects without dragging
-                # zero pads between them.
-                int_directive = "dd 0" if self.target.int_size == 4 else "dw 0"
-                for vname in sorted(self.locals):
-                    if vname in self.local_stack_arrays:
-                        byte_count = self.local_stack_arrays[vname]
-                        if self.object_mode:
-                            self.elided_local_bss_vars.append((vname, str(byte_count)))
-                        else:
-                            self.emit(f"_l_{vname}: times {byte_count} db 0")
-                    elif self.variable_types.get(vname) == "unsigned long":
-                        if self.object_mode:
-                            self.elided_local_bss_vars.append((vname, "4"))
-                        else:
-                            self.emit(f"_l_{vname}: dd 0")
-                    elif vname in self.byte_scalar_locals:
-                        if self.object_mode:
-                            self.elided_local_bss_vars.append((vname, "1"))
-                        else:
-                            self.emit(f"_l_{vname}: db 0")
-                    elif self.variable_types.get(vname, "").startswith("struct ") and not self.variable_types[vname].endswith("*"):
-                        type_name = self.variable_types[vname]
-                        tag = type_name[7:]
-                        struct_byte_count = self.struct_sizes[tag]
-                        if self.object_mode:
-                            self.elided_local_bss_vars.append((vname, str(struct_byte_count)))
-                        else:
-                            self.emit(f"_l_{vname}: times {struct_byte_count} db 0")
-                    elif self.object_mode:
-                        self.elided_local_bss_vars.append((vname, str(self.target.int_size)))
-                    else:
-                        self.emit(f"_l_{vname}: {int_directive}")
+            self._emit_main_exit_tail()
         elif ir_body is not None:
             # IR path: generate epilogue unless the body always exits.
             # Tail-call optimization is not yet applied on the IR path.
