@@ -496,15 +496,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     for operand in (*statement.inputs, *statement.outputs):
                         if isinstance(operand.expression, Var):
                             result.add(operand.expression.name)
-                elif isinstance(statement, If):
-                    _walk(statement.body)
-                    if statement.else_body is not None:
-                        _walk(statement.else_body)
                 elif isinstance(statement, (Compound, DoWhile, While)):
                     _walk(statement.body)
                 elif isinstance(statement, For):
                     _walk(statement.init)
                     _walk(statement.body)
+                elif isinstance(statement, If):
+                    _walk(statement.body)
+                    if statement.else_body is not None:
+                        _walk(statement.else_body)
                 elif isinstance(statement, Switch):
                     for case in statement.cases:
                         _walk(case.body)
@@ -530,12 +530,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             for statement in statements:
                 if isinstance(statement, VarDecl) and statement.type_name == "function_pointer":
                     function_pointer_vars.add(statement.name)
+                elif isinstance(statement, (Compound, DoWhile, While)):
+                    visit(statement.body)
                 elif isinstance(statement, If):
                     visit(statement.body)
                     if statement.else_body is not None:
                         visit(statement.else_body)
-                elif isinstance(statement, (Compound, DoWhile, While)):
-                    visit(statement.body)
                 elif isinstance(statement, Switch):
                     for case in statement.cases:
                         visit(case.body)
@@ -2671,15 +2671,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     if eligible:
                         body_candidates.append((statement.name, order))
                         order += 1
-                if isinstance(statement, If):
-                    collect(statement.body, top_level=False)
-                    if statement.else_body is not None:
-                        collect(statement.else_body, top_level=False)
-                elif isinstance(statement, (Compound, DoWhile, While)):
+                if isinstance(statement, (Compound, DoWhile, While)):
                     collect(statement.body, top_level=False)
                 elif isinstance(statement, For):
                     collect(statement.init, top_level=False)
                     collect(statement.body, top_level=False)
+                elif isinstance(statement, If):
+                    collect(statement.body, top_level=False)
+                    if statement.else_body is not None:
+                        collect(statement.else_body, top_level=False)
                 elif isinstance(statement, Switch):
                     for case in statement.cases:
                         collect(case.body, top_level=False)
@@ -2897,12 +2897,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             for statement in stmts:
                 if isinstance(statement, Assign) or (isinstance(statement, VarDecl) and statement.init is not None):
                     found.add(statement.name)
+                elif isinstance(statement, (Compound, DoWhile, While)):
+                    found |= loop_writes(statement.body)
                 elif isinstance(statement, If):
                     found |= loop_writes(statement.body)
                     if statement.else_body is not None:
                         found |= loop_writes(statement.else_body)
-                elif isinstance(statement, (Compound, DoWhile, While)):
-                    found |= loop_writes(statement.body)
                 elif isinstance(statement, Switch):
                     for case in statement.cases:
                         found |= loop_writes(case.body)
