@@ -1568,6 +1568,19 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"undefined variable '{object_name}'"
             raise CompileError(message)
 
+    def _emit_mov_from_acc(self, register: str, /) -> None:
+        """Move the accumulator into *register*, narrowing the low word when needed.
+
+        No-op when *register* is already the accumulator.  Used after
+        ``generate_expression`` (or any other AX-leaving sequence) when
+        the value needs to land in a 16-bit destination on a 32-bit
+        target — in that case the low word of EAX is the right source.
+        """
+        if register == self.target.acc:
+            return
+        source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
+        self.emit(f"        mov {register}, {source}")
+
     def _emit_push_arg(self, arg: Node, /) -> None:
         """Push a single argument onto the stack, preferring compact forms.
 
@@ -1702,9 +1715,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # zero-extend, then shuttle into the target if it
                 # isn't acc already.
                 self.emit_byte_load_zx(f"[{self._local_address(arg.name)}]")
-                if target != self.target.acc:
-                    source = self.target.low_word(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
-                    self.emit(f"        mov {target}, {source}")
+                self._emit_mov_from_acc(target)
             else:
                 self.emit(f"        mov {target}, [{self._local_address(arg.name)}]")
         elif isinstance(arg, BinaryOperation):
@@ -1714,9 +1725,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # already verified that ``target`` is not read by any other
             # pending arg.  Evaluate into AX, then move into target.
             self.generate_expression(arg)
-            if target != self.target.acc:
-                source = self.target.low_word(self.target.acc) if len(target) < len(self.target.acc) else self.target.acc
-                self.emit(f"        mov {target}, {source}")
+            self._emit_mov_from_acc(target)
         else:
             message = f"register-arg target {target} given unexpected complex node {arg!r}"
             raise CompileError(message, line=getattr(arg, "line", None))
@@ -3963,9 +3972,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 new_ax_local = argument.name
                 new_ax_is_byte = False
         elif isinstance(argument, Var) and argument.name == self.ax_local:
-            if register != self.target.acc:
-                source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
-                self.emit(f"        mov {register}, {source}")
+            self._emit_mov_from_acc(register)
             # AX unchanged in both branches: shortcut leaves tracking intact.
         elif isinstance(argument, Var) and (argument.name in self.global_arrays or argument.name in self.local_stack_arrays):
             # Arrays live in memory but get their base address loaded,
@@ -3984,9 +3991,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # AX gets clobbered even when the final target is not
                 # AX, so we must refresh the tracking either way.
                 self.emit_byte_load_zx(f"[{self._local_address(argument.name)}]")
-                if register != self.target.acc:
-                    source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
-                    self.emit(f"        mov {register}, {source}")
+                self._emit_mov_from_acc(register)
                 new_ax_local = argument.name
                 new_ax_is_byte = True
             else:
@@ -4000,11 +4005,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 new_ax_is_byte = False
         else:
             self.generate_expression(argument)
-            if register != self.target.acc:
-                # In 32-bit mode, the result is in eax; narrow-register targets
-                # (bx, cx, dx, si, di) need the 16-bit low word of eax.
-                source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
-                self.emit(f"        mov {register}, {source}")
+            self._emit_mov_from_acc(register)
             # generate_expression leaves its own tracking; do not
             # override new_ax_local here.
             new_ax_local = self.ax_local
