@@ -3641,19 +3641,7 @@ class EmissionMixin:
             CompileError: If an unknown statement kind is encountered.
 
         """
-        if isinstance(statement, VarDecl):
-            self.visible_vars.add(statement.name)
-            self.variable_types[statement.name] = statement.type_name
-            if statement.name in self.constant_aliases:
-                return
-            if statement.init is not None:
-                if isinstance(statement.init, StructInitializer):
-                    self._emit_struct_initializer(statement.name, statement.init)
-                elif statement.name in self.zero_init_skippable:
-                    self.zero_init_skippable.discard(statement.name)
-                else:
-                    self.emit_store_local(expression=statement.init, name=statement.name)
-        elif isinstance(statement, ArrayDecl):
+        if isinstance(statement, ArrayDecl):
             self.visible_vars.add(statement.name)
             self.variable_types[statement.name] = statement.type_name
             if statement.init is not None:
@@ -3674,29 +3662,14 @@ class EmissionMixin:
         elif isinstance(statement, Assign):
             self._check_defined(statement.name, line=statement.line)
             self.emit_store_local(expression=statement.expr, name=statement.name)
-        elif isinstance(statement, IncrementDecrement):
-            # ``var++;`` / ``--var;`` etc. at statement scope — value
-            # discarded.  Share the expression-form codegen; the
-            # accumulator load it produces is unused, but
-            # ``ax_clear()`` invalidates the AX-tracking shortcut so a
-            # later read of ``var`` doesn't reuse a stale value.
-            self.generate_expression(statement)
-            self.ax_clear()
-        elif isinstance(statement, MemberIncrementDecrement):
-            # ``s->f++;`` / ``--s.f;`` at statement scope — value
-            # discarded; route through the expression-form codegen.
-            self.generate_expression(statement)
-            self.ax_clear()
-        elif isinstance(statement, IndexAssign):
-            self.generate_index_assign(statement)
-        elif isinstance(statement, IndexedCall):
-            self.generate_indexed_call(statement, discard_return=True)
-            self.ax_clear()
         elif isinstance(statement, Break):
             if not self.loop_end_labels:
                 message = "break outside of a loop"
                 raise CompileError(message, line=statement.line)
             self.emit(f"        jmp {self.loop_end_labels[-1]}")
+        elif isinstance(statement, Call):
+            self.generate_call(statement, discard_return=True)
+            self.ax_clear()
         elif isinstance(statement, Compound):
             self.generate_body(statement.body, scoped=True)
         elif isinstance(statement, Continue):
@@ -3704,38 +3677,6 @@ class EmissionMixin:
                 message = "continue outside of a loop"
                 raise CompileError(message, line=statement.line)
             self.emit(f"        jmp {self.loop_continue_labels[-1]}")
-        elif isinstance(statement, Goto):
-            self.user_labels_referenced.setdefault(statement.name, statement.line)
-            self.emit(f"        jmp .user_{statement.name}")
-        elif isinstance(statement, Label):
-            if statement.name in self.user_labels_defined:
-                message = f"duplicate label '{statement.name}'"
-                raise CompileError(message, line=statement.line)
-            self.user_labels_defined[statement.name] = statement.line
-            # A label is a basic-block boundary: any prior fall-through
-            # AX / SI tracking is invalid on the jump-arrival path.
-            self.ax_clear()
-            self.si_local = None
-            self.emit(f".user_{statement.name}:")
-        elif isinstance(statement, DoWhile):
-            self.ax_clear()
-            self.generate_do_while(statement)
-        elif isinstance(statement, For):
-            self.ax_clear()
-            self.generate_for(statement)
-        elif isinstance(statement, If):
-            self.generate_if(statement)
-        elif isinstance(statement, Switch):
-            self.ax_clear()
-            self.generate_switch(statement)
-        elif isinstance(statement, While):
-            self.ax_clear()
-            self.generate_while(statement)
-        elif isinstance(statement, Return):
-            self.generate_return(statement)
-        elif isinstance(statement, Call):
-            self.generate_call(statement, discard_return=True)
-            self.ax_clear()
         elif isinstance(statement, DerefAssign):
             if statement.pointer.name in self.out_register_locals:
                 reg = self.out_register_locals[statement.pointer.name]
@@ -3798,27 +3739,37 @@ class EmissionMixin:
             if statement.is_postfix:
                 self._emit_pointer_bump(delta=statement.delta, line=statement.line, name=target)
             self.ax_clear()
-        elif isinstance(statement, PointerDereferenceAssign):
-            self._emit_pointer_dereference_assign(statement)
+        elif isinstance(statement, DoWhile):
             self.ax_clear()
-        elif isinstance(statement, MemberAssign):
-            self.generate_member_assign(statement)
+            self.generate_do_while(statement)
+        elif isinstance(statement, ExtendedAsm):
+            self.generate_extended_asm(statement)
+        elif isinstance(statement, For):
             self.ax_clear()
-        elif isinstance(statement, MemberIndexAssign):
-            self.generate_member_index_assign(statement)
+            self.generate_for(statement)
+        elif isinstance(statement, Goto):
+            self.user_labels_referenced.setdefault(statement.name, statement.line)
+            self.emit(f"        jmp .user_{statement.name}")
+        elif isinstance(statement, If):
+            self.generate_if(statement)
+        elif isinstance(statement, IncrementDecrement):
+            # ``var++;`` / ``--var;`` etc. at statement scope — value
+            # discarded.  Share the expression-form codegen; the
+            # accumulator load it produces is unused, but
+            # ``ax_clear()`` invalidates the AX-tracking shortcut so a
+            # later read of ``var`` doesn't reuse a stale value.
+            self.generate_expression(statement)
             self.ax_clear()
+        elif isinstance(statement, IndexAssign):
+            self.generate_index_assign(statement)
         elif isinstance(statement, IndexMemberAssign):
             self.generate_index_member_assign(statement)
             self.ax_clear()
         elif isinstance(statement, IndexMemberIndexAssign):
             self.generate_index_member_index_assign(statement)
             self.ax_clear()
-        elif isinstance(statement, TailCall):
-            self.generate_tail_call(statement)
-        elif isinstance(statement, VaArg):
-            # ``va_arg(ap, T);`` at statement scope — advance the cursor
-            # (side effect) and discard the loaded value.
-            self.generate_expression(statement)
+        elif isinstance(statement, IndexedCall):
+            self.generate_indexed_call(statement, discard_return=True)
             self.ax_clear()
         elif isinstance(statement, InlineAsm):
             # Empty / inline-asm statement (produced by ``(void)expr;``
@@ -3827,8 +3778,57 @@ class EmissionMixin:
             # per line; empty content emits nothing.
             for line in decode_string_escapes(statement.content).splitlines():
                 self.emit(line)
-        elif isinstance(statement, ExtendedAsm):
-            self.generate_extended_asm(statement)
+        elif isinstance(statement, Label):
+            if statement.name in self.user_labels_defined:
+                message = f"duplicate label '{statement.name}'"
+                raise CompileError(message, line=statement.line)
+            self.user_labels_defined[statement.name] = statement.line
+            # A label is a basic-block boundary: any prior fall-through
+            # AX / SI tracking is invalid on the jump-arrival path.
+            self.ax_clear()
+            self.si_local = None
+            self.emit(f".user_{statement.name}:")
+        elif isinstance(statement, MemberAssign):
+            self.generate_member_assign(statement)
+            self.ax_clear()
+        elif isinstance(statement, MemberIncrementDecrement):
+            # ``s->f++;`` / ``--s.f;`` at statement scope — value
+            # discarded; route through the expression-form codegen.
+            self.generate_expression(statement)
+            self.ax_clear()
+        elif isinstance(statement, MemberIndexAssign):
+            self.generate_member_index_assign(statement)
+            self.ax_clear()
+        elif isinstance(statement, PointerDereferenceAssign):
+            self._emit_pointer_dereference_assign(statement)
+            self.ax_clear()
+        elif isinstance(statement, Return):
+            self.generate_return(statement)
+        elif isinstance(statement, Switch):
+            self.ax_clear()
+            self.generate_switch(statement)
+        elif isinstance(statement, TailCall):
+            self.generate_tail_call(statement)
+        elif isinstance(statement, VaArg):
+            # ``va_arg(ap, T);`` at statement scope — advance the cursor
+            # (side effect) and discard the loaded value.
+            self.generate_expression(statement)
+            self.ax_clear()
+        elif isinstance(statement, VarDecl):
+            self.visible_vars.add(statement.name)
+            self.variable_types[statement.name] = statement.type_name
+            if statement.name in self.constant_aliases:
+                return
+            if statement.init is not None:
+                if isinstance(statement.init, StructInitializer):
+                    self._emit_struct_initializer(statement.name, statement.init)
+                elif statement.name in self.zero_init_skippable:
+                    self.zero_init_skippable.discard(statement.name)
+                else:
+                    self.emit_store_local(expression=statement.init, name=statement.name)
+        elif isinstance(statement, While):
+            self.ax_clear()
+            self.generate_while(statement)
         else:
             message = f"unknown statement: {type(statement).__name__}"
             raise CompileError(message, line=statement.line)

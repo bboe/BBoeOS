@@ -39,40 +39,6 @@ ELF_OUTPUT = BUILD / "doom.elf"  # ELF with symbols — addr2line uses this
 MAP_OUTPUT = BUILD / "doom.map"  # ld map — function-by-function VMA layout
 OUTPUT = BUILD / "doom"  # flat binary — copy to disk image as bin/doom
 
-EXCLUDED_PLATFORM_BACKENDS = frozenset({
-    "doomgeneric_allegro",
-    "doomgeneric_emscripten",
-    "doomgeneric_linuxvt",
-    "doomgeneric_sdl",
-    "doomgeneric_soso",
-    "doomgeneric_sosox",
-    "doomgeneric_win",
-    "doomgeneric_xlib",
-})
-EXCLUDED_AUDIO_BACKENDS = frozenset({
-    "i_allegromusic",
-    "i_allegrosound",
-    "i_sdlmusic",
-    "i_sdlsound",
-})
-# doomgeneric ships an older, header-incompatible copy of these chocolate-doom
-# helpers (memio.{c,h}, mus2mid.{c,h}); we use the chocolate-doom 3.1.0 versions
-# fetched into third_party/chocolate-doom-opl/ instead, so the older copies
-# must not also be linked or the stable symbols (mem_fread, mus2mid, ...)
-# collide.
-EXCLUDED_DOOMGENERIC_AUDIO_HELPERS = frozenset({
-    "memio",
-    "mus2mid",
-})
-EXCLUDED_WAD_BACKENDS = frozenset({
-    # ports/doom/bboeos_wad_file.c provides a `stdc_wad_file` that
-    # slurps the WAD into a malloc'd buffer and exposes it through
-    # wad_file_t::mapped, so W_CacheLumpNum bypasses fread entirely.
-    # Drop doomgeneric's stock W_StdC_* implementations to avoid a
-    # duplicate-symbol clash with our backend at link time.
-    "w_file_stdc",
-})
-
 CFLAGS = (
     "--target=i386-pc-none-elf",
     "-m32",
@@ -118,6 +84,41 @@ CFLAGS = (
     f"-I{REPO / 'ports' / 'doom' / 'include'}",  # SDL_mixer.h shim
     f"-I{CHOCOLATE_OPL}",  # fetched chocolate-doom OPL stack
 )
+
+
+EXCLUDED_AUDIO_BACKENDS = frozenset({
+    "i_allegromusic",
+    "i_allegrosound",
+    "i_sdlmusic",
+    "i_sdlsound",
+})
+# doomgeneric ships an older, header-incompatible copy of these chocolate-doom
+# helpers (memio.{c,h}, mus2mid.{c,h}); we use the chocolate-doom 3.1.0 versions
+# fetched into third_party/chocolate-doom-opl/ instead, so the older copies
+# must not also be linked or the stable symbols (mem_fread, mus2mid, ...)
+# collide.
+EXCLUDED_DOOMGENERIC_AUDIO_HELPERS = frozenset({
+    "memio",
+    "mus2mid",
+})
+EXCLUDED_PLATFORM_BACKENDS = frozenset({
+    "doomgeneric_allegro",
+    "doomgeneric_emscripten",
+    "doomgeneric_linuxvt",
+    "doomgeneric_sdl",
+    "doomgeneric_soso",
+    "doomgeneric_sosox",
+    "doomgeneric_win",
+    "doomgeneric_xlib",
+})
+EXCLUDED_WAD_BACKENDS = frozenset({
+    # ports/doom/bboeos_wad_file.c provides a `stdc_wad_file` that
+    # slurps the WAD into a malloc'd buffer and exposes it through
+    # wad_file_t::mapped, so W_CacheLumpNum bypasses fread entirely.
+    # Drop doomgeneric's stock W_StdC_* implementations to avoid a
+    # duplicate-symbol clash with our backend at link time.
+    "w_file_stdc",
+})
 
 
 def _build_libbboeos() -> None:
