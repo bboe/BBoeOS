@@ -480,6 +480,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         offset = node.index.value
         return f"{const_base}+{offset}" if offset else const_base
 
+    def _clobbers_for_call(self, call_node: Call, /, *, function_pointer_vars: set[str]) -> tuple[str, ...] | frozenset[str]:
+        """Mirror :meth:`compute_safe_pin_registers`'s per-call clobber set."""
+        if call_node.name in self.user_functions or call_node.name in function_pointer_vars:
+            return self.target.register_pool
+        if call_node.name in self.libbboeos_extern_declarations:
+            return self.target.register_pool
+        if call_node.name in self._builtin_clobbers:
+            return self._builtin_clobbers[call_node.name]
+        return ()
+
     @staticmethod
     def _collect_asm_operand_vars(body: list[Node], /) -> set[str]:
         """Return variable names that appear in ExtendedAsm operands.
@@ -2707,16 +2717,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         order = 0
         function_pointer_vars: set[str] = self._collect_function_pointer_vars(body, parameters=parameters)
 
-        def call_clobbers(call_node: Call) -> tuple[str, ...] | frozenset[str]:
-            """Mirror :meth:`compute_safe_pin_registers`'s per-call clobber set."""
-            if call_node.name in self.user_functions or call_node.name in function_pointer_vars:
-                return self.target.register_pool
-            if call_node.name in self.libbboeos_extern_declarations:
-                return self.target.register_pool
-            if call_node.name in self._builtin_clobbers:
-                return self._builtin_clobbers[call_node.name]
-            return ()
-
         def collect(nodes: list[Node], *, top_level: bool) -> None:
             nonlocal order
             for statement in nodes:
@@ -2935,7 +2935,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # candidates still pre-store.
                 for arg in node.args:
                     pre_store_visit(arg)
-                regs = call_clobbers(node)
+                regs = self._clobbers_for_call(node, function_pointer_vars=function_pointer_vars)
                 for cand_name, already_written in written.items():
                     if not already_written:
                         per_reg = pre_store_clobbers[cand_name]
