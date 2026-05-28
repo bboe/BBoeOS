@@ -1141,6 +1141,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         addr += f"+{base_register}"
         return addr
 
+    def _emit_field_load(self, *, addr: str, field_size: int) -> None:
+        """Emit the struct-field load instruction matching *field_size*.
+
+        Byte fields go through :meth:`emit_byte_load_zx`; word fields on a
+        32-bit target zero-extend through ``movzx`` so downstream
+        ``test eax, eax`` / signed compares don't read stale upper bytes
+        left behind by a wider previous load.  All other widths use a
+        plain ``mov`` into the accumulator.
+        """
+        if field_size == 1:
+            self.emit_byte_load_zx(addr)
+        elif field_size == 2 and self.target.int_size == 4:
+            self.emit(f"        movzx {self.target.acc}, word {addr}")
+        else:
+            self.emit(f"        mov {self.target.acc}, {addr}")
+
     def _emit_global_array(self, name: str, /) -> None:
         """Lay down storage for one file-scope array global.
 
@@ -1943,12 +1959,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if info.bit_width is not None:
                 self._emit_bitfield_read(info, addr=addr)
                 return
-            if field_size == 1:
-                self.emit_byte_load_zx(addr)
-            elif field_size == 2 and self.target.int_size == 4:
-                self.emit(f"        movzx {self.target.acc}, word {addr}")
-            else:
-                self.emit(f"        mov {self.target.acc}, {addr}")
+            self._emit_field_load(addr=addr, field_size=field_size)
             self.ax_clear()
             return
         # General path: materialise the base address into BX/EBX.
@@ -1971,12 +1982,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if info.bit_width is not None:
             self._emit_bitfield_read(info, addr=addr)
             return
-        if field_size == 1:
-            self.emit_byte_load_zx(addr)
-        elif field_size == 2 and self.target.int_size == 4:
-            self.emit(f"        movzx {self.target.acc}, word {addr}")
-        else:
-            self.emit(f"        mov {self.target.acc}, {addr}")
+        self._emit_field_load(addr=addr, field_size=field_size)
         self.ax_clear()
 
     def _generate_member_assign_via_expr(self, statement: MemberAssign, /) -> None:
@@ -4192,12 +4198,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.ax_clear()
             return
         addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
-        if field_size == 1:
-            self.emit_byte_load_zx(addr)
-        elif field_size == 2 and self.target.int_size == 4:
-            self.emit(f"        movzx {acc}, word {addr}")
-        else:
-            self.emit(f"        mov {acc}, {addr}")
+        self._emit_field_load(addr=addr, field_size=field_size)
         if protect_bx:
             self.emit(f"        pop {bx}")
         self.ax_clear()
@@ -4379,12 +4380,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if info.bit_width is not None:
                 self._emit_bitfield_read(info, addr=addr)
                 return
-            if field_size == 1:
-                self.emit_byte_load_zx(addr)
-            elif field_size == 2 and self.target.int_size == 4:
-                self.emit(f"        movzx {self.target.acc}, word {addr}")
-            else:
-                self.emit(f"        mov {self.target.acc}, {addr}")
+            self._emit_field_load(addr=addr, field_size=field_size)
             self.ax_clear()
             return
         info = self._resolve_member_index_layout(
@@ -4428,15 +4424,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if info.bit_width is not None:
             self._emit_bitfield_read(info, addr=addr)
             return
-        if field_size == 1:
-            self.emit_byte_load_zx(addr)
-        elif field_size == 2 and self.target.int_size == 4:
-            # 32-bit target: clear upper bytes of EAX so downstream
-            # ``test eax, eax`` / signed compares don't read stale bits
-            # left behind by a wider previous load.
-            self.emit(f"        movzx {self.target.acc}, word {addr}")
-        else:
-            self.emit(f"        mov {self.target.acc}, {addr}")
+        self._emit_field_load(addr=addr, field_size=field_size)
         self.ax_clear()
 
     def generate_member_address_of(self, expression: MemberAddressOf, /) -> None:
