@@ -1141,6 +1141,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         addr += f"+{base_register}"
         return addr
 
+    def _emit_field_load(self, *, addr: str, field_size: int) -> None:
+        """Emit the struct-field load instruction matching *field_size*.
+
+        Byte fields go through :meth:`emit_byte_load_zx`; word fields on a
+        32-bit target zero-extend through ``movzx`` so downstream
+        ``test eax, eax`` / signed compares don't read stale upper bytes
+        left behind by a wider previous load.  All other widths use a
+        plain ``mov`` into the accumulator.
+        """
+        if field_size == 1:
+            self.emit_byte_load_zx(addr)
+        elif field_size == 2 and self.target.int_size == 4:
+            self.emit(f"        movzx {self.target.acc}, word {addr}")
+        else:
+            self.emit(f"        mov {self.target.acc}, {addr}")
+
     def _emit_global_array(self, name: str, /) -> None:
         """Lay down storage for one file-scope array global.
 
@@ -1943,12 +1959,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if info.bit_width is not None:
                 self._emit_bitfield_read(info, addr=addr)
                 return
-            if field_size == 1:
-                self.emit_byte_load_zx(addr)
-            elif field_size == 2 and self.target.int_size == 4:
-                self.emit(f"        movzx {self.target.acc}, word {addr}")
-            else:
-                self.emit(f"        mov {self.target.acc}, {addr}")
+            self._emit_field_load(addr=addr, field_size=field_size)
             self.ax_clear()
             return
         # General path: materialise the base address into BX/EBX.
@@ -1971,12 +1982,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if info.bit_width is not None:
             self._emit_bitfield_read(info, addr=addr)
             return
-        if field_size == 1:
-            self.emit_byte_load_zx(addr)
-        elif field_size == 2 and self.target.int_size == 4:
-            self.emit(f"        movzx {self.target.acc}, word {addr}")
-        else:
-            self.emit(f"        mov {self.target.acc}, {addr}")
+        self._emit_field_load(addr=addr, field_size=field_size)
         self.ax_clear()
 
     def _generate_member_assign_via_expr(self, statement: MemberAssign, /) -> None:
@@ -2378,6 +2384,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 initialized.add(self.pinned_register[name])
         return initialized
 
+    @staticmethod
+    def _rank_candidates(items: list[tuple[str, int]], /, *, counts: dict[str, int]) -> list[tuple[str, int]]:
+        """Sort *items* by descending ref count then ascending declaration order.
+
+        The auto-pin allocator ranks each candidate class (body locals
+        first, parameters second) by ``counts`` so the top entry gets
+        the cheapest register; ties break by declaration order so the
+        result is deterministic across runs.
+        """
+        return sorted(items, key=lambda item: (-counts.get(item[0], 0), item[1]))
+
     def _register_globals(self, declarations: list[Node], /) -> None:
         """Record file-scope declarations and validate their shapes.
 
@@ -2764,26 +2781,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         address_taken: set[str] = set()
         comparison_operations = {"==", "!=", "<", "<=", ">", ">="}
 
-        def collect_index_vars(node: Node) -> None:
-            """Tally Var occurrences inside Index/IndexAssign subscripts.
-
-            Each subscript pays a 2-byte ``mov si, bp`` penalty when
-            its index variable is BP-pinned, since BP can't index
-            DS-relative memory in real mode.  The cost-model below
-            uses this tally to decide whether a candidate's
-            BP-clobber-savings outweigh that per-subscript penalty.
-            """
-            if isinstance(node, Var):
-                index_uses[node.name] = index_uses.get(node.name, 0) + 1
-            for node_field in fields(node):
-                value = getattr(node, node_field.name)
-                if isinstance(value, Node):
-                    collect_index_vars(value)
-                elif isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, Node):
-                            collect_index_vars(item)
-
         def count_visit(node: Node, *, role: str = "other") -> None:
             if isinstance(node, (Var, Assign)):
                 counts[node.name] = counts.get(node.name, 0) + 1
@@ -2858,7 +2855,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # above; recursing into it would double-count and add a
                 # spurious other_uses tally.  Walk the remaining children
                 # explicitly and bail before the generic walk.
-                collect_index_vars(node.index)
+                self._tally_subscript_var_uses(node.index, index_uses=index_uses)
                 count_visit(node.index)
                 if isinstance(node, IndexAssign):
                     count_visit(node.expr)
@@ -2973,10 +2970,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for statement in body:
             pre_store_visit(statement)
 
-        def rank(items: list[tuple[str, int]]) -> list[tuple[str, int]]:
-            return sorted(items, key=lambda item: (-counts.get(item[0], 0), item[1]))
-
-        combined = rank(body_candidates) + rank(param_candidates)
+        combined = self._rank_candidates(body_candidates, counts=counts) + self._rank_candidates(param_candidates, counts=counts)
         # Drop expression-temporary vars: pinning them adds a 2-byte
         # ``mov pin, ax`` after their single complex-expression
         # initializer without shrinking the comparisons that follow
@@ -3108,6 +3102,27 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """Pair with :meth:`_si_scratch_guard_begin` — emit ``pop si``."""
         if guarded:
             self.emit(f"        pop {self.target.si_register}")
+
+    @staticmethod
+    def _tally_subscript_var_uses(node: Node, /, *, index_uses: dict[str, int]) -> None:
+        """Tally Var occurrences inside Index/IndexAssign subscripts.
+
+        Each subscript pays a 2-byte ``mov si, bp`` penalty when its
+        index variable is BP-pinned, since BP can't index DS-relative
+        memory in real mode.  The auto-pin cost model uses this tally
+        (mutated through *index_uses*) to decide whether a candidate's
+        BP-clobber-savings outweigh that per-subscript penalty.
+        """
+        if isinstance(node, Var):
+            index_uses[node.name] = index_uses.get(node.name, 0) + 1
+        for node_field in fields(node):
+            value = getattr(node, node_field.name)
+            if isinstance(value, Node):
+                X86CodeGenerator._tally_subscript_var_uses(value, index_uses=index_uses)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node):
+                        X86CodeGenerator._tally_subscript_var_uses(item, index_uses=index_uses)
 
     def _try_direct_load(self, *, argument: Node, register: str, optimize_zero: bool = False) -> bool:
         """Emit a direct load of a constant-or-address *argument* into *register*.
@@ -4183,12 +4198,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.ax_clear()
             return
         addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
-        if field_size == 1:
-            self.emit_byte_load_zx(addr)
-        elif field_size == 2 and self.target.int_size == 4:
-            self.emit(f"        movzx {acc}, word {addr}")
-        else:
-            self.emit(f"        mov {acc}, {addr}")
+        self._emit_field_load(addr=addr, field_size=field_size)
         if protect_bx:
             self.emit(f"        pop {bx}")
         self.ax_clear()
@@ -4370,26 +4380,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if info.bit_width is not None:
                 self._emit_bitfield_read(info, addr=addr)
                 return
-            if field_size == 1:
-                self.emit_byte_load_zx(addr)
-            elif field_size == 2 and self.target.int_size == 4:
-                self.emit(f"        movzx {self.target.acc}, word {addr}")
-            else:
-                self.emit(f"        mov {self.target.acc}, {addr}")
+            self._emit_field_load(addr=addr, field_size=field_size)
             self.ax_clear()
             return
-        if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
-            message = f"'->' requires a pointer to struct, got type '{struct_type}'"
-            raise CompileError(message, line=expression.line)
-        tag = struct_type[7:-1]
-        layout = self.struct_layouts.get(tag)
-        if layout is None:
-            message = f"unknown struct '{tag}'"
-            raise CompileError(message, line=expression.line)
-        if expression.member_name not in layout:
-            message = f"struct '{tag}' has no field '{expression.member_name}'"
-            raise CompileError(message, line=expression.line)
-        info = layout[expression.member_name]
+        info = self._resolve_member_index_layout(
+            arrow=True,
+            line=expression.line,
+            member_name=expression.member_name,
+            object_name=object_name,
+        )
         offset = info.byte_offset
         field_size = info.field_size
         element_size = info.element_size
@@ -4425,15 +4424,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if info.bit_width is not None:
             self._emit_bitfield_read(info, addr=addr)
             return
-        if field_size == 1:
-            self.emit_byte_load_zx(addr)
-        elif field_size == 2 and self.target.int_size == 4:
-            # 32-bit target: clear upper bytes of EAX so downstream
-            # ``test eax, eax`` / signed compares don't read stale bits
-            # left behind by a wider previous load.
-            self.emit(f"        movzx {self.target.acc}, word {addr}")
-        else:
-            self.emit(f"        mov {self.target.acc}, {addr}")
+        self._emit_field_load(addr=addr, field_size=field_size)
         self.ax_clear()
 
     def generate_member_address_of(self, expression: MemberAddressOf, /) -> None:
@@ -4578,18 +4569,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             else:
                 self.emit(f"        mov {addr}, {self.target.acc}")
             return
-        if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
-            message = f"'->' requires a pointer to struct, got type '{struct_type}'"
-            raise CompileError(message, line=statement.line)
-        tag = struct_type[7:-1]
-        layout = self.struct_layouts.get(tag)
-        if layout is None:
-            message = f"unknown struct '{tag}'"
-            raise CompileError(message, line=statement.line)
-        if statement.member_name not in layout:
-            message = f"struct '{tag}' has no field '{statement.member_name}'"
-            raise CompileError(message, line=statement.line)
-        info = layout[statement.member_name]
+        info = self._resolve_member_index_layout(
+            arrow=True,
+            line=statement.line,
+            member_name=statement.member_name,
+            object_name=object_name,
+        )
         offset = info.byte_offset
         field_size = info.field_size
         if info.bit_width is not None:
