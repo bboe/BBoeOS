@@ -68,6 +68,7 @@ from cc.ast_nodes import (
     MemberIndex,
     MemberIndexAssign,
     Node,
+    Param,
     PointerDereference,
     PointerDereferenceAssign,
     Return,
@@ -252,6 +253,62 @@ class EmissionMixin:
     ``builtin_*`` / ``peephole`` dispatchers from sibling mixins.
     """
 
+    def _allocate_function_parameters(
+        self,
+        *,
+        function_line: int,
+        is_fastcall: bool,
+        name: str,
+        parameters: list[Param],
+        regparm_count: int,
+    ) -> None:
+        """Record parameter types / array flags and assign caller-pushed stack offsets.
+
+        Extracted from :meth:`generate_function`.  ``main`` is special-
+        cased (its parameters are handled by
+        :meth:`emit_argument_vector_startup`).  For non-main functions
+        this also rejects parameter names that shadow a file-scope global
+        and populates ``self.out_register_locals`` for output-only
+        register params; ``in_register`` and regparm params get their
+        stack slots allocated later (after this returns, in
+        ``generate_function``).
+        """
+        for param in parameters:
+            if param.name in self.global_scalars or param.name in self.global_arrays:
+                message = f"parameter '{param.name}' shadows a file-scope global"
+                raise CompileError(message, line=function_line)
+        if name == "main":
+            # main parameters are handled by emit_argument_vector_startup.
+            for param in parameters:
+                self.allocate_local(param.name)
+                self.variable_types[param.name] = param.type
+                if param.is_array:
+                    self.variable_arrays.add(param.name)
+            return
+        # Non-main: record parameter types; stack offsets are kept
+        # as fallbacks but parameters will be pinned to registers
+        # when safe_pin_registers has room.
+        caller_push_index = 0
+        for i, param in enumerate(parameters):
+            self.variable_types[param.name] = param.type
+            if param.is_array:
+                self.variable_arrays.add(param.name)
+            if param.out_register is not None:
+                # Output-only register param: no caller-pushed stack slot.
+                # Track it so DerefAssign in the body emits mov <reg>, <val>.
+                self.out_register_locals[param.name] = param.out_register
+                continue
+            if param.in_register is not None:
+                # Input register param: caller puts arg in named register (no push).
+                # Allocate a local slot below; spilled after sub sp,N in prologue.
+                continue
+            if is_fastcall and i < regparm_count:
+                # Register-passed params get local slots allocated
+                # below; they have no caller-pushed address.
+                continue
+            self.locals[param.name] = -(self.target.param_slot_base + caller_push_index * self.target.int_size)  # negative = above bp
+            caller_push_index += 1
+
     def _apply_default_regparm(self, functions: list[Node], /) -> None:
         """Stamp the implicit register-passing convention on eligible callees.
 
@@ -303,6 +360,89 @@ class EmissionMixin:
                 and all(parameter.out_register is None and parameter.in_register is None for parameter in function.params)
             ):
                 function.regparm_count = min(3, len(function.params))
+
+    def _emit_function_prologue(
+        self,
+        *,
+        body: list[Node],
+        function_line: int,
+        is_fastcall: bool,
+        parameters: list[Param],
+        regparm_count: int,
+        regparm_registers: tuple[str, ...],
+        register_convention: bool,
+    ) -> None:
+        """Emit the per-function prologue (push bp / mov bp,esp / sub sp,N).
+
+        Spills caller-supplied fastcall regparm registers and ``in_register``
+        params into their local stack slots, then loads any pinned-but-not-
+        in_register parameters from the caller-pushed cdecl slots into their
+        target registers.  Extracted from :meth:`generate_function`; called
+        only when ``self.elide_frame`` is False.
+        """
+        for reg in self.current_preserve_registers:
+            self.emit(f"        push {reg}")
+        self.emit(f"        push {self.target.base_register}")
+        self.emit(f"        mov {self.target.base_register}, {self.target.stack_register}")
+        if self.frame_size > 0:
+            self.emit(f"        sub {self.target.stack_register}, {self.frame_size}")
+        if is_fastcall:
+            # Spill the caller-supplied regparm registers into their
+            # local slots so the body can read them through the normal
+            # local path.
+            for i, register in enumerate(regparm_registers):
+                slot = self.locals[parameters[i].name]
+                self.emit(f"        mov [{self.target.base_register}-{slot}], {register}")
+        for param in parameters:
+            if param.in_register is not None:
+                if not self._param_slot_is_read(body, param.name):
+                    continue  # named register holds the value; skip the dead spill
+                slot = self.locals[param.name]
+                # Zero-extend narrower in_register values into the
+                # full int-width slot so subsequent reads (which load
+                # the whole slot via the accumulator) don't pick up
+                # uninitialised stack bytes.  For full-width E-register
+                # pins the named register already covers the slot.
+                #
+                # Byte-typed parameters (``char`` / ``unsigned char``) treat
+                # the named register as the *byte* alias — only AL is
+                # the value, AH is undefined per the asm-side calling
+                # convention (e.g. ``lodsb; call f``).  Widening from
+                # the byte alias scrubs AH-garbage out of the spilled
+                # slot.  Pinning a byte-typed parameter to a register
+                # without a byte alias (esi / edi / ebp / esp) is
+                # rejected at codegen time.
+                if param.type in self.BYTE_TYPES:
+                    source = self.target.low_byte(param.in_register)
+                    if source is None:
+                        message = (
+                            f"byte-typed parameter '{param.name}' cannot be pinned to register "
+                            f"'{param.in_register}' — no low-byte alias in the target encoding"
+                        )
+                        raise CompileError(message, line=function_line)
+                    self.emit(f"        movzx {self.target.acc}, {source}")
+                    self.emit(f"        mov [{self.target.base_register}-{slot}], {self.target.acc}")
+                    continue
+                widened = self.target.widen_gp(param.in_register)
+                if widened != param.in_register:
+                    self.emit(f"        movzx {widened}, {param.in_register}")
+                    self.emit(f"        mov [{self.target.base_register}-{slot}], {widened}")
+                else:
+                    self.emit(f"        mov [{self.target.base_register}-{slot}], {param.in_register}")
+        if not register_convention:
+            # Load pinned parameters from caller-pushed stack slots
+            # into their registers.
+            caller_push_index = 0
+            for i, param in enumerate(parameters):
+                if is_fastcall and i < regparm_count:
+                    continue
+                if param.out_register is not None:
+                    continue
+                if param.name in self.pinned_register:
+                    register = self.pinned_register[param.name]
+                    offset = self.target.param_slot_base + caller_push_index * self.target.int_size
+                    self.emit(f"        mov {register}, [{self.target.base_register}+{offset}]")
+                caller_push_index += 1
 
     def _emit_pointer_bump(self, *, delta: int, line: int, name: str) -> None:
         """Advance pointer variable ``name`` by ``delta * sizeof(*name)`` bytes in place.
@@ -2866,42 +3006,13 @@ class EmissionMixin:
         is_fastcall = name != "main" and function.regparm_count > 0
         regparm_count = function.regparm_count if is_fastcall else 0
         regparm_registers = (self.target.acc, self.target.dx_register, self.target.count_register)[:regparm_count]
-        # Allocate parameters and record their types.
-        for param in parameters:
-            if param.name in self.global_scalars or param.name in self.global_arrays:
-                message = f"parameter '{param.name}' shadows a file-scope global"
-                raise CompileError(message, line=function.line)
-        if name == "main":
-            # main parameters are handled by emit_argument_vector_startup.
-            for param in parameters:
-                self.allocate_local(param.name)
-                self.variable_types[param.name] = param.type
-                if param.is_array:
-                    self.variable_arrays.add(param.name)
-        else:
-            # Non-main: record parameter types; stack offsets are kept
-            # as fallbacks but parameters will be pinned to registers
-            # when safe_pin_registers has room.
-            caller_push_index = 0
-            for i, param in enumerate(parameters):
-                self.variable_types[param.name] = param.type
-                if param.is_array:
-                    self.variable_arrays.add(param.name)
-                if param.out_register is not None:
-                    # Output-only register param: no caller-pushed stack slot.
-                    # Track it so DerefAssign in the body emits mov <reg>, <val>.
-                    self.out_register_locals[param.name] = param.out_register
-                    continue
-                if param.in_register is not None:
-                    # Input register param: caller puts arg in named register (no push).
-                    # Allocate a local slot below; spilled after sub sp,N in prologue.
-                    continue
-                if is_fastcall and i < regparm_count:
-                    # Register-passed params get local slots allocated
-                    # below; they have no caller-pushed address.
-                    continue
-                self.locals[param.name] = -(self.target.param_slot_base + caller_push_index * self.target.int_size)  # negative = above bp
-                caller_push_index += 1
+        self._allocate_function_parameters(
+            function_line=function.line,
+            is_fastcall=is_fastcall,
+            name=name,
+            parameters=parameters,
+            regparm_count=regparm_count,
+        )
 
         self.discover_virtual_long_locals(body)
         self.safe_pin_registers = self.compute_safe_pin_registers(body, parameters=parameters)
@@ -3022,69 +3133,15 @@ class EmissionMixin:
         else:
             self.emit(f"{name}:")
         if not self.elide_frame:
-            for reg in self.current_preserve_registers:
-                self.emit(f"        push {reg}")
-            self.emit(f"        push {self.target.base_register}")
-            self.emit(f"        mov {self.target.base_register}, {self.target.stack_register}")
-            if self.frame_size > 0:
-                self.emit(f"        sub {self.target.stack_register}, {self.frame_size}")
-            if is_fastcall:
-                # Spill the caller-supplied regparm registers into their
-                # local slots so the body can read them through the normal
-                # local path.
-                for i, register in enumerate(regparm_registers):
-                    slot = self.locals[parameters[i].name]
-                    self.emit(f"        mov [{self.target.base_register}-{slot}], {register}")
-            for param in parameters:
-                if param.in_register is not None:
-                    if not self._param_slot_is_read(body, param.name):
-                        continue  # named register holds the value; skip the dead spill
-                    slot = self.locals[param.name]
-                    # Zero-extend narrower in_register values into the
-                    # full int-width slot so subsequent reads (which load
-                    # the whole slot via the accumulator) don't pick up
-                    # uninitialised stack bytes.  For full-width E-register
-                    # pins the named register already covers the slot.
-                    #
-                    # Byte-typed parameters (``char`` / ``unsigned char``) treat
-                    # the named register as the *byte* alias — only AL is
-                    # the value, AH is undefined per the asm-side calling
-                    # convention (e.g. ``lodsb; call f``).  Widening from
-                    # the byte alias scrubs AH-garbage out of the spilled
-                    # slot.  Pinning a byte-typed parameter to a register
-                    # without a byte alias (esi / edi / ebp / esp) is
-                    # rejected at codegen time.
-                    if param.type in self.BYTE_TYPES:
-                        source = self.target.low_byte(param.in_register)
-                        if source is None:
-                            message = (
-                                f"byte-typed parameter '{param.name}' cannot be pinned to register "
-                                f"'{param.in_register}' — no low-byte alias in the target encoding"
-                            )
-                            raise CompileError(message, line=function.line)
-                        self.emit(f"        movzx {self.target.acc}, {source}")
-                        self.emit(f"        mov [{self.target.base_register}-{slot}], {self.target.acc}")
-                        continue
-                    widened = self.target.widen_gp(param.in_register)
-                    if widened != param.in_register:
-                        self.emit(f"        movzx {widened}, {param.in_register}")
-                        self.emit(f"        mov [{self.target.base_register}-{slot}], {widened}")
-                    else:
-                        self.emit(f"        mov [{self.target.base_register}-{slot}], {param.in_register}")
-            if not register_convention:
-                # Load pinned parameters from caller-pushed stack slots
-                # into their registers.
-                caller_push_index = 0
-                for i, param in enumerate(parameters):
-                    if is_fastcall and i < regparm_count:
-                        continue
-                    if param.out_register is not None:
-                        continue
-                    if param.name in self.pinned_register:
-                        register = self.pinned_register[param.name]
-                        offset = self.target.param_slot_base + caller_push_index * self.target.int_size
-                        self.emit(f"        mov {register}, [{self.target.base_register}+{offset}]")
-                    caller_push_index += 1
+            self._emit_function_prologue(
+                body=body,
+                function_line=function.line,
+                is_fastcall=is_fastcall,
+                parameters=parameters,
+                regparm_count=regparm_count,
+                regparm_registers=regparm_registers,
+                register_convention=register_convention,
+            )
 
         # IR path: register string literals discovered during IR building.
         self._ir_string_map: dict[str, str] = {}
