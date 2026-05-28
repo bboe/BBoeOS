@@ -28,13 +28,11 @@ from cc.ast_nodes import (
     AddressOf,
     ArrayDecl,
     Assign,
-    AssignExpr,
     BinaryOperation,
     Break,
     Call,
     Cast,
     Char,
-    Conditional,
     Continue,
     DerefIncrement,
     DoubleIndex,
@@ -43,15 +41,10 @@ from cc.ast_nodes import (
     IncrementDecrement,
     Index,
     Int,
+    IntegerOperand,
     LogicalAnd,
-    LogicalOr,
-    MemberAccess,
-    MemberIncrementDecrement,
     Node,
     Return,
-    SizeofExpr,
-    SizeofType,
-    SizeofVar,
     String,
     TailCall,
     Var,
@@ -902,24 +895,46 @@ class CodeGeneratorBase:
             return statement
         return If(body=new_if, cond=condition, else_body=new_else, line=statement.line)
 
-    # Node types whose comparison-operand class is unconditionally
-    # ``"integer"`` (call expressions, sizeof shapes, increment/decrement
-    # results, logical operators that yield 0/1).  Kept as a tuple of
-    # types so the isinstance dispatch in :meth:`_type_of_operand`
-    # stays a single branch.
-    _ALWAYS_INTEGER_OPERAND_NODES: tuple[type, ...] = (
-        AssignExpr,
-        Call,
-        Conditional,
-        IncrementDecrement,
-        LogicalAnd,
-        LogicalOr,
-        MemberAccess,
-        MemberIncrementDecrement,
-        SizeofExpr,
-        SizeofType,
-        SizeofVar,
-    )
+    def _classify_binop_operand(self, node: BinaryOperation, /) -> str:
+        # Pointer arithmetic: ``ptr + n`` / ``n + ptr`` / ``ptr - n``
+        # are pointers; ``ptr - ptr`` is the byte difference (integer).
+        if node.operation in ("+", "-"):
+            left_type = self._type_of_operand(node.left)
+            right_type = self._type_of_operand(node.right)
+            if left_type == "pointer" and right_type == "pointer":
+                return "integer"
+            if left_type == "pointer" or right_type == "pointer":
+                return "pointer"
+        return "integer"
+
+    @staticmethod
+    def _classify_cast_operand(node: Cast, /) -> str:
+        if node.target_type.endswith("*"):
+            return "pointer"
+        if node.target_type == "char":
+            return "char"
+        return "integer"
+
+    def _classify_deref_increment_operand(self, node: DerefIncrement, /) -> str:
+        # ``*p++`` rvalue classifies as the pointee type stripped of one
+        # ``*``: ``char *`` → ``"char"``, ``unsigned char *`` / ``int *``
+        # / ``T *`` → ``"integer"``, ``T **`` → ``"pointer"``.
+        holder_type = self.variable_types.get(node.target_name)
+        if holder_type and holder_type.endswith("*"):
+            pointee = holder_type[:-1].rstrip()
+            if pointee == "char":
+                return "char"
+            if pointee.endswith("*"):
+                return "pointer"
+        return "integer"
+
+    def _classify_double_index_operand(self, node: DoubleIndex, /) -> str:
+        # ``name[outer][inner]`` for ``T *name[N]`` yields the pointee
+        # type of ``T*`` — that's ``char`` for ``char *foo[]``,
+        # ``integer`` for ``int *foo[]`` / ``unsigned T *foo[]``.
+        if self.variable_types.get(node.array.name) == "char*":
+            return "char"
+        return "integer"
 
     def _classify_index_operand(self, node: Index, /) -> str:
         name = node.array.name
@@ -931,14 +946,6 @@ class CodeGeneratorBase:
         if variable_type == "char*" and name in self.variable_arrays:
             return "pointer"
         if variable_type in ("char", "char*"):
-            return "char"
-        return "integer"
-
-    def _classify_double_index_operand(self, node: DoubleIndex, /) -> str:
-        # ``name[outer][inner]`` for ``T *name[N]`` yields the pointee
-        # type of ``T*`` — that's ``char`` for ``char *foo[]``,
-        # ``integer`` for ``int *foo[]`` / ``unsigned T *foo[]``.
-        if self.variable_types.get(node.array.name) == "char*":
             return "char"
         return "integer"
 
@@ -955,39 +962,6 @@ class CodeGeneratorBase:
         message = f"undefined operand: {node.name}"
         raise CompileError(message, line=node.line)
 
-    def _classify_binop_operand(self, node: BinaryOperation, /) -> str:
-        # Pointer arithmetic: ``ptr + n`` / ``n + ptr`` / ``ptr - n``
-        # are pointers; ``ptr - ptr`` is the byte difference (integer).
-        if node.operation in ("+", "-"):
-            left_type = self._type_of_operand(node.left)
-            right_type = self._type_of_operand(node.right)
-            if left_type == "pointer" and right_type == "pointer":
-                return "integer"
-            if left_type == "pointer" or right_type == "pointer":
-                return "pointer"
-        return "integer"
-
-    def _classify_deref_increment_operand(self, node: DerefIncrement, /) -> str:
-        # ``*p++`` rvalue classifies as the pointee type stripped of one
-        # ``*``: ``char *`` → ``"char"``, ``unsigned char *`` / ``int *``
-        # / ``T *`` → ``"integer"``, ``T **`` → ``"pointer"``.
-        holder_type = self.variable_types.get(node.target_name)
-        if holder_type and holder_type.endswith("*"):
-            pointee = holder_type[:-1].rstrip()
-            if pointee == "char":
-                return "char"
-            if pointee.endswith("*"):
-                return "pointer"
-        return "integer"
-
-    @staticmethod
-    def _classify_cast_operand(node: Cast, /) -> str:
-        if node.target_type.endswith("*"):
-            return "pointer"
-        if node.target_type == "char":
-            return "char"
-        return "integer"
-
     def _type_of_operand(self, node: Node, /) -> str:
         """Classify an operand for comparison type-checking.
 
@@ -1002,8 +976,8 @@ class CodeGeneratorBase:
 
         Compound operand kinds (Index, Var, BinaryOperation, …) are
         delegated to per-kind ``_classify_*_operand`` helpers; trivial
-        leaves (Char, Int, String, AddressOf) and the all-integer pile
-        in ``_ALWAYS_INTEGER_OPERAND_NODES`` resolve inline.
+        leaves (Char, Int, String, AddressOf) and AST nodes that carry
+        the :class:`IntegerOperand` mixin resolve inline.
         """
         if isinstance(node, Char):
             return "char"
@@ -1021,7 +995,7 @@ class CodeGeneratorBase:
             return self._classify_binop_operand(node)
         if isinstance(node, DerefIncrement):
             return self._classify_deref_increment_operand(node)
-        if isinstance(node, self._ALWAYS_INTEGER_OPERAND_NODES):
+        if isinstance(node, IntegerOperand):
             return "integer"
         if isinstance(node, Cast):
             return self._classify_cast_operand(node)

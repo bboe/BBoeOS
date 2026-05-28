@@ -43,13 +43,12 @@ KNOWN_SECTIONS: tuple[str, ...] = ("text", "rodata", "data", "bss")
 # The column ends with an optional ``-`` line-continuation marker
 # (long ``dd`` rows spill to a follow-up line with no source column),
 # then a whitespace gap before the source column.
+RE_BYTES_TERMINATOR = re.compile(r"^(-?)(\s{2,}|\t|\s+<|\s*$)")
 RE_BYTES_TOKEN = re.compile(
     r"([0-9A-Fa-f?]+)"  # plain hex run (group 1)
     r"|\[([0-9A-Fa-f]+)\]"  # bracketed placeholder (group 2)
     r"|\(([0-9A-Fa-f]+)\)"  # parenthesised absolute (group 3)
 )
-RE_BYTES_TERMINATOR = re.compile(r"^(-?)(\s{2,}|\t|\s+<|\s*$)")
-_NASM_GLOBAL_PREFIX = "__nasm_global_"
 RE_GLOBAL = re.compile(r"^global\s+([A-Za-z_][A-Za-z0-9_]*)\s*$")
 # Generic identifier scanner over the source column of a NASM listing
 # row.  When the bytes column carried a ``[YYYYYYYY]`` cross-section
@@ -70,20 +69,9 @@ RE_LABEL = re.compile(r"^\$?([A-Za-z_.][A-Za-z0-9_.]*):")
 # whitelist so plain instruction rows (``mov eax, STR_FOO``) never
 # get misread as label definitions.
 RE_LABEL_NO_COLON = re.compile(r"^([A-Za-z_.][A-Za-z0-9_.]*)(?=\s+(?:db|dw|dd|dq|do|resb|resw|resd|resq|reso|times|equ)\b)")
-
-
-def _match_label_at_line_start(source_stripped: str) -> str | None:
-    """Return the label name at the start of ``source_stripped`` if any.
-
-    Tries the ``label:`` form first, then NASM's colon-less data-declaration
-    shorthand (``label db ...``).  Returns ``None`` if neither matches.
-    """
-    match = RE_LABEL.match(source_stripped) or RE_LABEL_NO_COLON.match(source_stripped)
-    return match.group(1) if match else None
-
-
 RE_MACRO = re.compile(r"^(CCREL_[A-Z_]+)\s+([A-Za-z_][A-Za-z0-9_]*)\s*$")
 RE_SECTION = re.compile(r"^section\s+\.([A-Za-z_][A-Za-z0-9_]*)\s*$")
+_NASM_GLOBAL_PREFIX = "__nasm_global_"
 
 
 def _accumulate_bytes(*, bytes_column: bytes, offset: int, section_buffer: bytearray) -> None:
@@ -95,6 +83,16 @@ def _accumulate_bytes(*, bytes_column: bytes, offset: int, section_buffer: bytea
     if len(section_buffer) < end:
         section_buffer.extend(b"\x00" * (end - len(section_buffer)))
     section_buffer[offset:end] = bytes_column
+
+
+def _match_label_at_line_start(source_stripped: str) -> str | None:
+    """Return the label name at the start of ``source_stripped`` if any.
+
+    Tries the ``label:`` form first, then NASM's colon-less data-declaration
+    shorthand (``label db ...``).  Returns ``None`` if neither matches.
+    """
+    match = RE_LABEL.match(source_stripped) or RE_LABEL_NO_COLON.match(source_stripped)
+    return match.group(1) if match else None
 
 
 def _parse_listing_row(*, raw_line: str) -> tuple[int | None, bytes, int | None, int, str] | None:
