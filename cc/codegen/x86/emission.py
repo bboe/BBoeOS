@@ -881,10 +881,12 @@ class EmissionMixin:
             # assigned value (the expr value, not the post-bump pointer) is
             # still physically in AX.  No re-evaluation needed.
             self.generate_statement(inner)
-        elif isinstance(inner, PointerDereferenceAssign):
-            self._emit_pointer_dereference_assign(inner)
         elif isinstance(inner, IndexAssign):
             self.generate_index_assign(inner)
+        elif isinstance(inner, IndexMemberAssign):
+            self.generate_index_member_assign(inner)
+        elif isinstance(inner, IndexMemberIndexAssign):
+            self.generate_index_member_index_assign(inner)
         elif isinstance(inner, MemberAssign):
             if self._member_assign_targets_bitfield(inner):
                 message = "assignment-as-expression to bitfield fields is not supported"
@@ -892,10 +894,8 @@ class EmissionMixin:
             self.generate_member_assign(inner)
         elif isinstance(inner, MemberIndexAssign):
             self.generate_member_index_assign(inner)
-        elif isinstance(inner, IndexMemberAssign):
-            self.generate_index_member_assign(inner)
-        elif isinstance(inner, IndexMemberIndexAssign):
-            self.generate_index_member_index_assign(inner)
+        elif isinstance(inner, PointerDereferenceAssign):
+            self._emit_pointer_dereference_assign(inner)
         else:
             message = f"AssignExpr: unsupported inner node type '{type(inner).__name__}'"
             raise CompileError(message, line=expression.line)
