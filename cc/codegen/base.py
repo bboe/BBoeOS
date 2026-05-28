@@ -28,13 +28,11 @@ from cc.ast_nodes import (
     AddressOf,
     ArrayDecl,
     Assign,
-    AssignExpr,
     BinaryOperation,
     Break,
     Call,
     Cast,
     Char,
-    Conditional,
     Continue,
     DerefIncrement,
     DoubleIndex,
@@ -43,15 +41,10 @@ from cc.ast_nodes import (
     IncrementDecrement,
     Index,
     Int,
+    IntegerOperand,
     LogicalAnd,
-    LogicalOr,
-    MemberAccess,
-    MemberIncrementDecrement,
     Node,
     Return,
-    SizeofExpr,
-    SizeofType,
-    SizeofVar,
     String,
     TailCall,
     Var,
@@ -902,6 +895,73 @@ class CodeGeneratorBase:
             return statement
         return If(body=new_if, cond=condition, else_body=new_else, line=statement.line)
 
+    def _classify_binop_operand(self, node: BinaryOperation, /) -> str:
+        # Pointer arithmetic: ``ptr + n`` / ``n + ptr`` / ``ptr - n``
+        # are pointers; ``ptr - ptr`` is the byte difference (integer).
+        if node.operation in ("+", "-"):
+            left_type = self._type_of_operand(node.left)
+            right_type = self._type_of_operand(node.right)
+            if left_type == "pointer" and right_type == "pointer":
+                return "integer"
+            if left_type == "pointer" or right_type == "pointer":
+                return "pointer"
+        return "integer"
+
+    @staticmethod
+    def _classify_cast_operand(node: Cast, /) -> str:
+        if node.target_type.endswith("*"):
+            return "pointer"
+        if node.target_type == "char":
+            return "char"
+        return "integer"
+
+    def _classify_deref_increment_operand(self, node: DerefIncrement, /) -> str:
+        # ``*p++`` rvalue classifies as the pointee type stripped of one
+        # ``*``: ``char *`` → ``"char"``, ``unsigned char *`` / ``int *``
+        # / ``T *`` → ``"integer"``, ``T **`` → ``"pointer"``.
+        holder_type = self.variable_types.get(node.target_name)
+        if holder_type and holder_type.endswith("*"):
+            pointee = holder_type[:-1].rstrip()
+            if pointee == "char":
+                return "char"
+            if pointee.endswith("*"):
+                return "pointer"
+        return "integer"
+
+    def _classify_double_index_operand(self, node: DoubleIndex, /) -> str:
+        # ``name[outer][inner]`` for ``T *name[N]`` yields the pointee
+        # type of ``T*`` — that's ``char`` for ``char *foo[]``,
+        # ``integer`` for ``int *foo[]`` / ``unsigned T *foo[]``.
+        if self.variable_types.get(node.array.name) == "char*":
+            return "char"
+        return "integer"
+
+    def _classify_index_operand(self, node: Index, /) -> str:
+        name = node.array.name
+        variable_type = self.variable_types.get(name)
+        # An indexed access on a ``char *NAME[]`` parameter (which
+        # the parser records as ``type="char*"`` + variable_arrays
+        # membership) yields a ``char *`` element, not a ``char``.
+        # ``main``'s ``argv[i] == NULL`` walks land here.
+        if variable_type == "char*" and name in self.variable_arrays:
+            return "pointer"
+        if variable_type in ("char", "char*"):
+            return "char"
+        return "integer"
+
+    def _classify_var_operand(self, node: Var, /) -> str:
+        if node.name == "NULL":
+            return "null"
+        variable_type = self.variable_types.get(node.name)
+        if variable_type is not None and variable_type.endswith("*"):
+            return "pointer"
+        if variable_type == "char":
+            return "char"
+        if node.name in self.variable_types or node.name in self.NAMED_CONSTANTS:
+            return "integer"
+        message = f"undefined operand: {node.name}"
+        raise CompileError(message, line=node.line)
+
     def _type_of_operand(self, node: Node, /) -> str:
         """Classify an operand for comparison type-checking.
 
@@ -910,98 +970,37 @@ class CodeGeneratorBase:
         a comparison must classify into one of the four buckets;
         anything else raises ``CompileError`` so no operand silently
         slips through the type check.  ``unsigned char`` values are
-        byte-sized like ``char`` but classify as ``integer`` so they compose freely
-        with integer literals — ``char`` stays restricted to catch
-        ``c == 0`` typos.
+        byte-sized like ``char`` but classify as ``integer`` so they
+        compose freely with integer literals — ``char`` stays restricted
+        to catch ``c == 0`` typos.
+
+        Compound operand kinds (Index, Var, BinaryOperation, …) are
+        delegated to per-kind ``_classify_*_operand`` helpers; trivial
+        leaves (Char, Int, String, AddressOf) and AST nodes that carry
+        the :class:`IntegerOperand` mixin resolve inline.
         """
+        if isinstance(node, AddressOf):
+            return "pointer"
+        if isinstance(node, BinaryOperation):
+            return self._classify_binop_operand(node)
+        if isinstance(node, Cast):
+            return self._classify_cast_operand(node)
         if isinstance(node, Char):
             return "char"
+        if isinstance(node, DerefIncrement):
+            return self._classify_deref_increment_operand(node)
+        if isinstance(node, DoubleIndex):
+            return self._classify_double_index_operand(node)
+        if isinstance(node, Index):
+            return self._classify_index_operand(node)
         if isinstance(node, Int):
+            return "integer"
+        if isinstance(node, IntegerOperand):
             return "integer"
         if isinstance(node, String):
             return "pointer"
-        if isinstance(node, Index):
-            name = node.array.name
-            variable_type = self.variable_types.get(name)
-            # An indexed access on a ``char *NAME[]`` parameter (which
-            # the parser records as ``type="char*"`` + variable_arrays
-            # membership) yields a ``char *`` element, not a ``char``.
-            # ``main``'s ``argv[i] == NULL`` walks land here.
-            if variable_type == "char*" and name in self.variable_arrays:
-                return "pointer"
-            if variable_type in ("char", "char*"):
-                return "char"
-            return "integer"
-        if isinstance(node, DoubleIndex):
-            # ``name[outer][inner]`` for ``T *name[N]`` yields the
-            # pointee type of ``T*`` — that's ``char`` for ``char *foo[]``,
-            # ``integer`` for ``int *foo[]`` / ``unsigned T *foo[]``.
-            name = node.array.name
-            variable_type = self.variable_types.get(name)
-            if variable_type == "char*":
-                return "char"
-            return "integer"
         if isinstance(node, Var):
-            if node.name == "NULL":
-                return "null"
-            variable_type = self.variable_types.get(node.name)
-            if variable_type is not None and variable_type.endswith("*"):
-                return "pointer"
-            if variable_type == "char":
-                return "char"
-            if node.name in self.variable_types or node.name in self.NAMED_CONSTANTS:
-                return "integer"
-            message = f"undefined operand: {node.name}"
-            raise CompileError(message, line=node.line)
-        if isinstance(node, BinaryOperation):
-            # Pointer arithmetic: ``ptr + n`` / ``n + ptr`` / ``ptr - n``
-            # are pointers; ``ptr - ptr`` is the byte difference (integer).
-            if node.operation in ("+", "-"):
-                left_type = self._type_of_operand(node.left)
-                right_type = self._type_of_operand(node.right)
-                if left_type == "pointer" and right_type == "pointer":
-                    return "integer"
-                if left_type == "pointer" or right_type == "pointer":
-                    return "pointer"
-            return "integer"
-        if isinstance(node, DerefIncrement):
-            # ``*p++`` rvalue classifies as the pointee type stripped
-            # of one ``*``: ``char *`` → ``"char"``, ``unsigned char *`` /
-            # ``int *`` / ``T *`` → ``"integer"``, ``T **`` → ``"pointer"``.
-            holder_type = self.variable_types.get(node.target_name)
-            if holder_type and holder_type.endswith("*"):
-                pointee = holder_type[:-1].rstrip()
-                if pointee == "char":
-                    return "char"
-                if pointee.endswith("*"):
-                    return "pointer"
-            return "integer"
-        if isinstance(
-            node,
-            (
-                Call,
-                Conditional,
-                IncrementDecrement,
-                LogicalAnd,
-                LogicalOr,
-                MemberAccess,
-                MemberIncrementDecrement,
-                SizeofExpr,
-                SizeofType,
-                SizeofVar,
-            ),
-        ):
-            return "integer"
-        if isinstance(node, Cast):
-            if node.target_type.endswith("*"):
-                return "pointer"
-            if node.target_type == "char":
-                return "char"
-            return "integer"
-        if isinstance(node, AssignExpr):
-            return "integer"
-        if isinstance(node, AddressOf):
-            return "pointer"
+            return self._classify_var_operand(node)
         message = f"cannot classify operand type for comparison: {type(node).__name__}"
         raise CompileError(message, line=node.line)
 

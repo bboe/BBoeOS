@@ -89,6 +89,24 @@ from cc.utils import decode_first_character
 class Parser:
     """Recursive descent parser for the C subset grammar."""
 
+    # Attributes whose body is just a name: ``__attribute__((name))``.
+    # All return ``(name, True)``; the dispatch site decides what to do.
+    # ``noreturn`` is accepted purely so libbboeos headers like
+    # ``void exit(int) __attribute__((noreturn));`` parse — cc.py has no
+    # noreturn-aware codegen, so it has no effect on output.
+    _FLAG_ATTRIBUTES = frozenset({"always_inline", "carry_return", "naked", "noreturn"})
+
+    # Attributes whose body is a single string argument:
+    # ``__attribute__((name("value")))``.  All return ``(name, value)``.
+    _STRING_ATTRIBUTES = frozenset({
+        "asm_name",
+        "asm_register",
+        "in_register",
+        "out_register",
+        "pinned_register",
+        "preserve_register",
+    })
+
     def __init__(self, tokens: list[tuple[str, str, int]], /, *, bits: int = 32) -> None:
         """Initialize the parser with a token list.
 
@@ -127,89 +145,28 @@ class Parser:
         # what parse_parameter / Cast already do.
         self.typedef_aliases: dict[str, str] = {}
 
-    def eat(self, kind: str | None = None) -> tuple[str, str, int]:
-        """Consume and return the current token, optionally checking its kind.
+    def _concat_string_literal_run(self, *, first_token: tuple) -> str:
+        """Fold a run of adjacent string-literal tokens into one payload.
 
-        Returns:
-            The consumed token as a (kind, text, line) triple.
-
-        Raises:
-            CompileError: If the token kind does not match the expected kind.
-
+        ``first_token`` is the STRING token already consumed by the
+        caller; this method strips its surrounding quotes and then
+        repeatedly eats and concatenates any further STRING tokens at
+        the cursor.  Implements the standard C rule that ``"foo" "bar"``
+        is equivalent to ``"foobar"``.
         """
-        token = self.tokens[self.position]
-        if kind is not None and token[0] != kind:
-            message = f"expected {kind}, got {token[0]} ({token[1]!r})"
-            raise CompileError(message, line=token[2])
-        self.position += 1
-        return token
+        content = first_token[1][1:-1]
+        while self.peek()[0] == "STRING":
+            content += self.eat()[1][1:-1]
+        return content
 
     @staticmethod
-    def fold_binop(operator: str, left: Node, right: Node, /) -> Node:
-        """Return a folded node when operands (or a left-subtree tail) are constant.
+    def _delta_from_operator(operator_kind: str) -> int:
+        """Map a ``++``/``--`` token kind to a signed step.
 
-        Handles two shapes:
-
-        1. ``Int operation Int`` collapses to a single ``Int`` — lets
-           ``COLUMNS - 1`` become ``39`` at parse time.
-        2. ``(X op1 Int1) op2 Int2`` with ``op1, op2`` both additive
-           folds the trailing constants through so
-           ``(column + 40) - 1`` becomes ``column + 39`` and
-           ``(column + 1) % 40`` keeps the ``%`` outer but the inner
-           addition is already a tight pair.
+        Used everywhere the parser lowers pre/post-increment forms into
+        an explicit ``delta=±1`` field on the AST node.
         """
-        line = left.line
-        if isinstance(left, Int) and isinstance(right, Int):
-            a, b = left.value, right.value
-            if operator == "+":
-                return Int(line=line, value=a + b)
-            if operator == "-":
-                return Int(line=line, value=a - b)
-            if operator == "*":
-                return Int(line=line, value=a * b)
-            if operator == "&":
-                return Int(line=line, value=a & b)
-            if operator == "|":
-                return Int(line=line, value=a | b)
-            if operator == "^":
-                return Int(line=line, value=a ^ b)
-            if operator == "/" and b != 0:
-                return Int(line=line, value=a // b)
-            if operator == "%" and b != 0:
-                return Int(line=line, value=a % b)
-            if operator == "<<":
-                return Int(line=line, value=(a & 65535) << (b & 31) & 65535)
-            if operator == ">>":
-                return Int(line=line, value=(a & 65535) >> (b & 31))
-        # Rewrite `x / 2^N` as `x >> N` — a single shr replaces a ~10-byte
-        # div sequence and avoids the slow div instruction.  Only kicks
-        # in when N is a positive power of two; other divisions stay as-is.
-        if operator == "/" and isinstance(right, Int) and right.value > 0 and (right.value & (right.value - 1)) == 0:
-            shift = right.value.bit_length() - 1
-            return BinaryOperation(left=left, line=line, operation=">>", right=Int(line=line, value=shift))
-        if (
-            operator in ("+", "-")
-            and isinstance(right, Int)
-            and isinstance(left, BinaryOperation)
-            and left.operation in ("+", "-")
-            and isinstance(left.right, Int)
-        ):
-            inner_sign = 1 if left.operation == "+" else -1
-            outer_sign = 1 if operator == "+" else -1
-            combined = inner_sign * left.right.value + outer_sign * right.value
-            if combined >= 0:
-                return BinaryOperation(left=left.left, line=line, operation="+", right=Int(line=line, value=combined))
-            return BinaryOperation(left=left.left, line=line, operation="-", right=Int(line=line, value=-combined))
-        return BinaryOperation(left=left, line=line, operation=operator, right=right)
-
-    def peek(self, offset: int = 0) -> tuple[str, str, int]:
-        """Return the token at the current position plus an optional offset.
-
-        Returns:
-            The token as a (kind, text, line) triple.
-
-        """
-        return self.tokens[self.position + offset]
+        return 1 if operator_kind == "PLUS_PLUS" else -1
 
     @staticmethod
     def _evaluate_constant_int(node: Node, /) -> int:
@@ -287,94 +244,32 @@ class Parser:
         """Consume a single ``__attribute__((name(args)))`` directive.
 
         Returns a ``(name, value)`` tuple that the caller dispatches
-        on.  Supported kinds:
+        on.  Supported kinds are the union of ``_FLAG_ATTRIBUTES`` (no
+        argument list; value is ``True``) and ``_STRING_ATTRIBUTES``
+        (one quoted string argument; value is the string contents).
 
-        * ``("asm_register", "si")`` — file-scope global aliases SI.
-        * ``("carry_return", True)`` — int return is reported via CF
-          (CF clear = 1/true/success, CF set = 0/false/failure); no
-          parenthesised argument list.
-        * ``("always_inline", True)`` — inline the single-asm-body
-          function at every C-level call site; no free-standing body.
-
-        asm_register / carry_return are unknown to clang and produce a
-        ``-Wunknown-attributes`` warning (returncode stays 0), so the
-        syntax survives ``test_cc.py``.
+        Several names — asm_register, carry_return, etc. — are unknown
+        to clang and produce a ``-Wunknown-attributes`` warning
+        (returncode stays 0), so the syntax survives ``test_cc.py``.
         """
         self.eat("IDENT")  # __attribute__
         self.eat("LPAREN")
         self.eat("LPAREN")
-        attr_name_token = self.eat("IDENT")
-        attr_name = attr_name_token[1]
-        if attr_name == "asm_name":
+        attr_name = self.eat("IDENT")[1]
+        if attr_name in self._FLAG_ATTRIBUTES:
+            self.eat("RPAREN")
+            self.eat("RPAREN")
+            return (attr_name, True)
+        if attr_name in self._STRING_ATTRIBUTES:
             self.eat("LPAREN")
-            sym_token = self.eat("STRING")
+            value = self.eat("STRING")[1][1:-1]
             self.eat("RPAREN")
             self.eat("RPAREN")
             self.eat("RPAREN")
-            return ("asm_name", sym_token[1][1:-1])
-        if attr_name == "asm_register":
-            self.eat("LPAREN")
-            reg_token = self.eat("STRING")
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            reg_name = reg_token[1][1:-1]
-            if reg_name != "si":
-                message = f"asm_register('{reg_name}') not supported; only 'si' is implemented"
+            if attr_name == "asm_register" and value != "si":
+                message = f"asm_register('{value}') not supported; only 'si' is implemented"
                 raise CompileError(message, line=line)
-            return ("asm_register", reg_name)
-        if attr_name == "carry_return":
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            return ("carry_return", True)
-        if attr_name == "always_inline":
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            return ("always_inline", True)
-        if attr_name == "naked":
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            return ("naked", True)
-        if attr_name == "noreturn":
-            # Accepted as a no-op marker so libbboeos headers
-            # (``void exit(int) __attribute__((noreturn));``,
-            # ``void abort(void) __attribute__((noreturn));``) parse
-            # under cc.py.  cc.py has no noreturn-aware codegen — it
-            # emits the call followed by whatever the caller had next,
-            # same as any other call — so the attribute does not
-            # affect output.  The dispatch site for this kind name
-            # also accepts and discards it.
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            return ("noreturn", True)
-        if attr_name == "in_register":
-            self.eat("LPAREN")
-            reg_token = self.eat("STRING")
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            return ("in_register", reg_token[1][1:-1])
-        if attr_name == "out_register":
-            self.eat("LPAREN")
-            reg_token = self.eat("STRING")
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            return ("out_register", reg_token[1][1:-1])
-        if attr_name == "preserve_register":
-            self.eat("LPAREN")
-            reg_token = self.eat("STRING")
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            return ("preserve_register", reg_token[1][1:-1])
-        if attr_name == "pinned_register":
-            self.eat("LPAREN")
-            reg_token = self.eat("STRING")
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            self.eat("RPAREN")
-            return ("pinned_register", reg_token[1][1:-1])
+            return (attr_name, value)
         message = f"unsupported attribute '{attr_name}'"
         raise CompileError(message, line=line)
 
@@ -409,14 +304,11 @@ class Parser:
         # ``*(T *)expr = value`` — cast-then-assign through an arbitrary pointer.
         if self.peek()[0] == "LPAREN" and self._is_type_start(offset=1):
             operand = self.parse_primary()
-            if not isinstance(operand, Cast):
-                message = "expected pointer cast after '*'"
-                raise CompileError(message, line=star_token[2])
-            cast_type = operand.target_type.rstrip()
-            if not cast_type.endswith("*"):
-                message = f"expected pointer type in '*(T *)expr = ...', got '{cast_type}'"
-                raise CompileError(message, line=star_token[2])
-            pointee_type = cast_type[:-1].rstrip()
+            pointee_type = self._pointee_type_from_cast(
+                context="*(T *)expr = ...",
+                line=star_token[2],
+                operand=operand,
+            )
             self.eat("ASSIGN")
             value = self.parse_expression()
             return PointerDereferenceAssign(
@@ -432,7 +324,7 @@ class Parser:
             self.eat("ASSIGN")
             value = self.parse_expression()
             return DerefIncrementAssign(
-                delta=1 if prefix_token[0] == "PLUS_PLUS" else -1,
+                delta=self._delta_from_operator(prefix_token[0]),
                 expr=value,
                 is_postfix=False,
                 line=star_token[2],
@@ -443,7 +335,7 @@ class Parser:
         next_kind = self.peek()[0]
         if next_kind in ("PLUS_PLUS", "MINUS_MINUS"):
             self.eat()
-            delta = 1 if next_kind == "PLUS_PLUS" else -1
+            delta = self._delta_from_operator(next_kind)
             self.eat("ASSIGN")
             value = self.parse_expression()
             return DerefIncrementAssign(
@@ -580,6 +472,489 @@ class Parser:
             outputs=outputs,
             template=template,
         )
+
+    def _parse_function_definition_or_prototype(
+        self,
+        *,
+        always_inline: bool,
+        asm_register: str | None,
+        asm_symbol: str | None,
+        carry_return: bool,
+        line: int,
+        naked: bool,
+        name: str,
+        preserve_registers: list[str],
+    ) -> list[Node]:
+        """Parse a function prototype or definition.
+
+        Entered with the cursor on the opening ``LPAREN`` of the
+        parameter list.  Consumes trailing ``__attribute__`` decorations
+        (which OR into the booleans already collected by the caller),
+        validates carry_return / always_inline param constraints, then
+        either eats the terminating ``SEMI`` (prototype) or parses the
+        body block.  Returns a one-element list containing the
+        :class:`Function` node.
+        """
+        _ = asm_symbol  # accepted on functions but currently unused
+        if asm_register is not None:
+            message = "asm_register attribute is not valid on function definitions"
+            raise CompileError(message, line=line)
+        self.eat("LPAREN")
+        parameters, is_variadic = self.parse_parameters(allow_variadic=True)
+        self.eat("RPAREN")
+        while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
+            kind, value = self._parse_attribute(line=line)
+            if kind == "carry_return":
+                carry_return = True
+            elif kind == "always_inline":
+                always_inline = True
+            elif kind == "naked":
+                naked = True
+            elif kind == "noreturn":
+                # No-op marker; cc.py has no noreturn-aware codegen.
+                pass
+            elif kind == "preserve_register":
+                preserve_registers.append(value)
+            else:
+                message = f"trailing {kind} attribute is not valid on function definitions"
+                raise CompileError(message, line=line)
+        stack_param_count = sum(1 for p in parameters if p.out_register is None and p.in_register is None)
+        # The codegen defaults plain-param callees to the register
+        # convention (args 0..2 in EAX/EDX/ECX, anything beyond on
+        # the stack).  Anticipate that here so the carry_return /
+        # always_inline checks below don't reject functions whose
+        # stack args will actually arrive in registers.  When the
+        # default flip is suppressed (complex callers) the generator
+        # re-validates and raises at emission time.
+        effective_register_args = stack_param_count
+        if stack_param_count == len(parameters):
+            effective_register_args = min(3, len(parameters))
+        if carry_return and stack_param_count > effective_register_args:
+            # Stack-passed args would require an ``add sp, N`` cleanup
+            # after the call, which clobbers CF.  carry_return callees
+            # must take ≤3 plain args (all register-passed), no args,
+            # or only out_register/in_register params (no stack push,
+            # no cleanup).
+            message = "carry_return functions may not take more than 3 plain args; use ≤3 params or out_register/in_register params"
+            raise CompileError(message, line=line)
+        if always_inline and stack_param_count > effective_register_args:
+            # Inlining splices the body in place; stack args would
+            # need a caller-side cleanup that doesn't exist.
+            message = "always_inline functions may not take more than 3 plain args; use ≤3 params or out_register/in_register params"
+            raise CompileError(message, line=line)
+        if self.peek()[0] == "SEMI":
+            # Function prototype (no body).  Retained in the AST so the
+            # generator can register calling-convention metadata
+            # (carry_return, out_register params) for external functions
+            # called from C.  No code is emitted for prototype nodes.
+            self.eat("SEMI")
+            return [
+                Function(
+                    always_inline=always_inline,
+                    body=[],
+                    carry_return=carry_return,
+                    is_prototype=True,
+                    is_variadic=is_variadic,
+                    line=line,
+                    naked=naked,
+                    name=name,
+                    params=parameters,
+                    preserve_registers=preserve_registers,
+                ),
+            ]
+        self.eat("LBRACE")
+        return [
+            Function(
+                always_inline=always_inline,
+                body=self.parse_block(),
+                carry_return=carry_return,
+                is_variadic=is_variadic,
+                line=line,
+                naked=naked,
+                name=name,
+                params=parameters,
+                preserve_registers=preserve_registers,
+            ),
+        ]
+
+    def _parse_function_pointer_global(
+        self,
+        *,
+        is_extern: bool,
+        line: int,
+    ) -> list[Node]:
+        """Parse a file-scope function-pointer or array-of-function-pointer.
+
+        Entered with the cursor on the opening ``LPAREN`` of
+        ``type (*name)(params)`` or ``type (*name[N])(params)``.  Returns
+        a single-element list containing either an :class:`ArrayDecl`
+        (function-pointer array) or a :class:`VarDecl` with
+        ``type_name="function_pointer"``.
+        """
+        self.eat("LPAREN")
+        self.eat("STAR")
+        name = self.eat("IDENT")[1]
+        array_size_expression: Node | None = None
+        if self.peek()[0] == "LBRACKET":
+            self.eat("LBRACKET")
+            if self.peek()[0] != "RBRACKET":
+                array_size_expression = self.parse_expression()
+            self.eat("RBRACKET")
+        self.eat("RPAREN")
+        self.eat("LPAREN")
+        function_pointer_params_list, _ = self.parse_parameters()
+        self.eat("RPAREN")
+        if array_size_expression is not None:
+            init: Node | None = None
+            if self.peek()[0] == "ASSIGN":
+                self.eat("ASSIGN")
+                init = self.parse_array_init()
+            self.eat("SEMI")
+            if is_extern and init is not None:
+                message = "extern declarations may not have an initializer"
+                raise CompileError(message, line=line)
+            return [
+                ArrayDecl(
+                    init=init,
+                    is_extern=is_extern,
+                    line=line,
+                    name=name,
+                    size=array_size_expression,
+                    type_name="function_pointer",
+                ),
+            ]
+        init = None
+        if self.peek()[0] == "ASSIGN":
+            self.eat("ASSIGN")
+            init = self.parse_expression()
+        self.eat("SEMI")
+        if is_extern and init is not None:
+            message = "extern declarations may not have an initializer"
+            raise CompileError(message, line=line)
+        return [
+            VarDecl(
+                function_pointer_params=function_pointer_params_list,
+                init=init,
+                is_extern=is_extern,
+                line=line,
+                name=name,
+                type_name="function_pointer",
+            ),
+        ]
+
+    def _parse_global_variable_or_array_declarators(
+        self,
+        *,
+        asm_register: str | None,
+        asm_symbol: str | None,
+        first_name: str,
+        is_extern: bool,
+        line: int,
+        type_string: str,
+    ) -> list[Node]:
+        """Parse one or more file-scope variable / array declarators.
+
+        Entered after the base type and first IDENT have been consumed,
+        with the cursor on the optional ``[size]``, ``= init``, or
+        ``,``/``;``.  Loops on ``COMMA`` so a single base type can produce
+        multiple declarators (``extern FILE *stderr, *stdin, *stdout;``).
+        Each declarator parses its own pointer stars (on top of the
+        shared base), optional ``[N]``, and optional ``= init``;
+        ``extern`` propagates to every declarator in the list, and
+        attributes are only honored on the first declarator (further
+        ones with ``has_attribute`` set raise).
+
+        Consumes the trailing ``SEMI`` and returns one
+        :class:`VarDecl` / :class:`ArrayDecl` per declarator.  Globals
+        may specify a size inside ``[...]`` (unlike locals) since there
+        is no runtime initializer to imply one.
+        """
+        # The shared base type is ``type_string`` as returned by
+        # parse_type — including any pointer stars that bound directly
+        # to the base spelling (e.g. ``FILE *`` produces base ``"FILE*"``,
+        # so the second declarator in ``FILE *a, *b;`` sees one pre-bound
+        # star and may add one more, staying within parse_type's cap of 2).
+        shared_base_type = type_string
+        base_stars = len(shared_base_type) - len(shared_base_type.rstrip("*"))
+        has_attribute = asm_register is not None or asm_symbol is not None
+        declarations: list[Node] = []
+        current_name = first_name
+        current_type = type_string
+        while True:
+            is_array = False
+            size_expression: Node | None = None
+            if self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                is_array = True
+                if self.peek()[0] != "RBRACKET":
+                    size_expression = self.parse_expression()
+                self.eat("RBRACKET")
+            init: Node | None = None
+            if self.peek()[0] == "ASSIGN":
+                self.eat("ASSIGN")
+                if is_array:
+                    init = self.parse_array_init()
+                elif self.peek()[0] == "LBRACE":
+                    init = self._parse_designated_struct_initializer()
+                else:
+                    init = self.parse_expression()
+            if is_extern and init is not None:
+                message = "extern declarations may not have an initializer"
+                raise CompileError(message, line=line)
+            if is_array:
+                if asm_register is not None:
+                    message = "asm_register attribute is not valid on arrays"
+                    raise CompileError(message, line=line)
+                if asm_symbol is not None:
+                    message = "asm_name attribute is not valid on arrays"
+                    raise CompileError(message, line=line)
+                if size_expression is None and init is None and not is_extern:
+                    message = f"global array '{current_name}' needs either a size or an initializer"
+                    raise CompileError(message, line=line)
+                declarations.append(
+                    ArrayDecl(init=init, is_extern=is_extern, line=line, name=current_name, size=size_expression, type_name=current_type),
+                )
+            else:
+                declarations.append(
+                    VarDecl(
+                        asm_register=asm_register,
+                        asm_symbol=asm_symbol,
+                        init=init,
+                        is_extern=is_extern,
+                        line=line,
+                        name=current_name,
+                        type_name=current_type,
+                    ),
+                )
+            if self.peek()[0] != "COMMA":
+                break
+            # Reject multi-declarator + attributes — standard C lets
+            # each declarator carry its own attribute list, but cc.py's
+            # asm_register / asm_name pin a single symbol and we have
+            # no use case for repeating that across siblings.
+            if has_attribute:
+                message = "__attribute__ on multi-declarator declarations is not supported; split into separate declarations"
+                raise CompileError(message, line=line)
+            self.eat("COMMA")
+            # Per-declarator pointer stars on top of the shared base
+            # (``T *a, *b`` — each name independently grows pointer
+            # depth).  Cap at parse_type's combined max of 2 stars.
+            extra_stars = 0
+            while base_stars + extra_stars < 2 and self.peek()[0] == "STAR":
+                self.eat("STAR")
+                extra_stars += 1
+            current_name = self.eat("IDENT")[1]
+            current_type = shared_base_type + "*" * extra_stars
+        self.eat("SEMI")
+        return declarations
+
+    def _parse_ident_primary(self, *, ident_token: tuple, line: int) -> Node:
+        """Parse a primary expression whose leading token is an IDENT.
+
+        ``ident_token`` is the IDENT already consumed by the caller and
+        ``line`` is its source line.  Handles, in priority order:
+
+        * ``ident(args)`` — function call, or ``__builtin_va_arg(ap, T)``.
+        * ``ident[i]`` followed optionally by ``.field`` / ``->field``
+          / further ``[j]`` / ``(args)`` for member access, chained
+          subscript, indexed call, or a plain :class:`Index`.
+        * ``ident.field`` / ``ident->field`` with optional ``[i]``
+          subscript or ``++``/``--`` postfix, plus chained member walks.
+        * Bare enum constant — folds to an :class:`Int` literal.
+        * ``ident++`` / ``ident--`` — postfix :class:`IncrementDecrement`.
+        * Plain :class:`Var` fallthrough.
+        """
+        name = ident_token[1]
+        if self.peek()[0] == "LPAREN":
+            # ``__builtin_va_arg(ap, T)`` is special-cased like
+            # ``sizeof(T)`` — its second argument is a type literal,
+            # not an expression.  cc.py only widens variadic args
+            # through int (every cdecl variadic arg is int-promoted
+            # on entry), so the type is discarded after parsing.
+            # Same name clang uses, so a single ``<stdarg.h>`` text
+            # works for both compilers.
+            if name == "__builtin_va_arg":
+                self.eat("LPAREN")
+                cursor_arg = self.parse_expression()
+                self.eat("COMMA")
+                type_name = self.parse_type()
+                self.eat("RPAREN")
+                return VaArg(cursor=cursor_arg, line=line, type_name=type_name)
+            self.eat("LPAREN")
+            return Call(args=self.parse_arguments(), line=line, name=name)
+        if self.peek()[0] == "LBRACKET":
+            self.eat("LBRACKET")
+            index = self.parse_expression()
+            self.eat("RBRACKET")
+            if self.peek()[0] in ("DOT", "ARROW"):
+                arrow_token = self.eat()
+                arrow = arrow_token[0] == "ARROW"
+                member_name = self.eat("IDENT")[1]
+                if self.peek()[0] == "LBRACKET":
+                    self.eat("LBRACKET")
+                    elem_index = self.parse_expression()
+                    self.eat("RBRACKET")
+                    return IndexMemberIndex(
+                        arrow=arrow,
+                        elem_index=elem_index,
+                        index=index,
+                        line=line,
+                        member_name=member_name,
+                        name=name,
+                    )
+                return IndexMemberAccess(
+                    arrow=arrow,
+                    index=index,
+                    line=line,
+                    member_name=member_name,
+                    name=name,
+                )
+            if self.peek()[0] == "LBRACKET":
+                # Chained subscript: ``name[outer][inner]`` for an
+                # array of pointers.  No third ``[`` (triple subscript)
+                # — codegen only handles one level of pointer chase.
+                self.eat("LBRACKET")
+                inner_index = self.parse_expression()
+                self.eat("RBRACKET")
+                return DoubleIndex(
+                    array=Var(line=line, name=name),
+                    outer_index=index,
+                    inner_index=inner_index,
+                    line=line,
+                )
+            if self.peek()[0] == "LPAREN":
+                self.eat("LPAREN")
+                arguments = self.parse_arguments()
+                return IndexedCall(args=arguments, array=Var(line=line, name=name), index=index, line=line)
+            return Index(array=Var(line=line, name=name), index=index, line=line)
+        if self.peek()[0] in ("DOT", "ARROW"):
+            arrow_token = self.eat()
+            arrow = arrow_token[0] == "ARROW"
+            member_token = self.eat("IDENT")
+            # ``ptr->field[i]`` indexes into an array-typed member.
+            if self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                index = self.parse_expression()
+                self.eat("RBRACKET")
+                return MemberIndex(
+                    arrow=arrow,
+                    index=index,
+                    line=line,
+                    member_name=member_token[1],
+                    object_name=name,
+                )
+            if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+                # Postfix ``ptr->member++`` / ``s.member--`` as an
+                # expression — evaluates to the pre-update value.
+                operator_token = self.eat()
+                delta = self._delta_from_operator(operator_token[0])
+                return MemberIncrementDecrement(
+                    arrow=arrow,
+                    delta=delta,
+                    is_postfix=True,
+                    line=line,
+                    member_name=member_token[1],
+                    object_name=name,
+                )
+            result: Node = MemberAccess(
+                arrow=arrow,
+                line=line,
+                member_name=member_token[1],
+                object_name=name,
+            )
+            # Chained member access: ``a->b.c``, ``a->b.c.d``, etc.
+            while self.peek()[0] in ("DOT", "ARROW"):
+                chain_arrow_token = self.eat()
+                chain_arrow = chain_arrow_token[0] == "ARROW"
+                chain_member = self.eat("IDENT")
+                result = MemberAccess(
+                    arrow=chain_arrow,
+                    base_expr=result,
+                    line=line,
+                    member_name=chain_member[1],
+                    object_name="",
+                )
+            return result
+        if name in self.enum_constants:
+            # Enum variant used as a bare value: fold to its integer
+            # constant so downstream code (case labels, array sizes,
+            # constant_expression) sees a literal exactly like a
+            # ``#define``'d name would after preprocessing.
+            return Int(line=line, value=self.enum_constants[name])
+        if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+            # Postfix ``var++`` / ``var--`` — expression evaluates
+            # to the pre-update value.  Bare Var targets only (no
+            # ``s.f++`` or ``a[i]--`` yet).
+            operator_token = self.eat()
+            delta = self._delta_from_operator(operator_token[0])
+            return IncrementDecrement(delta=delta, is_postfix=True, line=line, target_name=name)
+        return Var(line=line, name=name)
+
+    def _parse_ident_statement(self, *, token: tuple) -> Node | list[Node]:
+        """Parse a statement that begins with an IDENT token.
+
+        Two cases handled in priority order:
+
+        1. ``asm(...)``/``__asm__(...)`` — detected here so the extended
+           form (with optional ``volatile`` and operand clauses) routes
+           to :meth:`_parse_extended_asm`.  Simple forms fall through
+           to the call statement path.
+        2. Plain IDENT — dispatch on the next token: labels, assignments,
+           compound assignments, postfix ``++``/``--``, indexed forms
+           (subscript or indexed call), member access, ``__tail_call``,
+           or a plain call statement as the fallback.
+        """
+        if token[1] in ("asm", "__asm__"):
+            # Detect extended asm: peek past optional "volatile" to find LPAREN,
+            # then peek past template string(s) for a COLON.
+            offset = 1
+            if self.peek(offset=offset)[0] == "VOLATILE":
+                offset += 1
+            if self.peek(offset=offset)[0] == "LPAREN":
+                scan = offset + 1
+                while self.peek(offset=scan)[0] == "STRING":
+                    scan += 1
+                if self.peek(offset=scan)[0] == "COLON" or offset > 1:
+                    # Has colons after template, or has "volatile" keyword — extended asm.
+                    return self._parse_extended_asm()
+            # Otherwise fall through to normal IDENT dispatch (handles simple asm("...") via Call).
+        next_kind = self.peek(offset=1)[0]
+        if next_kind == "COLON":
+            self.eat("IDENT")
+            self.eat("COLON")
+            return Label(line=token[2], name=token[1])
+        if next_kind == "ASSIGN":
+            return self.parse_assignment()
+        if next_kind in COMPOUND_ASSIGN_OPERATORS:
+            return self.parse_compound_assignment()
+        if next_kind in ("PLUS_PLUS", "MINUS_MINUS"):
+            # Postfix ``var++;`` / ``var--;`` at statement scope.
+            # ``is_postfix=True`` matches the expression form so the
+            # codegen path is shared; the statement layer discards
+            # the produced value.
+            self.eat("IDENT")
+            operator_token = self.eat()
+            self.eat("SEMI")
+            delta = self._delta_from_operator(operator_token[0])
+            return IncrementDecrement(delta=delta, is_postfix=True, line=token[2], target_name=token[1])
+        if next_kind == "LBRACKET":
+            saved_position = self.position
+            self.eat("IDENT")
+            self.eat("LBRACKET")
+            index_expression = self.parse_expression()
+            self.eat("RBRACKET")
+            if self.peek()[0] == "LPAREN":
+                self.eat("LPAREN")
+                arguments = self.parse_arguments()
+                self.eat("SEMI")
+                return IndexedCall(args=arguments, array=Var(line=token[2], name=token[1]), index=index_expression, line=token[2])
+            self.position = saved_position
+            return self.parse_index_assignment()
+        if next_kind in ("DOT", "ARROW"):
+            return self._parse_member_assignment()
+        if token[1] == "__tail_call":
+            return self._parse_tail_call()
+        return self.parse_call_statement()
 
     def _parse_index_assignment_no_semi(self) -> IndexAssign | IndexMemberAssign | IndexMemberIndexAssign:
         """Parse ``name[index] = expr`` or ``name[index].member[n] = expr`` without consuming the trailing semicolon."""
@@ -745,7 +1120,7 @@ class Parser:
         if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
             operator_token = self.eat()
             self.eat("SEMI")
-            delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
+            delta = self._delta_from_operator(operator_token[0])
             return MemberIncrementDecrement(
                 arrow=arrow,
                 delta=delta,
@@ -1032,6 +1407,61 @@ class Parser:
         expression = self.parse_expression()
         return Assign(expr=expression, line=line, name=name)
 
+    def _parse_star_primary(self, *, line: int) -> Node:
+        """Parse a unary dereference primary expression.
+
+        Entered with the ``STAR`` token already consumed.  Three shapes:
+
+        1. ``*(T *)expr`` — operand starts with a cast.  Wrap the cast
+           as a :class:`PointerDereference` whose ``target_type``
+           picks the load width.  Used by the port-IO bridge idiom
+           ``*(unsigned char *)&s`` for byte-sized bitfield structs.
+        2. ``*++p`` / ``*--p`` / ``*p++`` / ``*p--`` — desugar to
+           :class:`DerefIncrement` with the right ``is_postfix`` /
+           ``delta``.
+        3. ``*p`` (bare IDENT) — desugar to ``p[0]`` so the existing
+           :class:`Index` lowering handles the pointee-typed load.
+        """
+        if self.peek()[0] == "LPAREN" and self._is_type_start(offset=1):
+            operand = self.parse_primary()
+            pointee_type = self._pointee_type_from_cast(
+                context="*(T *)expr",
+                line=line,
+                operand=operand,
+            )
+            return PointerDereference(expression=operand.expression, line=line, target_type=pointee_type)
+        if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+            # Prefix ``*++p`` / ``*--p`` as an rvalue: bump ``p`` by
+            # sizeof(*p) first, then deref the post-incremented pointer.
+            # Lowered through :class:`DerefIncrement` with
+            # ``is_postfix=False`` so the existing codegen path picks the
+            # ordering.
+            prefix_token = self.eat()
+            name_token = self.eat("IDENT")
+            return DerefIncrement(
+                delta=self._delta_from_operator(prefix_token[0]),
+                is_postfix=False,
+                line=line,
+                target_name=name_token[1],
+            )
+        name_token = self.eat("IDENT")
+        next_kind = self.peek()[0]
+        if next_kind in ("PLUS_PLUS", "MINUS_MINUS"):
+            # Postfix ``*p++`` / ``*p--`` as an rvalue: deref the
+            # pre-update pointer, then bump ``p`` by sizeof(*p).
+            self.eat()
+            return DerefIncrement(
+                delta=self._delta_from_operator(next_kind),
+                is_postfix=True,
+                line=line,
+                target_name=name_token[1],
+            )
+        return Index(
+            array=Var(line=line, name=name_token[1]),
+            index=Int(line=line, value=0),
+            line=line,
+        )
+
     def _parse_struct_declaration(self) -> StructDecl:
         """Parse ``struct NAME { type field; ... };`` at file scope."""
         line = self.peek()[2]
@@ -1111,6 +1541,141 @@ class Parser:
         self.eat("RPAREN")
         self.eat("SEMI")
         return TailCall(args=args, fn=fn, line=token[2])
+
+    def _parse_typedef_declaration(self) -> None:
+        """Consume a top-level ``typedef`` and register the alias.
+
+        Two shapes are handled:
+
+        * ``typedef <ret> (*<alias>)(<args>);`` — function-pointer
+          typedef.  The inner argument list is parsed and discarded;
+          cc.py treats every function pointer as an opaque pointer-width
+          value, so the alias resolves to ``"function_pointer"``.
+        * ``typedef <type> <alias>;`` — plain alias.  If the alias slot
+          is a keyword (e.g. ``typedef int int;`` in a header used by
+          both clang and cc.py) the keyword is silently consumed instead
+          of registered; otherwise the alias maps to the base type.
+
+        Always returns ``None`` (typedefs produce no AST node).
+        """
+        self.eat("TYPEDEF")
+        target_type = self.parse_type()
+        if self.peek()[0] == "LPAREN":
+            self.eat("LPAREN")
+            self.eat("STAR")
+            alias_name = self.eat("IDENT")[1]
+            self.eat("RPAREN")
+            self.eat("LPAREN")
+            self.parse_parameters()
+            self.eat("RPAREN")
+            self.eat("SEMI")
+            self.typedef_aliases[alias_name] = "function_pointer"
+            return
+        alias_kind = self.peek()[0]
+        if alias_kind == "IDENT":
+            alias_name = self.eat("IDENT")[1]
+            self.typedef_aliases[alias_name] = target_type
+        elif alias_kind in TYPE_TOKENS:
+            self.eat()
+        else:
+            token = self.peek()
+            message = f"expected typedef alias name, got {token[0]} ({token[1]!r})"
+            raise CompileError(message, line=token[2])
+        self.eat("SEMI")
+
+    @staticmethod
+    def _pointee_type_from_cast(*, context: str, line: int, operand: Node) -> str:
+        """Validate ``*(T *)expr`` shapes and return the pointee type ``T``.
+
+        Shared by the lvalue (``*(T *)expr = value``) and rvalue
+        (``*(T *)expr``) paths; raises ``CompileError`` if the operand
+        is not a cast to a pointer type.  ``context`` is interleaved into
+        the error message so the caller's syntax is reflected back
+        verbatim (e.g. ``"*(T *)expr = ..."`` vs ``"*(T *)expr"``).
+        """
+        if not isinstance(operand, Cast):
+            message = "expected pointer cast after '*'"
+            raise CompileError(message, line=line)
+        cast_type = operand.target_type.rstrip()
+        if not cast_type.endswith("*"):
+            message = f"expected pointer type in '{context}', got '{cast_type}'"
+            raise CompileError(message, line=line)
+        return cast_type[:-1].rstrip()
+
+    def eat(self, kind: str | None = None) -> tuple[str, str, int]:
+        """Consume and return the current token, optionally checking its kind.
+
+        Returns:
+            The consumed token as a (kind, text, line) triple.
+
+        Raises:
+            CompileError: If the token kind does not match the expected kind.
+
+        """
+        token = self.tokens[self.position]
+        if kind is not None and token[0] != kind:
+            message = f"expected {kind}, got {token[0]} ({token[1]!r})"
+            raise CompileError(message, line=token[2])
+        self.position += 1
+        return token
+
+    @staticmethod
+    def fold_binop(operator: str, left: Node, right: Node, /) -> Node:
+        """Return a folded node when operands (or a left-subtree tail) are constant.
+
+        Handles two shapes:
+
+        1. ``Int operation Int`` collapses to a single ``Int`` — lets
+           ``COLUMNS - 1`` become ``39`` at parse time.
+        2. ``(X op1 Int1) op2 Int2`` with ``op1, op2`` both additive
+           folds the trailing constants through so
+           ``(column + 40) - 1`` becomes ``column + 39`` and
+           ``(column + 1) % 40`` keeps the ``%`` outer but the inner
+           addition is already a tight pair.
+        """
+        line = left.line
+        if isinstance(left, Int) and isinstance(right, Int):
+            a, b = left.value, right.value
+            if operator == "+":
+                return Int(line=line, value=a + b)
+            if operator == "-":
+                return Int(line=line, value=a - b)
+            if operator == "*":
+                return Int(line=line, value=a * b)
+            if operator == "&":
+                return Int(line=line, value=a & b)
+            if operator == "|":
+                return Int(line=line, value=a | b)
+            if operator == "^":
+                return Int(line=line, value=a ^ b)
+            if operator == "/" and b != 0:
+                return Int(line=line, value=a // b)
+            if operator == "%" and b != 0:
+                return Int(line=line, value=a % b)
+            if operator == "<<":
+                return Int(line=line, value=(a & 65535) << (b & 31) & 65535)
+            if operator == ">>":
+                return Int(line=line, value=(a & 65535) >> (b & 31))
+        # Rewrite `x / 2^N` as `x >> N` — a single shr replaces a ~10-byte
+        # div sequence and avoids the slow div instruction.  Only kicks
+        # in when N is a positive power of two; other divisions stay as-is.
+        if operator == "/" and isinstance(right, Int) and right.value > 0 and (right.value & (right.value - 1)) == 0:
+            shift = right.value.bit_length() - 1
+            return BinaryOperation(left=left, line=line, operation=">>", right=Int(line=line, value=shift))
+        if (
+            operator in ("+", "-")
+            and isinstance(right, Int)
+            and isinstance(left, BinaryOperation)
+            and left.operation in ("+", "-")
+            and isinstance(left.right, Int)
+        ):
+            inner_sign = 1 if left.operation == "+" else -1
+            outer_sign = 1 if operator == "+" else -1
+            combined = inner_sign * left.right.value + outer_sign * right.value
+            if combined >= 0:
+                return BinaryOperation(left=left.left, line=line, operation="+", right=Int(line=line, value=combined))
+            return BinaryOperation(left=left.left, line=line, operation="-", right=Int(line=line, value=-combined))
+        return BinaryOperation(left=left, line=line, operation=operator, right=right)
 
     def parse_additive(self) -> Node:
         """Parse an additive expression (addition and subtraction).
@@ -1580,7 +2145,7 @@ class Parser:
             # target lvalue is parsed, further down.  Other lvalues
             # (``*p``, ``a[i]``) are out of scope for the first cut.
             operator_token = self.eat()
-            delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
+            delta = self._delta_from_operator(operator_token[0])
             name_token = self.eat("IDENT")
             if self.peek()[0] in ("DOT", "ARROW"):
                 arrow_token = self.eat()
@@ -1604,139 +2169,10 @@ class Parser:
             return Char(line=line, value=decode_first_character(token[1][1:-1], line=line))
         if token[0] == "STRING":
             self.eat()
-            content = token[1][1:-1]
-            # Adjacent string literals concatenate — standard C behavior.
-            # ``"foo" "bar"`` folds to ``"foobar"`` at parse time.
-            while self.peek()[0] == "STRING":
-                content += self.eat()[1][1:-1]
-            return String(content=content, line=line)
+            return String(content=self._concat_string_literal_run(first_token=token), line=line)
         if token[0] == "IDENT":
             self.eat()
-            if self.peek()[0] == "LPAREN":
-                # ``__builtin_va_arg(ap, T)`` is special-cased like
-                # ``sizeof(T)`` — its second argument is a type literal,
-                # not an expression.  cc.py only widens variadic args
-                # through int (every cdecl variadic arg is int-promoted
-                # on entry), so the type is discarded after parsing.
-                # Same name clang uses, so a single ``<stdarg.h>`` text
-                # works for both compilers.
-                if token[1] == "__builtin_va_arg":
-                    self.eat("LPAREN")
-                    cursor_arg = self.parse_expression()
-                    self.eat("COMMA")
-                    type_name = self.parse_type()
-                    self.eat("RPAREN")
-                    return VaArg(cursor=cursor_arg, line=line, type_name=type_name)
-                self.eat("LPAREN")
-                return Call(args=self.parse_arguments(), line=line, name=token[1])
-            if self.peek()[0] == "LBRACKET":
-                self.eat("LBRACKET")
-                index = self.parse_expression()
-                self.eat("RBRACKET")
-                if self.peek()[0] in ("DOT", "ARROW"):
-                    arrow_token = self.eat()
-                    arrow = arrow_token[0] == "ARROW"
-                    member_token = self.eat("IDENT")
-                    member_name = member_token[1]
-                    if self.peek()[0] == "LBRACKET":
-                        self.eat("LBRACKET")
-                        elem_index = self.parse_expression()
-                        self.eat("RBRACKET")
-                        return IndexMemberIndex(
-                            arrow=arrow,
-                            elem_index=elem_index,
-                            index=index,
-                            line=line,
-                            member_name=member_name,
-                            name=token[1],
-                        )
-                    return IndexMemberAccess(
-                        arrow=arrow,
-                        index=index,
-                        line=line,
-                        member_name=member_name,
-                        name=token[1],
-                    )
-                if self.peek()[0] == "LBRACKET":
-                    # Chained subscript: ``name[outer][inner]`` for an
-                    # array of pointers.  No third ``[`` (triple subscript)
-                    # — codegen only handles one level of pointer chase.
-                    self.eat("LBRACKET")
-                    inner_index = self.parse_expression()
-                    self.eat("RBRACKET")
-                    return DoubleIndex(
-                        array=Var(line=line, name=token[1]),
-                        outer_index=index,
-                        inner_index=inner_index,
-                        line=line,
-                    )
-                if self.peek()[0] == "LPAREN":
-                    self.eat("LPAREN")
-                    arguments = self.parse_arguments()
-                    return IndexedCall(args=arguments, array=Var(line=line, name=token[1]), index=index, line=line)
-                return Index(array=Var(line=line, name=token[1]), index=index, line=line)
-            if self.peek()[0] in ("DOT", "ARROW"):
-                arrow_token = self.eat()
-                arrow = arrow_token[0] == "ARROW"
-                member_token = self.eat("IDENT")
-                # ``ptr->field[i]`` indexes into an array-typed member.
-                if self.peek()[0] == "LBRACKET":
-                    self.eat("LBRACKET")
-                    index = self.parse_expression()
-                    self.eat("RBRACKET")
-                    return MemberIndex(
-                        arrow=arrow,
-                        index=index,
-                        line=line,
-                        member_name=member_token[1],
-                        object_name=token[1],
-                    )
-                if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
-                    # Postfix ``ptr->member++`` / ``s.member--`` as an
-                    # expression — evaluates to the pre-update value.
-                    operator_token = self.eat()
-                    delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
-                    return MemberIncrementDecrement(
-                        arrow=arrow,
-                        delta=delta,
-                        is_postfix=True,
-                        line=line,
-                        member_name=member_token[1],
-                        object_name=token[1],
-                    )
-                result: Node = MemberAccess(
-                    arrow=arrow,
-                    line=line,
-                    member_name=member_token[1],
-                    object_name=token[1],
-                )
-                # Chained member access: ``a->b.c``, ``a->b.c.d``, etc.
-                while self.peek()[0] in ("DOT", "ARROW"):
-                    chain_arrow_token = self.eat()
-                    chain_arrow = chain_arrow_token[0] == "ARROW"
-                    chain_member = self.eat("IDENT")
-                    result = MemberAccess(
-                        arrow=chain_arrow,
-                        base_expr=result,
-                        line=line,
-                        member_name=chain_member[1],
-                        object_name="",
-                    )
-                return result
-            if token[1] in self.enum_constants:
-                # Enum variant used as a bare value: fold to its integer
-                # constant so downstream code (case labels, array sizes,
-                # constant_expression) sees a literal exactly like a
-                # ``#define``'d name would after preprocessing.
-                return Int(line=line, value=self.enum_constants[token[1]])
-            if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
-                # Postfix ``var++`` / ``var--`` — expression evaluates
-                # to the pre-update value.  Bare Var targets only (no
-                # ``s.f++`` or ``a[i]--`` yet).
-                operator_token = self.eat()
-                delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
-                return IncrementDecrement(delta=delta, is_postfix=True, line=line, target_name=token[1])
-            return Var(line=line, name=token[1])
+            return self._parse_ident_primary(ident_token=token, line=line)
         if token[0] == "NOT":
             self.eat()
             return BinaryOperation(left=self.parse_primary(), line=line, operation="==", right=Int(line=line, value=0))
@@ -1785,61 +2221,8 @@ class Parser:
                 )
             return AddressOf(line=line, var=Var(line=line, name=name_token[1]))
         if token[0] == "STAR":
-            # Unary dereference.  Two shapes:
-            #
-            # 1. ``*p`` (operand is a plain IDENT) — desugar to ``p[0]``
-            #    so the existing Index lowering handles the load
-            #    (pointee-typed; same width / sign as ``p[0]``).
-            # 2. ``*(T *)expr`` — operand starts with a cast.  Wrap the
-            #    cast as a :class:`PointerDereference` whose ``target_type``
-            #    picks the load width.  This is the port-IO bridge
-            #    idiom ``*(unsigned char *)&s`` for byte-sized bitfield structs.
             self.eat()
-            if self.peek()[0] == "LPAREN" and self._is_type_start(offset=1):
-                operand = self.parse_primary()
-                if not isinstance(operand, Cast):
-                    message = "expected pointer cast after '*'"
-                    raise CompileError(message, line=line)
-                cast_type = operand.target_type.rstrip()
-                if not cast_type.endswith("*"):
-                    message = f"expected pointer type in '*(T *)expr', got '{cast_type}'"
-                    raise CompileError(message, line=line)
-                # Strip the trailing ``*`` (plus any whitespace before it)
-                # to get the pointee type that selects the load width.
-                pointee_type = cast_type[:-1].rstrip()
-                return PointerDereference(expression=operand.expression, line=line, target_type=pointee_type)
-            # Prefix ``*++p`` / ``*--p`` as an rvalue: bump ``p`` by
-            # sizeof(*p) first, then deref the post-incremented pointer.
-            # Lowered through :class:`DerefIncrement` with
-            # ``is_postfix=False`` so the existing codegen path picks the
-            # ordering.
-            if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
-                prefix_token = self.eat()
-                name_token = self.eat("IDENT")
-                return DerefIncrement(
-                    delta=1 if prefix_token[0] == "PLUS_PLUS" else -1,
-                    is_postfix=False,
-                    line=line,
-                    target_name=name_token[1],
-                )
-            name_token = self.eat("IDENT")
-            # Postfix ``*p++`` / ``*p--`` as an rvalue: deref the
-            # pre-update pointer, then bump ``p`` by sizeof(*p).
-            next_kind = self.peek()[0]
-            if next_kind in ("PLUS_PLUS", "MINUS_MINUS"):
-                self.eat()
-                delta = 1 if next_kind == "PLUS_PLUS" else -1
-                return DerefIncrement(
-                    delta=delta,
-                    is_postfix=True,
-                    line=line,
-                    target_name=name_token[1],
-                )
-            return Index(
-                array=Var(line=line, name=name_token[1]),
-                index=Int(line=line, value=0),
-                line=line,
-            )
+            return self._parse_star_primary(line=line)
         if token[0] == "LPAREN":
             self.eat()
             # Cast expression: `(<type>)expr`.  Detected by peeking at the
@@ -2052,7 +2435,7 @@ class Parser:
             # statements — value discarded.  Postfix shapes are
             # handled in the IDENT branch below.
             operator_token = self.eat()
-            delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
+            delta = self._delta_from_operator(operator_token[0])
             name_token = self.eat("IDENT")
             if self.peek()[0] in ("DOT", "ARROW"):
                 arrow_token = self.eat()
@@ -2068,58 +2451,8 @@ class Parser:
                 )
             self.eat("SEMI")
             return IncrementDecrement(delta=delta, is_postfix=False, line=token[2], target_name=name_token[1])
-        if token[0] == "IDENT" and token[1] in ("asm", "__asm__"):
-            # Detect extended asm: peek past optional "volatile" to find LPAREN,
-            # then peek past template string(s) for a COLON.
-            offset = 1
-            if self.peek(offset=offset)[0] == "VOLATILE":
-                offset += 1
-            if self.peek(offset=offset)[0] == "LPAREN":
-                scan = offset + 1
-                while self.peek(offset=scan)[0] == "STRING":
-                    scan += 1
-                if self.peek(offset=scan)[0] == "COLON" or offset > 1:
-                    # Has colons after template, or has "volatile" keyword — extended asm.
-                    return self._parse_extended_asm()
-            # Otherwise fall through to normal IDENT dispatch (handles simple asm("...") via Call).
         if token[0] == "IDENT":
-            next_kind = self.peek(offset=1)[0]
-            if next_kind == "COLON":
-                self.eat("IDENT")
-                self.eat("COLON")
-                return Label(line=token[2], name=token[1])
-            if next_kind == "ASSIGN":
-                return self.parse_assignment()
-            if next_kind in COMPOUND_ASSIGN_OPERATORS:
-                return self.parse_compound_assignment()
-            if next_kind in ("PLUS_PLUS", "MINUS_MINUS"):
-                # Postfix ``var++;`` / ``var--;`` at statement scope.
-                # ``is_postfix=True`` matches the expression form so the
-                # codegen path is shared; the statement layer discards
-                # the produced value.
-                self.eat("IDENT")
-                operator_token = self.eat()
-                self.eat("SEMI")
-                delta = 1 if operator_token[0] == "PLUS_PLUS" else -1
-                return IncrementDecrement(delta=delta, is_postfix=True, line=token[2], target_name=token[1])
-            if next_kind == "LBRACKET":
-                saved_position = self.position
-                self.eat("IDENT")
-                self.eat("LBRACKET")
-                index_expression = self.parse_expression()
-                self.eat("RBRACKET")
-                if self.peek()[0] == "LPAREN":
-                    self.eat("LPAREN")
-                    arguments = self.parse_arguments()
-                    self.eat("SEMI")
-                    return IndexedCall(args=arguments, array=Var(line=token[2], name=token[1]), index=index_expression, line=token[2])
-                self.position = saved_position
-                return self.parse_index_assignment()
-            if next_kind in ("DOT", "ARROW"):
-                return self._parse_member_assignment()
-            if token[1] == "__tail_call":
-                return self._parse_tail_call()
-            return self.parse_call_statement()
+            return self._parse_ident_statement(token=token)
         message = f"expected statement, got {token[0]} ({token[1]!r})"
         raise CompileError(message, line=token[2])
 
@@ -2202,45 +2535,7 @@ class Parser:
         """
         line = self.peek()[2]
         if self.peek()[0] == "TYPEDEF":
-            self.eat("TYPEDEF")
-            target_type = self.parse_type()
-            # Function-pointer typedef: ``typedef <ret> (*<alias>)(<args>);``.
-            # ``<signal.h>`` uses this for ``sighandler_t``, ``<stdlib.h>``
-            # for ``atexit`` / ``qsort`` compare callbacks.  cc.py treats
-            # every function pointer as an opaque pointer-width value
-            # (b2ccf5de added the matching parameter shape), so the
-            # alias resolves to the same ``"function_pointer"`` spelling
-            # that parse_parameter produces.  The inner argument list is
-            # parsed and discarded — cc.py has no per-typedef callable
-            # machinery yet, so calling through a typedef'd function
-            # pointer still requires the local-variable shape.
-            if self.peek()[0] == "LPAREN":
-                self.eat("LPAREN")
-                self.eat("STAR")
-                alias_name = self.eat("IDENT")[1]
-                self.eat("RPAREN")
-                self.eat("LPAREN")
-                self.parse_parameters()
-                self.eat("RPAREN")
-                self.eat("SEMI")
-                self.typedef_aliases[alias_name] = "function_pointer"
-                return None
-            # The alias name is usually a fresh IDENT, but it may
-            # collide with a keyword token (e.g. ``typedef int int;``
-            # in a header used by both clang and cc.py).  Accept the
-            # typedef silently in that case instead of forcing the
-            # header to fork between clang and cc.py builds.
-            alias_kind = self.peek()[0]
-            if alias_kind == "IDENT":
-                alias_name = self.eat("IDENT")[1]
-                self.typedef_aliases[alias_name] = target_type
-            elif alias_kind in TYPE_TOKENS:
-                self.eat()
-            else:
-                token = self.peek()
-                message = f"expected typedef alias name, got {token[0]} ({token[1]!r})"
-                raise CompileError(message, line=token[2])
-            self.eat("SEMI")
+            self._parse_typedef_declaration()
             return None
         if self.peek()[0] == "STRUCT" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
             return [self._parse_struct_declaration()]
@@ -2250,10 +2545,7 @@ class Parser:
             self.eat("IDENT")
             self.eat("LPAREN")
             string_token = self.eat("STRING")
-            content = string_token[1][1:-1]
-            # Adjacent string literals concatenate (as in parse_primary).
-            while self.peek()[0] == "STRING":
-                content += self.eat()[1][1:-1]
+            content = self._concat_string_literal_run(first_token=string_token)
             self.eat("RPAREN")
             self.eat("SEMI")
             return [InlineAsm(content=content, line=line)]
@@ -2294,163 +2586,38 @@ class Parser:
         # already), so ``static`` is a no-op marker — present to make
         # portable C source compile.  ``static`` and ``extern`` are
         # mutually exclusive per C; we reject the pair.
+        # ``extern`` propagates to VarDecl/ArrayDecl: it suppresses the
+        # init-required check and the size-required check (the
+        # definition lives in another TU).  ``static`` is accepted as a
+        # no-op for parse compatibility with headers — we have no per-TU
+        # visibility model so the keyword has no codegen effect.
         is_extern = False
-        is_static = False
         if self.peek()[0] == "EXTERN":
             self.eat("EXTERN")
             is_extern = True
         elif self.peek()[0] == "STATIC":
             self.eat("STATIC")
-            is_static = True
-        _ = is_static  # keyword accepted on functions/vars/arrays at file scope; no codegen effect
         type_string = self.parse_type()
-        # Function-pointer global: ``type (*name)(params);``.  The parens
-        # around ``*name`` distinguish this from a function definition
-        # (``type name(params)``).  Globals only — locals are handled in
-        # ``parse_variable_declaration``.
+        # Function-pointer global: ``type (*name)(params);`` or
+        # ``type (*name[N])(params);``.  The parens around ``*name``
+        # distinguish this from a function definition
+        # (``type name(params)``).  Globals only — locals are handled
+        # in ``parse_variable_declaration``.
         if self.peek()[0] == "LPAREN" and self.peek(offset=1)[0] == "STAR":
-            self.eat("LPAREN")
-            self.eat("STAR")
-            name = self.eat("IDENT")[1]
-            # Check for array-of-function-pointer: ``type (*name[N])(params)``
-            array_size_expression: Node | None = None
-            if self.peek()[0] == "LBRACKET":
-                self.eat("LBRACKET")
-                if self.peek()[0] != "RBRACKET":
-                    array_size_expression = self.parse_expression()
-                self.eat("RBRACKET")
-            self.eat("RPAREN")
-            self.eat("LPAREN")
-            function_pointer_params_list, _ = self.parse_parameters()
-            self.eat("RPAREN")
-            if array_size_expression is not None:
-                # Array-of-function-pointer declaration.
-                init: Node | None = None
-                if self.peek()[0] == "ASSIGN":
-                    self.eat("ASSIGN")
-                    init = self.parse_array_init()
-                self.eat("SEMI")
-                if is_extern and init is not None:
-                    message = "extern declarations may not have an initializer"
-                    raise CompileError(message, line=line)
-                return [
-                    ArrayDecl(
-                        init=init,
-                        is_extern=is_extern,
-                        line=line,
-                        name=name,
-                        size=array_size_expression,
-                        type_name="function_pointer",
-                    ),
-                ]
-            init = None
-            if self.peek()[0] == "ASSIGN":
-                self.eat("ASSIGN")
-                init = self.parse_expression()
-            self.eat("SEMI")
-            if is_extern and init is not None:
-                message = "extern declarations may not have an initializer"
-                raise CompileError(message, line=line)
-            return [
-                VarDecl(
-                    function_pointer_params=function_pointer_params_list,
-                    init=init,
-                    is_extern=is_extern,
-                    line=line,
-                    name=name,
-                    type_name="function_pointer",
-                ),
-            ]
+            return self._parse_function_pointer_global(is_extern=is_extern, line=line)
         name_token = self.eat("IDENT")
         name = name_token[1]
         if self.peek()[0] == "LPAREN":
-            if asm_register is not None:
-                message = "asm_register attribute is not valid on function definitions"
-                raise CompileError(message, line=line)
-            # `extern` on a function declaration is accepted (no semantic
-            # change — function decls are extern by default in C).  We
-            # allow the keyword for parity with C and because object-mode
-            # source files use `extern void foo(args);` to mark
-            # cross-translation-unit references explicitly.
-            _ = is_extern  # keyword accepted; no effect on AST
-            self.eat("LPAREN")
-            parameters, is_variadic = self.parse_parameters(allow_variadic=True)
-            self.eat("RPAREN")
-            while self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
-                kind, value = self._parse_attribute(line=line)
-                if kind == "carry_return":
-                    carry_return = True
-                elif kind == "always_inline":
-                    always_inline = True
-                elif kind == "naked":
-                    naked = True
-                elif kind == "noreturn":
-                    # No-op marker; cc.py has no noreturn-aware codegen.
-                    pass
-                elif kind == "preserve_register":
-                    preserve_registers.append(value)
-                else:
-                    message = f"trailing {kind} attribute is not valid on function definitions"
-                    raise CompileError(message, line=line)
-            stack_param_count = sum(1 for p in parameters if p.out_register is None and p.in_register is None)
-            # The codegen defaults plain-param callees to the register
-            # convention (args 0..2 in EAX/EDX/ECX, anything beyond on
-            # the stack).  Anticipate that here so the carry_return /
-            # always_inline checks below don't reject functions whose
-            # stack args will actually arrive in registers.  When the
-            # default flip is suppressed (complex callers) the generator
-            # re-validates and raises at emission time.
-            effective_register_args = stack_param_count
-            if stack_param_count == len(parameters):
-                effective_register_args = min(3, len(parameters))
-            if carry_return and stack_param_count > effective_register_args:
-                # Stack-passed args would require an ``add sp, N`` cleanup
-                # after the call, which clobbers CF.  carry_return callees
-                # must take ≤3 plain args (all register-passed), no args,
-                # or only out_register/in_register params (no stack push,
-                # no cleanup).
-                message = "carry_return functions may not take more than 3 plain args; use ≤3 params or out_register/in_register params"
-                raise CompileError(message, line=line)
-            if always_inline and stack_param_count > effective_register_args:
-                # Inlining splices the body in place; stack args would
-                # need a caller-side cleanup that doesn't exist.
-                message = "always_inline functions may not take more than 3 plain args; use ≤3 params or out_register/in_register params"
-                raise CompileError(message, line=line)
-            if self.peek()[0] == "SEMI":
-                # Function prototype (no body).  Retained in the AST so
-                # the generator can register calling-convention metadata
-                # (carry_return, out_register params) for external
-                # functions called from C.  No code is emitted for
-                # prototype nodes.
-                self.eat("SEMI")
-                return [
-                    Function(
-                        always_inline=always_inline,
-                        body=[],
-                        carry_return=carry_return,
-                        is_prototype=True,
-                        is_variadic=is_variadic,
-                        line=line,
-                        naked=naked,
-                        name=name,
-                        params=parameters,
-                        preserve_registers=preserve_registers,
-                    )
-                ]
-            self.eat("LBRACE")
-            return [
-                Function(
-                    always_inline=always_inline,
-                    body=self.parse_block(),
-                    carry_return=carry_return,
-                    is_variadic=is_variadic,
-                    line=line,
-                    naked=naked,
-                    name=name,
-                    params=parameters,
-                    preserve_registers=preserve_registers,
-                )
-            ]
+            return self._parse_function_definition_or_prototype(
+                always_inline=always_inline,
+                asm_register=asm_register,
+                asm_symbol=asm_symbol,
+                carry_return=carry_return,
+                line=line,
+                naked=naked,
+                name=name,
+                preserve_registers=preserve_registers,
+            )
         if carry_return:
             message = "carry_return attribute is not valid on global variables"
             raise CompileError(message, line=line)
@@ -2478,92 +2645,14 @@ class Parser:
             else:
                 message = f"trailing {kind} attribute is not valid on global variable declarations"
                 raise CompileError(message, line=line)
-        has_attribute = asm_register is not None or asm_symbol is not None
-        # File-scope variable / array.  Loop on COMMA so a single base
-        # type can produce multiple declarators
-        # (``extern FILE *stderr, *stdin, *stdout;``).  Each declarator
-        # parses its own pointer stars, optional ``[N]`` and ``= init``;
-        # ``extern`` propagates to every declarator in the list.
-        # Globals may specify a size inside ``[...]`` (unlike locals)
-        # since there is no runtime initializer to imply one.
-        #
-        # The shared base type is ``type_string`` as returned by
-        # parse_type — including any pointer stars that bound directly
-        # to the base spelling (e.g. ``FILE *`` produces base ``"FILE*"``,
-        # so the second declarator in ``FILE *a, *b;`` sees one pre-bound
-        # star and may add one more, staying within parse_type's cap of 2).
-        shared_base_type = type_string
-        base_stars = len(shared_base_type) - len(shared_base_type.rstrip("*"))
-        declarations: list[Node] = []
-        current_name = name
-        current_type = type_string
-        while True:
-            is_array = False
-            size_expression: Node | None = None
-            if self.peek()[0] == "LBRACKET":
-                self.eat("LBRACKET")
-                is_array = True
-                if self.peek()[0] != "RBRACKET":
-                    size_expression = self.parse_expression()
-                self.eat("RBRACKET")
-            init: Node | None = None
-            if self.peek()[0] == "ASSIGN":
-                self.eat("ASSIGN")
-                if is_array:
-                    init = self.parse_array_init()
-                elif self.peek()[0] == "LBRACE":
-                    init = self._parse_designated_struct_initializer()
-                else:
-                    init = self.parse_expression()
-            if is_extern and init is not None:
-                message = "extern declarations may not have an initializer"
-                raise CompileError(message, line=line)
-            if is_array:
-                if asm_register is not None:
-                    message = "asm_register attribute is not valid on arrays"
-                    raise CompileError(message, line=line)
-                if asm_symbol is not None:
-                    message = "asm_name attribute is not valid on arrays"
-                    raise CompileError(message, line=line)
-                if size_expression is None and init is None and not is_extern:
-                    message = f"global array '{current_name}' needs either a size or an initializer"
-                    raise CompileError(message, line=line)
-                declarations.append(
-                    ArrayDecl(init=init, is_extern=is_extern, line=line, name=current_name, size=size_expression, type_name=current_type),
-                )
-            else:
-                declarations.append(
-                    VarDecl(
-                        asm_register=asm_register,
-                        asm_symbol=asm_symbol,
-                        init=init,
-                        is_extern=is_extern,
-                        line=line,
-                        name=current_name,
-                        type_name=current_type,
-                    ),
-                )
-            if self.peek()[0] != "COMMA":
-                break
-            # Reject multi-declarator + attributes — standard C lets
-            # each declarator carry its own attribute list, but cc.py's
-            # asm_register / asm_name pin a single symbol and we have
-            # no use case for repeating that across siblings.
-            if has_attribute:
-                message = "__attribute__ on multi-declarator declarations is not supported; split into separate declarations"
-                raise CompileError(message, line=line)
-            self.eat("COMMA")
-            # Per-declarator pointer stars on top of the shared base
-            # (``T *a, *b`` — each name independently grows pointer
-            # depth).  Cap at parse_type's combined max of 2 stars.
-            extra_stars = 0
-            while base_stars + extra_stars < 2 and self.peek()[0] == "STAR":
-                self.eat("STAR")
-                extra_stars += 1
-            current_name = self.eat("IDENT")[1]
-            current_type = shared_base_type + "*" * extra_stars
-        self.eat("SEMI")
-        return declarations
+        return self._parse_global_variable_or_array_declarators(
+            asm_register=asm_register,
+            asm_symbol=asm_symbol,
+            first_name=name,
+            is_extern=is_extern,
+            line=line,
+            type_string=type_string,
+        )
 
     def parse_type(self) -> str:
         """Parse a type specifier (void, int, char, char*, unsigned char, unsigned short, unsigned int, unsigned long).
@@ -2777,3 +2866,12 @@ class Parser:
         condition = self.parse_condition()
         self.eat("RPAREN")
         return While(body=self._parse_control_body(), cond=condition, line=token[2])
+
+    def peek(self, offset: int = 0) -> tuple[str, str, int]:
+        """Return the token at the current position plus an optional offset.
+
+        Returns:
+            The token as a (kind, text, line) triple.
+
+        """
+        return self.tokens[self.position + offset]

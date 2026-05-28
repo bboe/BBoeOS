@@ -30,6 +30,8 @@ DEFAULT_ALIGN: dict[str, int] = {"text": 16, "rodata": 4, "data": 4, "bss": 4}
 # error (keeps the format tight).
 KNOWN_SECTIONS: tuple[str, ...] = ("text", "rodata", "data", "bss")
 
+NASM_GLOBAL_PREFIX = "__nasm_global_"
+
 # NASM listing bytes-column tokens.  Each line's bytes column is a
 # sequence of these tokens:
 #   ``XXXX`` — plain hex pairs (real instruction bytes).
@@ -43,13 +45,12 @@ KNOWN_SECTIONS: tuple[str, ...] = ("text", "rodata", "data", "bss")
 # The column ends with an optional ``-`` line-continuation marker
 # (long ``dd`` rows spill to a follow-up line with no source column),
 # then a whitespace gap before the source column.
+RE_BYTES_TERMINATOR = re.compile(r"^(-?)(\s{2,}|\t|\s+<|\s*$)")
 RE_BYTES_TOKEN = re.compile(
     r"([0-9A-Fa-f?]+)"  # plain hex run (group 1)
     r"|\[([0-9A-Fa-f]+)\]"  # bracketed placeholder (group 2)
     r"|\(([0-9A-Fa-f]+)\)"  # parenthesised absolute (group 3)
 )
-RE_BYTES_TERMINATOR = re.compile(r"^(-?)(\s{2,}|\t|\s+<|\s*$)")
-_NASM_GLOBAL_PREFIX = "__nasm_global_"
 RE_GLOBAL = re.compile(r"^global\s+([A-Za-z_][A-Za-z0-9_]*)\s*$")
 # Generic identifier scanner over the source column of a NASM listing
 # row.  When the bytes column carried a ``[YYYYYYYY]`` cross-section
@@ -83,6 +84,16 @@ def _accumulate_bytes(*, bytes_column: bytes, offset: int, section_buffer: bytea
     if len(section_buffer) < end:
         section_buffer.extend(b"\x00" * (end - len(section_buffer)))
     section_buffer[offset:end] = bytes_column
+
+
+def _match_label_at_line_start(source_stripped: str) -> str | None:
+    """Return the label name at the start of ``source_stripped`` if any.
+
+    Tries the ``label:`` form first, then NASM's colon-less data-declaration
+    shorthand (``label db ...``).  Returns ``None`` if neither matches.
+    """
+    match = RE_LABEL.match(source_stripped) or RE_LABEL_NO_COLON.match(source_stripped)
+    return match.group(1) if match else None
 
 
 def _parse_listing_row(*, raw_line: str) -> tuple[int | None, bytes, int | None, int, str] | None:
@@ -223,19 +234,21 @@ def _prescan_defined_labels(*, listing_lines: list[str]) -> set[str]:
         if parsed is None:
             continue
         _offset, _bytes_column, _reloc_opcode_length, _bss_increment, source = parsed
-        source_stripped = source.lstrip()
-        label_match = RE_LABEL.match(source_stripped) or RE_LABEL_NO_COLON.match(source_stripped)
-        if label_match:
-            defined.add(label_match.group(1))
+        label_name = _match_label_at_line_start(source.lstrip())
+        if label_name is not None:
+            defined.add(label_name)
     return defined
 
 
 def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
-    """Read a NASM .bin + .lst pair, write a .ccobj JSON."""
+    """Read a NASM .bin + .lst pair, write a .ccobj JSON.
+
+    The .bin path is part of the CLI contract (NASM emits both files
+    together) but is unused by the packer: every byte in the .ccobj is
+    reconstructed from the listing.
+    """
+    _ = bin_path  # kept for CLI signature; see docstring above
     listing_lines = lst_path.read_text(encoding="utf-8").splitlines()
-    # Read the .bin for cross-validation only; the per-section bytes
-    # written into the .ccobj are reconstructed from the listing.
-    _bin_bytes = bin_path.read_bytes()
 
     defined_labels = _prescan_defined_labels(listing_lines=listing_lines)
 
@@ -268,8 +281,7 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
             # Source-bearing row — refresh the relocation queue from
             # its identifiers (excluding any label being defined here,
             # which is the data sink, not a relocation target).
-            label_lookahead = RE_LABEL.match(source_stripped) or RE_LABEL_NO_COLON.match(source_stripped)
-            line_label = label_lookahead.group(1) if label_lookahead else None
+            line_label = _match_label_at_line_start(source_stripped)
             pending_reloc_symbols = [
                 match.group(1)
                 for match in RE_IDENTIFIER.finditer(source_stripped)
@@ -289,7 +301,7 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
         global_match = RE_GLOBAL.match(source_stripped)
         if global_match:
             global_name = global_match.group(1)
-            global_name = global_name.removeprefix(_NASM_GLOBAL_PREFIX)
+            global_name = global_name.removeprefix(NASM_GLOBAL_PREFIX)
             globals_declared.add(global_name)
             continue
 
@@ -300,9 +312,8 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
         # (``foo db ...`` — NASM's compact data-declaration shorthand,
         # used by file-scope inline asm in user/programs/asm.c) are accepted.
         label_name: str | None = None
-        label_match = RE_LABEL.match(source_stripped) or RE_LABEL_NO_COLON.match(source_stripped)
-        if label_match and current_section is not None:
-            label_name = label_match.group(1)
+        if current_section is not None:
+            label_name = _match_label_at_line_start(source_stripped)
 
         if bss_increment > 0 and current_section == "bss":
             # NASM emits ``<res Nh>`` in the bytes column whenever a

@@ -29,6 +29,22 @@ class Node:
     line: int = field(compare=False, default=0)
 
 
+class IntegerOperand:
+    """Marker mixin: instances classify as ``"integer"`` in comparison-operand typing.
+
+    Used by ``_type_of_operand`` in ``cc.codegen.base`` to short-circuit
+    classification for AST nodes whose value is unconditionally integer
+    in a comparison context — function calls, sizeof shapes, logical
+    operators (which yield 0/1), and the increment/decrement family.
+
+    Placed directly after :class:`Node` because the inheriting node
+    classes are scattered throughout the file (alphabetical order),
+    so the marker must be defined before the first user.
+    """
+
+    __slots__ = ()
+
+
 @dataclass(kw_only=True, slots=True)
 class AddressOf(Node):
     """Address-of expression ``&name``."""
@@ -72,7 +88,7 @@ class Assign(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class AssignExpr(Node):
+class AssignExpr(IntegerOperand, Node):
     """A parenthesized assignment used as an expression.
 
     Wraps an underlying ``*Assign`` AST node (``Assign``, ``DerefAssign``,
@@ -110,7 +126,7 @@ class Break(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class Call(Node):
+class Call(IntegerOperand, Node):
     """Function/builtin call ``name(args...)``."""
 
     args: list[Node]
@@ -148,7 +164,7 @@ class Compound(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class Conditional(Node):
+class Conditional(IntegerOperand, Node):
     """Ternary conditional expression ``condition ? then_expr : else_expr``.
 
     Right-associative: ``a ? b : c ? d : e`` parses as
@@ -357,7 +373,7 @@ class If(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class IncrementDecrement(Node):
+class IncrementDecrement(IntegerOperand, Node):
     """``++var`` / ``--var`` / ``var++`` / ``var--`` on a plain local or global.
 
     Always targets a bare name (no ``*p++``, no ``a[i]++`` yet — those
@@ -484,7 +500,7 @@ class Label(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class LogicalAnd(Node):
+class LogicalAnd(IntegerOperand, Node):
     """Short-circuit ``left && right`` expression."""
 
     left: Node
@@ -492,7 +508,7 @@ class LogicalAnd(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class LogicalOr(Node):
+class LogicalOr(IntegerOperand, Node):
     """Short-circuit ``left || right`` expression."""
 
     left: Node
@@ -500,7 +516,7 @@ class LogicalOr(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class MemberAccess(Node):
+class MemberAccess(IntegerOperand, Node):
     """Member access expression: ``ptr->field`` or ``obj.field``.
 
     ``arrow=True`` for ``->``, ``False`` for ``.``.  Only the
@@ -557,7 +573,7 @@ class MemberAssign(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class MemberIncrementDecrement(Node):
+class MemberIncrementDecrement(IntegerOperand, Node):
     """``++ptr->field`` / ``--ptr->field`` / ``ptr->field++`` / ``ptr->field--``.
 
     Mirrors :class:`IncrementDecrement` (bare Var lvalue) for struct
@@ -692,21 +708,21 @@ class Return(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class SizeofExpr(Node):
+class SizeofExpr(IntegerOperand, Node):
     """``sizeof(expression)`` — compile-time size of the expression's inferred type."""
 
     expression: Node
 
 
 @dataclass(kw_only=True, slots=True)
-class SizeofType(Node):
+class SizeofType(IntegerOperand, Node):
     """``sizeof(type_name)`` expression."""
 
     type_name: str
 
 
 @dataclass(kw_only=True, slots=True)
-class SizeofVar(Node):
+class SizeofVar(IntegerOperand, Node):
     """``sizeof(name)`` expression (size of a declared variable)."""
 
     name: str
