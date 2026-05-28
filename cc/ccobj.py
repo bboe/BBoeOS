@@ -70,6 +70,18 @@ RE_LABEL = re.compile(r"^\$?([A-Za-z_.][A-Za-z0-9_.]*):")
 # whitelist so plain instruction rows (``mov eax, STR_FOO``) never
 # get misread as label definitions.
 RE_LABEL_NO_COLON = re.compile(r"^([A-Za-z_.][A-Za-z0-9_.]*)(?=\s+(?:db|dw|dd|dq|do|resb|resw|resd|resq|reso|times|equ)\b)")
+
+
+def _match_label_at_line_start(source_stripped: str) -> str | None:
+    """Return the label name at the start of ``source_stripped`` if any.
+
+    Tries the ``label:`` form first, then NASM's colon-less data-declaration
+    shorthand (``label db ...``).  Returns ``None`` if neither matches.
+    """
+    match = RE_LABEL.match(source_stripped) or RE_LABEL_NO_COLON.match(source_stripped)
+    return match.group(1) if match else None
+
+
 RE_MACRO = re.compile(r"^(CCREL_[A-Z_]+)\s+([A-Za-z_][A-Za-z0-9_]*)\s*$")
 RE_SECTION = re.compile(r"^section\s+\.([A-Za-z_][A-Za-z0-9_]*)\s*$")
 
@@ -223,19 +235,21 @@ def _prescan_defined_labels(*, listing_lines: list[str]) -> set[str]:
         if parsed is None:
             continue
         _offset, _bytes_column, _reloc_opcode_length, _bss_increment, source = parsed
-        source_stripped = source.lstrip()
-        label_match = RE_LABEL.match(source_stripped) or RE_LABEL_NO_COLON.match(source_stripped)
-        if label_match:
-            defined.add(label_match.group(1))
+        label_name = _match_label_at_line_start(source.lstrip())
+        if label_name is not None:
+            defined.add(label_name)
     return defined
 
 
 def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
-    """Read a NASM .bin + .lst pair, write a .ccobj JSON."""
+    """Read a NASM .bin + .lst pair, write a .ccobj JSON.
+
+    The .bin path is part of the CLI contract (NASM emits both files
+    together) but is unused by the packer: every byte in the .ccobj is
+    reconstructed from the listing.
+    """
+    _ = bin_path  # kept for CLI signature; see docstring above
     listing_lines = lst_path.read_text(encoding="utf-8").splitlines()
-    # Read the .bin for cross-validation only; the per-section bytes
-    # written into the .ccobj are reconstructed from the listing.
-    _bin_bytes = bin_path.read_bytes()
 
     defined_labels = _prescan_defined_labels(listing_lines=listing_lines)
 
@@ -268,8 +282,7 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
             # Source-bearing row — refresh the relocation queue from
             # its identifiers (excluding any label being defined here,
             # which is the data sink, not a relocation target).
-            label_lookahead = RE_LABEL.match(source_stripped) or RE_LABEL_NO_COLON.match(source_stripped)
-            line_label = label_lookahead.group(1) if label_lookahead else None
+            line_label = _match_label_at_line_start(source_stripped)
             pending_reloc_symbols = [
                 match.group(1)
                 for match in RE_IDENTIFIER.finditer(source_stripped)
@@ -300,9 +313,8 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
         # (``foo db ...`` — NASM's compact data-declaration shorthand,
         # used by file-scope inline asm in user/programs/asm.c) are accepted.
         label_name: str | None = None
-        label_match = RE_LABEL.match(source_stripped) or RE_LABEL_NO_COLON.match(source_stripped)
-        if label_match and current_section is not None:
-            label_name = label_match.group(1)
+        if current_section is not None:
+            label_name = _match_label_at_line_start(source_stripped)
 
         if bss_increment > 0 and current_section == "bss":
             # NASM emits ``<res Nh>`` in the bytes column whenever a

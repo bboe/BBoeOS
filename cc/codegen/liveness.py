@@ -25,6 +25,7 @@ new AST kind being added without updating the use/def coverage here.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import combinations
 
 from cc.ast_nodes import (
     AddressOf,
@@ -491,20 +492,21 @@ class LivenessAnalyzer:
         """
         self.analyze()
         adjacency: dict[str, set[str]] = {}
+
+        def add_edge(name_a: str, name_b: str) -> None:
+            adjacency.setdefault(name_a, set()).add(name_b)
+            adjacency.setdefault(name_b, set()).add(name_a)
+
         for statement_info in self.statements.values():
             live = statement_info.live_out
             # Pairwise interference across the live-out set.
-            live_list = list(live)
-            for index, name_a in enumerate(live_list):
-                for name_b in live_list[index + 1 :]:
-                    adjacency.setdefault(name_a, set()).add(name_b)
-                    adjacency.setdefault(name_b, set()).add(name_a)
+            for name_a, name_b in combinations(live, 2):
+                add_edge(name_a, name_b)
             # Def vs live-out: a def while another var is live-out
             # makes them interfere (the live var spans the def site).
             for defined in statement_info.definitions:
                 for other in live:
                     if other == defined:
                         continue
-                    adjacency.setdefault(defined, set()).add(other)
-                    adjacency.setdefault(other, set()).add(defined)
+                    add_edge(defined, other)
         return adjacency
