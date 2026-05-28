@@ -2094,6 +2094,37 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return []
         return []
 
+    @staticmethod
+    def _is_candidate_expression_temporary(
+        name: str,
+        /,
+        *,
+        ax_resident_uses: dict[str, int],
+        init_count: dict[str, int],
+        init_expr: dict[str, Node],
+        other_uses: dict[str, int],
+    ) -> bool:
+        """Skip pinning vars whose value lives in AX between assignment and consumer.
+
+        A var assigned exactly once from a non-trivial expression
+        (Call/Index/BinaryOperation — all leave the value in AX) and consumed
+        only as the LEFT operand of a comparison against an integer
+        literal naturally lives in AX through its lifetime.
+        ``emit_comparison``'s fast path emits ``cmp ax, imm`` for
+        those uses without re-loading the value, so pinning the
+        var would only add a redundant ``mov pin, ax`` after the
+        assignment.  Vars used as right-of-cmp or in arithmetic
+        still benefit from a pin (the left operand's eval clobbers
+        AX before reaching them) so they're left alone here.
+        """
+        if init_count.get(name, 0) != 1:
+            return False
+        if other_uses.get(name, 0) != 0:
+            return False
+        if ax_resident_uses.get(name, 0) == 0:
+            return False
+        return isinstance(init_expr.get(name), (Call, Index, BinaryOperation))
+
     def _local_address(self, name: str, /) -> str:
         """Return the memory operand string for a local or global scalar.
 
@@ -2878,28 +2909,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for statement in body:
             count_visit(statement)
 
-        def is_expression_temporary(name: str) -> bool:
-            """Skip pinning vars whose value lives in AX between assignment and consumer.
-
-            A var assigned exactly once from a non-trivial expression
-            (Call/Index/BinaryOperation — all leave the value in AX) and consumed
-            only as the LEFT operand of a comparison against an integer
-            literal naturally lives in AX through its lifetime.
-            ``emit_comparison``'s fast path emits ``cmp ax, imm`` for
-            those uses without re-loading the value, so pinning the
-            var would only add a redundant ``mov pin, ax`` after the
-            assignment.  Vars used as right-of-cmp or in arithmetic
-            still benefit from a pin (the left operand's eval clobbers
-            AX before reaching them) so they're left alone here.
-            """
-            if init_count.get(name, 0) != 1:
-                return False
-            if other_uses.get(name, 0) != 0:
-                return False
-            if ax_resident_uses.get(name, 0) == 0:
-                return False
-            return isinstance(init_expr.get(name), (Call, Index, BinaryOperation))
-
         # Per-candidate-per-register count of calls that ran BEFORE the
         # candidate's first AST-level store.  PR #454's liveness pre-pass
         # elides ``push <pin>`` / ``pop <pin>`` around those calls
@@ -2972,7 +2981,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # ``mov pin, ax`` after their single complex-expression
         # initializer without shrinking the comparisons that follow
         # (those already work against AX).
-        combined = [item for item in combined if not is_expression_temporary(item[0])]
+        combined = [
+            item
+            for item in combined
+            if not self._is_candidate_expression_temporary(
+                item[0],
+                ax_resident_uses=ax_resident_uses,
+                init_count=init_count,
+                init_expr=init_expr,
+                other_uses=other_uses,
+            )
+        ]
         # An auto-pinned register has no memory address; vars whose
         # address is taken (``&x``) must live in a frame slot so
         # ``_local_address`` can hand back a real pointer.
