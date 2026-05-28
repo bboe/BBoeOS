@@ -962,6 +962,160 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         operand = f"byte [{si}+{offset}]" if offset else f"byte [{si}]"
         return (operand, guarded)
 
+    def _emit_comparison_against_constant(self, *, is_zero: bool, left: Node, literal: str) -> None:
+        """Emit a comparison whose right operand reduced to a constant immediate.
+
+        Four fast paths layered ahead of the generic
+        ``generate_expression`` + ``cmp/test ax, imm`` fallback:
+
+        * pinned-register ``left`` — ``cmp R, imm`` / ``test R, R`` in place.
+        * memory-backed scalar ``left`` — ``cmp [L], imm`` skips the
+          ``mov ax, [L]`` load (``byte`` width for byte-scalars).
+        * byte-indexed ``left`` — ``cmp byte [bx+N], imm`` skips the
+          AL load + zero-extend.
+        * everything else — load into AX, then ``cmp ax, imm`` /
+          ``test ax, ax``.
+        """
+        if isinstance(left, Var) and left.name in self.pinned_register:
+            register = self.pinned_register[left.name]
+            if is_zero:
+                self.emit(f"        test {register}, {register}")
+            else:
+                self.emit(f"        cmp {register}, {literal}")
+            return
+        # Memory-backed local compared to a constant: fuse into a
+        # direct ``cmp word [L], imm`` (or ``cmp byte [L], imm`` for
+        # byte-scalar locals / globals whose storage is a single
+        # ``db`` cell) so we skip the ``mov ax, [L]`` load.  Safe
+        # because the flags are consumed by the next conditional
+        # jump and AX's prior value was not promised.
+        if (
+            isinstance(left, Var)
+            and self._is_memory_scalar(left.name)
+            and left.name not in self.variable_arrays
+            and left.name != self.ax_local
+            and self.variable_types.get(left.name) != "unsigned long"
+        ):
+            address = self._local_address(left.name)
+            width = "byte" if self._is_byte_scalar(left.name) else self.target.word_size
+            if is_zero:
+                self.emit(f"        cmp {width} [{address}], 0")
+            else:
+                self.emit(f"        cmp {width} [{address}], {literal}")
+            return
+        # Byte-indexed variable compared to a constant: fuse into
+        # ``cmp byte [bx+N], imm`` so we skip the load-into-AL and
+        # the zero-extend into AX.
+        if self._is_byte_index(left):
+            operand, guarded = self._emit_byte_index_si(left)
+            if is_zero:
+                self.emit(f"        cmp {operand}, 0")
+            else:
+                self.emit(f"        cmp {operand}, {literal}")
+            self._si_scratch_guard_end(guarded=guarded)
+            return
+        self.generate_expression(left)
+        if is_zero:
+            self.emit("        test al, al" if self.ax_is_byte else f"        test {self.target.acc}, {self.target.acc}")
+        else:
+            register = "al" if self.ax_is_byte else self.target.acc
+            self.emit(f"        cmp {register}, {literal}")
+
+    def _emit_comparison_general(self, *, left: Node, right: Node) -> None:
+        """Emit a comparison whose right operand isn't a constant immediate.
+
+        Three fast paths, then the generic CX-scratch fallback:
+
+        * two byte-indexed vars — ``mov al, [bx+N]`` then ``cmp al,
+          [bx+M]`` (avoid the zero-extend + push/pop roundtrip).
+        * pinned-register right operand — compare AX against it
+          directly (no CX load).  Requires a leaf ``left`` when the
+          pin happens to live in CX.
+        * memory-backed right operand — ``cmp ax, [mem]`` skips the
+          CX load entirely.  Byte-scalar memory bails to the generic
+          path (word-sized ``cmp`` would read an adjacent byte).
+        * generic — :meth:`emit_binary_operator_operands` (AX = left,
+          CX = right), then ``cmp ax, cx``.  Saves CX around the
+          ``emit_binary_operator_operands`` clobber when a pinned
+          variable lives there.
+        """
+        # Two byte-indexed variables: load left byte into AL, then
+        # compare directly against the right byte in memory.  Saves
+        # the zero-extend, push/pop, and CX round-trip.
+        if self._is_byte_index(left) and self._is_byte_index(right):
+            left_operand, left_guarded = self._emit_byte_index_si(left)
+            left_mem = left_operand.removeprefix("byte ")
+            self.emit(f"        mov al, {left_mem}")
+            self._si_scratch_guard_end(guarded=left_guarded)
+            right_operand, right_guarded = self._emit_byte_index_si(right)
+            right_mem = right_operand.removeprefix("byte ")
+            self.emit(f"        cmp al, {right_mem}")
+            self._si_scratch_guard_end(guarded=right_guarded)
+            return
+        # Fast path: right is a pinned register variable.  Compare
+        # AX against it directly, skipping the CX load and any
+        # push/pop protection.  When the pinned register is CX we
+        # additionally require ``left`` to be a leaf expression so
+        # generate_expression can't clobber CX mid-compare.
+        if isinstance(right, Var) and right.name in self.pinned_register:
+            source = self.pinned_register[right.name]
+            if source != self.target.count_register or isinstance(left, (Int, Var, String)):
+                left_pinned = isinstance(left, Var) and left.name in self.pinned_register
+                self.generate_expression(left)
+                # Use matching-width operands for cmp: if source is
+                # narrower than acc (e.g., bp vs eax), compare ax/source.
+                cmp_acc = self.target.low_word(self.target.acc) if len(source) < len(self.target.acc) else self.target.acc
+                self.emit(f"        cmp {cmp_acc}, {source}")
+                # ``peephole_compare_through_register`` deletes the
+                # ``mov ax, <pin>`` emitted by ``generate_expression``
+                # above when a conditional jump follows the cmp.
+                # Without this clear, downstream reads of ``left``
+                # would skip their own load (``ax_local ==
+                # left.name``) and pick up whatever AX actually held
+                # — the peephole-deleted source register, not the
+                # pinned local.  Mirrors the memory-backed sibling.
+                if left_pinned:
+                    self.ax_clear()
+                return
+        # Fast path: right is a memory-backed local.  ``cmp ax, [mem]``
+        # skips the CX load entirely.  Byte-scalar locals / globals
+        # bail out — their storage is a single byte and a word-sized
+        # ``cmp ax, [mem]`` would read the adjacent byte into the
+        # high comparison byte.
+        if (
+            isinstance(right, Var)
+            and self._is_memory_scalar(right.name)
+            and right.name not in self.pinned_register
+            and right.name not in self.variable_arrays
+            and self.variable_types.get(right.name) != "unsigned long"
+            and not self._is_byte_scalar(right.name)
+        ):
+            # Invalidate ax_local when ``left`` is pinned — the
+            # ``mov ax, reg`` that generate_expression emits here
+            # will be removed by ``peephole_compare_through_register``
+            # once the caller emits a conditional jump after the
+            # cmp, leaving AX without the loaded value.  Without
+            # this clear, downstream reads of ``left`` would skip
+            # their own load (ax_local == left.name) and pick up
+            # whatever AX held from an unrelated earlier expression.
+            left_pinned = isinstance(left, Var) and left.name in self.pinned_register
+            self.generate_expression(left)
+            self.emit(f"        cmp {self.target.acc}, [{self._local_address(right.name)}]")
+            if left_pinned:
+                self.ax_clear()
+            return
+        # emit_binary_operator_operands clobbers CX; save it when a
+        # pinned variable lives there (push/pop don't modify flags,
+        # so the cmp's flags survive the restore for the caller's
+        # conditional jump).
+        count_pinned = any(register == self.target.count_register for register in self.pinned_register.values())
+        if count_pinned:
+            self.emit(f"        push {self.target.count_register}")
+        self.emit_binary_operator_operands(left, right)
+        self.emit(f"        cmp {self.target.acc}, {self.target.count_register}")
+        if count_pinned:
+            self.emit(f"        pop {self.target.count_register}")
+
     def _emit_constant_base_index_addr(
         self,
         *,
@@ -1034,6 +1188,90 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         addr += f"+{base_register}"
         return addr
 
+    def _emit_global_array(self, name: str, /) -> None:
+        """Lay down storage for one file-scope array global.
+
+        Skips extern arrays.  Zero-initialized arrays are deferred to
+        ``self.bss_vars``.  Initialized struct arrays unroll each
+        element's fields and pad to the declared size; primitive-typed
+        arrays use one ``db`` / ``dw`` / ``dd`` directive carrying every
+        element.
+        """
+        declaration = self.global_arrays[name]
+        if name in self.extern_globals:
+            # Storage lives in another translation unit; references
+            # to the bare ``_g_<name>`` label still resolve.
+            return
+        is_byte = declaration.type_name in self.BYTE_TYPES
+        is_struct = declaration.type_name.startswith("struct ")
+        # Stride is sizeof(element) for every shape: structs sum
+        # field widths, ``char`` / ``unsigned char`` resolve to 1,
+        # ``unsigned short`` to 2, pointer / ``int`` / ``unsigned int`` to
+        # ``int_size``.  Unifies what used to be a binary
+        # byte-vs-int_size switch that silently miscompiled
+        # ``unsigned short`` globals.
+        stride = self._type_size(declaration.type_name)
+        if is_struct and declaration.init is not None:
+            struct_name = declaration.type_name[len("struct ") :]
+            layout = self.struct_layouts[struct_name]
+            lines: list[str] = []
+            for element in declaration.init.elements:
+                assert isinstance(element, StructInitializer)
+                assert element.positional is not None, "array-of-struct globals require positional initializers"
+                for i, (field_name, info) in enumerate(layout.items()):
+                    field_size = info.field_size
+                    value = self._constant_expression(element.positional[i]) if i < len(element.positional) else "0"
+                    if field_size == 1:
+                        lines.append(f"db {value}")
+                    elif field_size == 2:
+                        lines.append(f"dw {value}")
+                    elif field_size == 4:
+                        lines.append(f"dd {value}")
+                    else:
+                        lines.append(f"times {field_size} db 0")
+            count = len(declaration.init.elements)
+            size_expression = self._constant_expression(declaration.size)
+            lines.append(f"times ({size_expression}-{count})*{stride} db 0")
+            self._maybe_emit_data_header()
+            self._emit_global_export(name)
+            self.emit(f"{self._global_label(name)}: {lines[0]}")
+            for line in lines[1:]:
+                self.emit(f"        {line}")
+            return
+        if declaration.init is not None:
+            # Match the data-cell width to the element width:
+            # ``db`` for byte, ``dw`` for halfword (``unsigned short``),
+            # ``dd`` / ``dw`` for full-int (``int_directive``).
+            int_directive = "dd" if self.target.int_size == 4 else "dw"
+            if is_byte:
+                directive = "db"
+            elif stride == 2 and stride < self.target.int_size:
+                directive = "dw"
+            else:
+                directive = int_directive
+            rendered = [
+                self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
+                for element in declaration.init.elements
+            ]
+            self._maybe_emit_data_header()
+            self._emit_global_export(name)
+            self.emit(f"{self._global_label(name)}: {directive} {', '.join(rendered)}")
+            return
+        size_expression = self._constant_expression(declaration.size)
+        # Fold ``size * stride`` at compile time when the size is a
+        # plain integer — the self-hosted assembler in user/programs/asm.c
+        # uses flat operator precedence, so emitting ``(N)*4`` next
+        # to surrounding ``+`` / ``-`` (as the BSS chain does) makes
+        # the self-host group ``(N) * (4 - <next_term>)`` instead of
+        # ``(N)*4`` first.  Pre-folding to a literal sidesteps that.
+        if stride == 1:
+            byte_count = size_expression
+        elif size_expression is not None and size_expression.isdigit():
+            byte_count = str(int(size_expression) * stride)
+        else:
+            byte_count = f"({size_expression})*{stride}"
+        self.bss_vars.append((name, byte_count))
+
     def _emit_global_export(self, name: str, /) -> None:
         """Emit the per-definition export directive matching the active mode.
 
@@ -1062,6 +1300,80 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self.emit(f"{name} equ _g_{name}")
 
+    def _emit_global_scalar(self, name: str, /) -> None:
+        """Lay down storage for one file-scope scalar global.
+
+        Skips register-aliased / asm-symbol / extern names (their
+        storage lives elsewhere).  Zero-initialized scalars are
+        appended to ``self.bss_vars``; struct initializers are unrolled
+        into per-field directives; everything else takes one ``db`` /
+        ``dw`` / ``dd`` cell.
+        """
+        declaration = self.global_scalars[name]
+        if name in self.register_aliased_globals:
+            # Storage lives in the aliased CPU register, not memory,
+            # so no ``_g_<name>`` label is emitted.
+            return
+        if name in self.asm_symbol_globals:
+            # Storage lives in an existing asm symbol, not here,
+            # so no ``_g_<name>`` label is emitted.
+            return
+        if name in self.extern_globals:
+            # Storage lives in another translation unit; references
+            # still resolve to ``_g_<name>`` (matching the symbol the
+            # owning .c file emits).
+            return
+        if declaration.init is None:
+            if declaration.type_name.startswith("struct ") and not declaration.type_name.endswith("*"):
+                stride = self.struct_sizes[declaration.type_name[len("struct ") :]]
+            elif self._is_byte_scalar_global(name):
+                stride = 1
+            else:
+                # Use _type_size so double (8 bytes), unsigned short (2 bytes),
+                # etc. get the correct allocation rather than always
+                # falling back to int_size (4 bytes on x86-32).
+                try:
+                    stride = self._type_size(declaration.type_name)
+                except CompileError:
+                    stride = self.target.int_size
+            self.bss_vars.append((name, str(stride)))
+            return
+        if isinstance(declaration.init, StructInitializer):
+            tag = declaration.type_name[len("struct ") :]
+            layout = self.struct_layouts[tag]
+            init = declaration.init
+            if init.designated is not None:
+                value_by_field = init.designated
+            else:
+                assert init.positional is not None
+                field_order = list(layout.keys())
+                value_by_field = dict(zip(field_order, init.positional, strict=False))
+            directives = []
+            for field_name, info in layout.items():
+                field_size = info.field_size
+                value_node = value_by_field.get(field_name)
+                value = self._constant_expression(value_node) if value_node is not None else "0"
+                if field_size == 1:
+                    directives.append(f"db {value}")
+                elif field_size == 2:
+                    directives.append(f"dw {value}")
+                elif field_size == 4:
+                    directives.append(f"dd {value}")
+                else:
+                    directives.append(f"times {field_size} db 0")
+            self._maybe_emit_data_header()
+            self._emit_global_export(name)
+            self.emit(f"{self._global_label(name)}: {directives[0]}")
+            for directive in directives[1:]:
+                self.emit(f"        {directive}")
+            return
+        init_expression = self._constant_expression(declaration.init)
+        int_directive = "dd" if self.target.int_size == 4 else "dw"
+        directive = "db" if self._is_byte_scalar_global(name) else int_directive
+        self._maybe_emit_data_header()
+        self._emit_global_export(name)
+        self.emit(f"{self._global_label(name)}: {directive} {init_expression}")
+
     def _emit_global_storage(self) -> None:
         """Emit ``_g_<name>`` data cells for every initialized global, once at tail.
 
@@ -1080,166 +1392,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """
         if not self.global_scalars and not self.global_arrays:
             return
-        int_directive = "dd" if self.target.int_size == 4 else "dw"
         # In object mode the initialized-globals chunk belongs in
         # ``section .data`` so the linker can place writable data
         # independently of code.  The switch + comment are emitted
-        # once, lazily, on the first initialized cell we actually
-        # write below — purely zero-init globals end up in
-        # ``self.bss_vars`` and never need ``.data``.  ``data_header_emitted``
-        # tracks whether we've written the header yet within this call.
-        # In flat mode the header is emitted eagerly up front, matching
-        # the long-standing layout.
-        data_header_emitted = False
-
-        def _emit_data_header() -> None:
-            nonlocal data_header_emitted
-            if data_header_emitted:
-                return
-            if self.object_mode:
-                self.emit()
-                self.emit("section .data")
-            self.emit(";; --- global data ---")
-            data_header_emitted = True
-
+        # once, lazily, on the first initialized cell — purely
+        # zero-init globals end up in ``self.bss_vars`` and never
+        # need ``.data``.  ``_data_header_emitted`` tracks whether
+        # we've written the header yet within this call.  In flat
+        # mode the header is emitted eagerly up front, matching the
+        # long-standing layout.
+        self._data_header_emitted = False
         if not self.object_mode:
-            _emit_data_header()
+            self._maybe_emit_data_header()
         for name in sorted(self.global_scalars):
-            declaration = self.global_scalars[name]
-            if name in self.register_aliased_globals:
-                # Storage lives in the aliased CPU register, not memory,
-                # so no ``_g_<name>`` label is emitted.
-                continue
-            if name in self.asm_symbol_globals:
-                # Storage lives in an existing asm symbol, not here,
-                # so no ``_g_<name>`` label is emitted.
-                continue
-            if name in self.extern_globals:
-                # Storage lives in another translation unit; references
-                # still resolve to ``_g_<name>`` (matching the symbol the
-                # owning .c file emits).
-                continue
-            if declaration.init is None:
-                if declaration.type_name.startswith("struct ") and not declaration.type_name.endswith("*"):
-                    stride = self.struct_sizes[declaration.type_name[len("struct ") :]]
-                elif self._is_byte_scalar_global(name):
-                    stride = 1
-                else:
-                    # Use _type_size so double (8 bytes), unsigned short (2 bytes),
-                    # etc. get the correct allocation rather than always
-                    # falling back to int_size (4 bytes on x86-32).
-                    try:
-                        stride = self._type_size(declaration.type_name)
-                    except CompileError:
-                        stride = self.target.int_size
-                self.bss_vars.append((name, str(stride)))
-            elif isinstance(declaration.init, StructInitializer):
-                tag = declaration.type_name[len("struct ") :]
-                layout = self.struct_layouts[tag]
-                init = declaration.init
-                if init.designated is not None:
-                    value_by_field = init.designated
-                else:
-                    assert init.positional is not None
-                    field_order = list(layout.keys())
-                    value_by_field = dict(zip(field_order, init.positional, strict=False))
-                directives = []
-                for field_name, info in layout.items():
-                    field_size = info.field_size
-                    value_node = value_by_field.get(field_name)
-                    value = self._constant_expression(value_node) if value_node is not None else "0"
-                    if field_size == 1:
-                        directives.append(f"db {value}")
-                    elif field_size == 2:
-                        directives.append(f"dw {value}")
-                    elif field_size == 4:
-                        directives.append(f"dd {value}")
-                    else:
-                        directives.append(f"times {field_size} db 0")
-                _emit_data_header()
-                self._emit_global_export(name)
-                self.emit(f"{self._global_label(name)}: {directives[0]}")
-                for directive in directives[1:]:
-                    self.emit(f"        {directive}")
-            else:
-                init_expression = self._constant_expression(declaration.init)
-                directive = "db" if self._is_byte_scalar_global(name) else int_directive
-                _emit_data_header()
-                self._emit_global_export(name)
-                self.emit(f"{self._global_label(name)}: {directive} {init_expression}")
+            self._emit_global_scalar(name)
         for name in sorted(self.global_arrays):
-            declaration = self.global_arrays[name]
-            if name in self.extern_globals:
-                # Storage lives in another translation unit; references
-                # to the bare ``_g_<name>`` label still resolve.
-                continue
-            is_byte = declaration.type_name in self.BYTE_TYPES
-            is_struct = declaration.type_name.startswith("struct ")
-            # Stride is sizeof(element) for every shape: structs sum
-            # field widths, ``char`` / ``unsigned char`` resolve to 1,
-            # ``unsigned short`` to 2, pointer / ``int`` / ``unsigned int`` to
-            # ``int_size``.  Unifies what used to be a binary
-            # byte-vs-int_size switch that silently miscompiled
-            # ``unsigned short`` globals.
-            stride = self._type_size(declaration.type_name)
-            if is_struct and declaration.init is not None:
-                struct_name = declaration.type_name[len("struct ") :]
-                layout = self.struct_layouts[struct_name]
-                lines: list[str] = []
-                for element in declaration.init.elements:
-                    assert isinstance(element, StructInitializer)
-                    assert element.positional is not None, "array-of-struct globals require positional initializers"
-                    for i, (field_name, info) in enumerate(layout.items()):
-                        field_size = info.field_size
-                        value = self._constant_expression(element.positional[i]) if i < len(element.positional) else "0"
-                        if field_size == 1:
-                            lines.append(f"db {value}")
-                        elif field_size == 2:
-                            lines.append(f"dw {value}")
-                        elif field_size == 4:
-                            lines.append(f"dd {value}")
-                        else:
-                            lines.append(f"times {field_size} db 0")
-                count = len(declaration.init.elements)
-                size_expression = self._constant_expression(declaration.size)
-                lines.append(f"times ({size_expression}-{count})*{stride} db 0")
-                _emit_data_header()
-                self._emit_global_export(name)
-                self.emit(f"{self._global_label(name)}: {lines[0]}")
-                for line in lines[1:]:
-                    self.emit(f"        {line}")
-            elif declaration.init is not None:
-                # Match the data-cell width to the element width:
-                # ``db`` for byte, ``dw`` for halfword (``unsigned short``),
-                # ``dd`` / ``dw`` for full-int (``int_directive``).
-                if is_byte:
-                    directive = "db"
-                elif stride == 2 and stride < self.target.int_size:
-                    directive = "dw"
-                else:
-                    directive = int_directive
-                rendered = [
-                    self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
-                    for element in declaration.init.elements
-                ]
-                _emit_data_header()
-                self._emit_global_export(name)
-                self.emit(f"{self._global_label(name)}: {directive} {', '.join(rendered)}")
-            else:
-                size_expression = self._constant_expression(declaration.size)
-                # Fold ``size * stride`` at compile time when the size is a
-                # plain integer — the self-hosted assembler in user/programs/asm.c
-                # uses flat operator precedence, so emitting ``(N)*4`` next
-                # to surrounding ``+`` / ``-`` (as the BSS chain does) makes
-                # the self-host group ``(N) * (4 - <next_term>)`` instead of
-                # ``(N)*4`` first.  Pre-folding to a literal sidesteps that.
-                if stride == 1:
-                    byte_count = size_expression
-                elif size_expression is not None and size_expression.isdigit():
-                    byte_count = str(int(size_expression) * stride)
-                else:
-                    byte_count = f"({size_expression})*{stride}"
-                self.bss_vars.append((name, byte_count))
+            self._emit_global_array(name)
 
     def _emit_inline_body(self, name: str, /) -> None:
         """Emit the stored body for an ``always_inline`` function.
@@ -1913,6 +2081,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         message = f"no address for '{name}' (not a local or global scalar)"
         raise CompileError(message)
 
+    def _maybe_emit_data_header(self) -> None:
+        """Emit the ``section .data`` (or flat-mode comment) header at most once per call to :meth:`_emit_global_storage`."""
+        if self._data_header_emitted:
+            return
+        if self.object_mode:
+            self.emit()
+            self.emit("section .data")
+        self.emit(";; --- global data ---")
+        self._data_header_emitted = True
+
     def _member_index_element_size(self, info: FieldInfo, /) -> tuple[int, bool]:
         """Return ``(element_size, is_pointer_field)`` for an indexed field access.
 
@@ -2123,67 +2301,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.NAMED_CONSTANT_VALUES[variant_name] = variant_value
                 continue
             if isinstance(declaration, StructDecl):
-                # Build a packed field layout: {field_name: FieldInfo}.
-                #
-                # Regular fields (bit_width is None): field_size from
-                # _type_size; array fields get field_size = element_size *
-                # count, element_size = per-element width.
-                #
-                # Bitfields (bit_width 1..8 from the parser): consecutive
-                # bitfields pack into a single byte run.  bit_offset tracks
-                # the next free bit within the current run; LSB-first.  An
-                # anonymous bitfield (field_name is None) advances run_bits
-                # but isn't entered in ``layout`` since it has no name to
-                # look up.  A regular field after a bitfield run closes the
-                # run (advances cursor by 1) before its own byte_offset is
-                # computed.
-                layout: dict[str, FieldInfo] = {}
-                cursor = 0
-                run_bits = 0  # bits already consumed in the current bitfield run
-                for field in declaration.fields:
-                    if field.bit_width is not None:
-                        if run_bits + field.bit_width > 8:
-                            message = f"bitfield run exceeds 8 bits in struct '{declaration.name}' at line {field.line}"
-                            raise CompileError(message, line=field.line)
-                        if field.field_name is not None:
-                            layout[field.field_name] = FieldInfo(
-                                bit_offset=run_bits,
-                                bit_width=field.bit_width,
-                                byte_offset=cursor,
-                                element_size=1,
-                                field_size=1,
-                                type_name="unsigned char",
-                            )
-                        run_bits += field.bit_width
-                        continue
-                    # Regular field: close any open bitfield run first.
-                    if run_bits > 0:
-                        cursor += 1
-                        run_bits = 0
-                    ftype = field.type_name
-                    if "[" in ftype:
-                        # "char[15]" → element_type="char", count=15
-                        bracket = ftype.index("[")
-                        element_type = ftype[:bracket]
-                        count = int(ftype[bracket + 1 : -1])
-                        element_size = self._type_size(element_type)
-                        field_size = element_size * count
-                    else:
-                        field_size = self._type_size(ftype)
-                        element_size = field_size
-                    layout[field.field_name] = FieldInfo(
-                        bit_offset=None,
-                        bit_width=None,
-                        byte_offset=cursor,
-                        element_size=element_size,
-                        field_size=field_size,
-                        type_name=ftype,
-                    )
-                    cursor += field_size
-                if run_bits > 0:
-                    cursor += 1
-                self.struct_layouts[declaration.name] = layout
-                self.struct_sizes[declaration.name] = cursor
+                self._register_struct_layout(declaration)
                 continue
             name = declaration.name
             if name in self.NAMED_CONSTANTS:
@@ -2299,6 +2417,75 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"always_inline function '{function.name}' asm() body must be a string literal"
             raise CompileError(message, line=function.line)
         self.inline_bodies[function.name] = asm_arg.content
+
+    def _register_struct_layout(self, declaration: StructDecl, /) -> None:
+        """Compute and record a struct's packed field layout and total byte size.
+
+        Extracted from :meth:`_register_globals` for the StructDecl
+        branch.  Builds a ``{field_name: FieldInfo}`` map stored in
+        :attr:`struct_layouts` and the total byte count in
+        :attr:`struct_sizes`.
+
+        Regular fields (``bit_width is None``) take their ``field_size``
+        from ``_type_size``; array fields get
+        ``field_size = element_size * count`` and
+        ``element_size = per-element width``.
+
+        Bitfields (``bit_width`` 1..8 from the parser) pack consecutive
+        bits LSB-first into a single byte run; ``bit_offset`` tracks
+        the next free bit within the current run.  Anonymous bitfields
+        (``field_name is None``) advance ``run_bits`` but don't enter
+        the layout map.  A regular field after a bitfield run closes
+        the run (advances cursor by 1) before its own ``byte_offset``
+        is computed.
+        """
+        layout: dict[str, FieldInfo] = {}
+        cursor = 0
+        run_bits = 0  # bits already consumed in the current bitfield run
+        for field in declaration.fields:
+            if field.bit_width is not None:
+                if run_bits + field.bit_width > 8:
+                    message = f"bitfield run exceeds 8 bits in struct '{declaration.name}' at line {field.line}"
+                    raise CompileError(message, line=field.line)
+                if field.field_name is not None:
+                    layout[field.field_name] = FieldInfo(
+                        bit_offset=run_bits,
+                        bit_width=field.bit_width,
+                        byte_offset=cursor,
+                        element_size=1,
+                        field_size=1,
+                        type_name="unsigned char",
+                    )
+                run_bits += field.bit_width
+                continue
+            # Regular field: close any open bitfield run first.
+            if run_bits > 0:
+                cursor += 1
+                run_bits = 0
+            ftype = field.type_name
+            if "[" in ftype:
+                # "char[15]" → element_type="char", count=15
+                bracket = ftype.index("[")
+                element_type = ftype[:bracket]
+                count = int(ftype[bracket + 1 : -1])
+                element_size = self._type_size(element_type)
+                field_size = element_size * count
+            else:
+                field_size = self._type_size(ftype)
+                element_size = field_size
+            layout[field.field_name] = FieldInfo(
+                bit_offset=None,
+                bit_width=None,
+                byte_offset=cursor,
+                element_size=element_size,
+                field_size=field_size,
+                type_name=ftype,
+            )
+            cursor += field_size
+        if run_bits > 0:
+            cursor += 1
+        self.struct_layouts[declaration.name] = layout
+        self.struct_sizes[declaration.name] = cursor
 
     def _resolve_index_member_layout(self, name: str, member_name: str, line: int, /) -> tuple[str, int, int, int, int]:
         """Return layout tuple for a struct array member access.
@@ -3593,127 +3780,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             literal = right.name
             is_zero = right.name == "NULL"
         if literal is not None:
-            if isinstance(left, Var) and left.name in self.pinned_register:
-                register = self.pinned_register[left.name]
-                if is_zero:
-                    self.emit(f"        test {register}, {register}")
-                else:
-                    self.emit(f"        cmp {register}, {literal}")
-                return
-            # Memory-backed local compared to a constant: fuse into a
-            # direct ``cmp word [L], imm`` (or ``cmp byte [L], imm`` for
-            # byte-scalar locals / globals whose storage is a single
-            # ``db`` cell) so we skip the ``mov ax, [L]`` load.  Safe
-            # because the flags are consumed by the next conditional
-            # jump and AX's prior value was not promised.
-            if (
-                isinstance(left, Var)
-                and self._is_memory_scalar(left.name)
-                and left.name not in self.variable_arrays
-                and left.name != self.ax_local
-                and self.variable_types.get(left.name) != "unsigned long"
-            ):
-                address = self._local_address(left.name)
-                width = "byte" if self._is_byte_scalar(left.name) else self.target.word_size
-                if is_zero:
-                    self.emit(f"        cmp {width} [{address}], 0")
-                else:
-                    self.emit(f"        cmp {width} [{address}], {literal}")
-                return
-            # Byte-indexed variable compared to a constant: fuse into
-            # ``cmp byte [bx+N], imm`` so we skip the load-into-AL and
-            # the zero-extend into AX.
-            if self._is_byte_index(left):
-                operand, guarded = self._emit_byte_index_si(left)
-                if is_zero:
-                    self.emit(f"        cmp {operand}, 0")
-                else:
-                    self.emit(f"        cmp {operand}, {literal}")
-                self._si_scratch_guard_end(guarded=guarded)
-                return
-            self.generate_expression(left)
-            if is_zero:
-                self.emit("        test al, al" if self.ax_is_byte else f"        test {self.target.acc}, {self.target.acc}")
-            else:
-                register = "al" if self.ax_is_byte else self.target.acc
-                self.emit(f"        cmp {register}, {literal}")
+            self._emit_comparison_against_constant(left=left, literal=literal, is_zero=is_zero)
         else:
-            # Two byte-indexed variables: load left byte into AL, then
-            # compare directly against the right byte in memory.  Saves
-            # the zero-extend, push/pop, and CX round-trip.
-            if self._is_byte_index(left) and self._is_byte_index(right):
-                left_operand, left_guarded = self._emit_byte_index_si(left)
-                left_mem = left_operand.removeprefix("byte ")
-                self.emit(f"        mov al, {left_mem}")
-                self._si_scratch_guard_end(guarded=left_guarded)
-                right_operand, right_guarded = self._emit_byte_index_si(right)
-                right_mem = right_operand.removeprefix("byte ")
-                self.emit(f"        cmp al, {right_mem}")
-                self._si_scratch_guard_end(guarded=right_guarded)
-                return
-            # Fast path: right is a pinned register variable.  Compare
-            # AX against it directly, skipping the CX load and any
-            # push/pop protection.  When the pinned register is CX we
-            # additionally require ``left`` to be a leaf expression so
-            # generate_expression can't clobber CX mid-compare.
-            if isinstance(right, Var) and right.name in self.pinned_register:
-                source = self.pinned_register[right.name]
-                if source != self.target.count_register or isinstance(left, (Int, Var, String)):
-                    left_pinned = isinstance(left, Var) and left.name in self.pinned_register
-                    self.generate_expression(left)
-                    # Use matching-width operands for cmp: if source is
-                    # narrower than acc (e.g., bp vs eax), compare ax/source.
-                    cmp_acc = self.target.low_word(self.target.acc) if len(source) < len(self.target.acc) else self.target.acc
-                    self.emit(f"        cmp {cmp_acc}, {source}")
-                    # ``peephole_compare_through_register`` deletes the
-                    # ``mov ax, <pin>`` emitted by ``generate_expression``
-                    # above when a conditional jump follows the cmp.
-                    # Without this clear, downstream reads of ``left``
-                    # would skip their own load (``ax_local ==
-                    # left.name``) and pick up whatever AX actually held
-                    # — the peephole-deleted source register, not the
-                    # pinned local.  Mirrors the memory-backed sibling.
-                    if left_pinned:
-                        self.ax_clear()
-                    return
-            # Fast path: right is a memory-backed local.  ``cmp ax, [mem]``
-            # skips the CX load entirely.  Byte-scalar locals / globals
-            # bail out — their storage is a single byte and a word-sized
-            # ``cmp ax, [mem]`` would read the adjacent byte into the
-            # high comparison byte.
-            if (
-                isinstance(right, Var)
-                and self._is_memory_scalar(right.name)
-                and right.name not in self.pinned_register
-                and right.name not in self.variable_arrays
-                and self.variable_types.get(right.name) != "unsigned long"
-                and not self._is_byte_scalar(right.name)
-            ):
-                # Invalidate ax_local when ``left`` is pinned — the
-                # ``mov ax, reg`` that generate_expression emits here
-                # will be removed by ``peephole_compare_through_register``
-                # once the caller emits a conditional jump after the
-                # cmp, leaving AX without the loaded value.  Without
-                # this clear, downstream reads of ``left`` would skip
-                # their own load (ax_local == left.name) and pick up
-                # whatever AX held from an unrelated earlier expression.
-                left_pinned = isinstance(left, Var) and left.name in self.pinned_register
-                self.generate_expression(left)
-                self.emit(f"        cmp {self.target.acc}, [{self._local_address(right.name)}]")
-                if left_pinned:
-                    self.ax_clear()
-                return
-            # emit_binary_operator_operands clobbers CX; save it when a
-            # pinned variable lives there (push/pop don't modify flags,
-            # so the cmp's flags survive the restore for the caller's
-            # conditional jump).
-            count_pinned = any(register == self.target.count_register for register in self.pinned_register.values())
-            if count_pinned:
-                self.emit(f"        push {self.target.count_register}")
-            self.emit_binary_operator_operands(left, right)
-            self.emit(f"        cmp {self.target.acc}, {self.target.count_register}")
-            if count_pinned:
-                self.emit(f"        pop {self.target.count_register}")
+            self._emit_comparison_general(left=left, right=right)
 
     def emit_condition(self, *, condition: Node, context: str) -> tuple[str, bool]:
         """Validate a condition, emit a comparison, and return ``(operator, unsigned)``.
