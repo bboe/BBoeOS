@@ -2775,26 +2775,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         address_taken: set[str] = set()
         comparison_operations = {"==", "!=", "<", "<=", ">", ">="}
 
-        def collect_index_vars(node: Node) -> None:
-            """Tally Var occurrences inside Index/IndexAssign subscripts.
-
-            Each subscript pays a 2-byte ``mov si, bp`` penalty when
-            its index variable is BP-pinned, since BP can't index
-            DS-relative memory in real mode.  The cost-model below
-            uses this tally to decide whether a candidate's
-            BP-clobber-savings outweigh that per-subscript penalty.
-            """
-            if isinstance(node, Var):
-                index_uses[node.name] = index_uses.get(node.name, 0) + 1
-            for node_field in fields(node):
-                value = getattr(node, node_field.name)
-                if isinstance(value, Node):
-                    collect_index_vars(value)
-                elif isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, Node):
-                            collect_index_vars(item)
-
         def count_visit(node: Node, *, role: str = "other") -> None:
             if isinstance(node, (Var, Assign)):
                 counts[node.name] = counts.get(node.name, 0) + 1
@@ -2869,7 +2849,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 # above; recursing into it would double-count and add a
                 # spurious other_uses tally.  Walk the remaining children
                 # explicitly and bail before the generic walk.
-                collect_index_vars(node.index)
+                self._tally_subscript_var_uses(node.index, index_uses=index_uses)
                 count_visit(node.index)
                 if isinstance(node, IndexAssign):
                     count_visit(node.expr)
@@ -3116,6 +3096,27 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """Pair with :meth:`_si_scratch_guard_begin` — emit ``pop si``."""
         if guarded:
             self.emit(f"        pop {self.target.si_register}")
+
+    @staticmethod
+    def _tally_subscript_var_uses(node: Node, /, *, index_uses: dict[str, int]) -> None:
+        """Tally Var occurrences inside Index/IndexAssign subscripts.
+
+        Each subscript pays a 2-byte ``mov si, bp`` penalty when its
+        index variable is BP-pinned, since BP can't index DS-relative
+        memory in real mode.  The auto-pin cost model uses this tally
+        (mutated through *index_uses*) to decide whether a candidate's
+        BP-clobber-savings outweigh that per-subscript penalty.
+        """
+        if isinstance(node, Var):
+            index_uses[node.name] = index_uses.get(node.name, 0) + 1
+        for node_field in fields(node):
+            value = getattr(node, node_field.name)
+            if isinstance(value, Node):
+                X86CodeGenerator._tally_subscript_var_uses(value, index_uses=index_uses)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node):
+                        X86CodeGenerator._tally_subscript_var_uses(item, index_uses=index_uses)
 
     def _try_direct_load(self, *, argument: Node, register: str, optimize_zero: bool = False) -> bool:
         """Emit a direct load of a constant-or-address *argument* into *register*.
