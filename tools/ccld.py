@@ -73,11 +73,16 @@ def _apply_relocations(
             section = object_payload["sections"][relocation["section"]]
             patch_address = section["slot_address"] + relocation["offset"]
             patch_offset_in_image = patch_address - base
-            symbol_name = relocation["symbol"]
             # Object-local symbols (cc.py's _g_/_l_/_str_/_arr_ labels)
             # resolve from the owning object's per-file table first;
             # global symbols fall through to the cross-object table.
-            symbol_address = local_addresses.get(symbol_name) or symbol_addresses[symbol_name]
+            # _validate_relocations already proved every symbol resolves,
+            # so the helper's return value is never None here.
+            symbol_address = _resolve_symbol_address(
+                local_addresses=local_addresses,
+                symbol_addresses=symbol_addresses,
+                symbol_name=relocation["symbol"],
+            )
             packed = (
                 struct.pack("<i", symbol_address - (patch_address + 4))
                 if relocation["type"] == "rel32"
@@ -229,6 +234,19 @@ def _pull_archive_members(
             # No archive can satisfy any remaining unresolved extern.
             # Let ``_resolve_symbols`` produce the canonical error.
             break
+
+
+def _resolve_symbol_address(*, local_addresses: dict[str, int], symbol_addresses: dict[str, int], symbol_name: str) -> int | None:
+    """Look up ``symbol_name`` in the per-object local table, then the global table.
+
+    Returns the resolved address or ``None`` if the symbol is defined in
+    neither.  Callers decide whether a miss is an error (``_validate_relocations``
+    raises a user-friendly message) or impossible (``_apply_relocations`` runs
+    post-validation, where misses cannot occur).
+    """
+    if (address := local_addresses.get(symbol_name)) is not None:
+        return address
+    return symbol_addresses.get(symbol_name)
 
 
 def _resolve_symbols(*, object_payloads: list[dict]) -> None:
@@ -385,11 +403,13 @@ def _validate_relocations(*, object_payloads: list[dict], symbol_addresses: dict
         local_addresses = object_payload.get("local_addresses", {})
         for relocation in object_payload["relocations"]:
             symbol = relocation["symbol"]
-            symbol_address = local_addresses.get(symbol)
+            symbol_address = _resolve_symbol_address(
+                local_addresses=local_addresses,
+                symbol_addresses=symbol_addresses,
+                symbol_name=symbol,
+            )
             if symbol_address is None:
-                if symbol not in symbol_addresses:
-                    sys.exit(f"ccld: {object_payload['source']}: relocation references unknown symbol {symbol!r}")
-                symbol_address = symbol_addresses[symbol]
+                sys.exit(f"ccld: {object_payload['source']}: relocation references unknown symbol {symbol!r}")
             if relocation["type"] != "rel32":
                 continue
             section = object_payload["sections"][relocation["section"]]
