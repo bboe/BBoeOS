@@ -13,7 +13,7 @@ instance; currently we ship :class:`X86CodegenTarget16` (real mode) and
 from __future__ import annotations
 
 import re
-from dataclasses import fields
+from dataclasses import dataclass, field, fields
 from typing import ClassVar, NamedTuple
 
 from cc import ir
@@ -89,6 +89,26 @@ RE_MOV_EAX_IMMEDIATE = re.compile(r"^\s*mov eax, (\d+)\s*$")
 RE_MOV_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*mov byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
 RE_NON_BYTE_WRITE = re.compile(r"^\s*mov\b.*\[(?!ebp\b)")
 RE_OR_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*or byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
+
+
+@dataclass(kw_only=True, slots=True)
+class AutoPinTallyState:
+    """Bundle of per-walk tallies for the auto-pin candidate scan.
+
+    Carries the six dicts plus address-taken set and body-candidate
+    list that :meth:`X86CodeGenerator._tally_auto_pin_counts` reads
+    and writes during its recursive AST walk.  Replaces the closure
+    scope the tally previously shared via nested ``def``.
+    """
+
+    address_taken: set[str] = field(default_factory=set)
+    ax_resident_uses: dict[str, int] = field(default_factory=dict)
+    body_candidates: list[tuple[str, int]] = field(default_factory=list)
+    counts: dict[str, int] = field(default_factory=dict)
+    index_uses: dict[str, int] = field(default_factory=dict)
+    init_count: dict[str, int] = field(default_factory=dict)
+    init_expr: dict[str, Node] = field(default_factory=dict)
+    other_uses: dict[str, int] = field(default_factory=dict)
 
 
 class FieldInfo(NamedTuple):
@@ -2577,27 +2597,27 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         layout: dict[str, FieldInfo] = {}
         cursor = 0
         run_bits = 0  # bits already consumed in the current bitfield run
-        for field in declaration.fields:
-            if field.bit_width is not None:
-                if run_bits + field.bit_width > 8:
-                    message = f"bitfield run exceeds 8 bits in struct '{declaration.name}' at line {field.line}"
-                    raise CompileError(message, line=field.line)
-                if field.field_name is not None:
-                    layout[field.field_name] = FieldInfo(
+        for declaration_field in declaration.fields:
+            if declaration_field.bit_width is not None:
+                if run_bits + declaration_field.bit_width > 8:
+                    message = f"bitfield run exceeds 8 bits in struct '{declaration.name}' at line {declaration_field.line}"
+                    raise CompileError(message, line=declaration_field.line)
+                if declaration_field.field_name is not None:
+                    layout[declaration_field.field_name] = FieldInfo(
                         bit_offset=run_bits,
-                        bit_width=field.bit_width,
+                        bit_width=declaration_field.bit_width,
                         byte_offset=cursor,
                         element_size=1,
                         field_size=1,
                         type_name="unsigned char",
                     )
-                run_bits += field.bit_width
+                run_bits += declaration_field.bit_width
                 continue
             # Regular field: close any open bitfield run first.
             if run_bits > 0:
                 cursor += 1
                 run_bits = 0
-            ftype = field.type_name
+            ftype = declaration_field.type_name
             if "[" in ftype:
                 # "char[15]" → element_type="char", count=15
                 bracket = ftype.index("[")
@@ -2608,7 +2628,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             else:
                 field_size = self._type_size(ftype)
                 element_size = field_size
-            layout[field.field_name] = FieldInfo(
+            layout[declaration_field.field_name] = FieldInfo(
                 bit_offset=None,
                 bit_width=None,
                 byte_offset=cursor,
@@ -2793,147 +2813,24 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         asm_operand_vars = self._collect_asm_operand_vars(body)
         body_candidates = [(name, o) for name, o in body_candidates if name not in asm_operand_vars]
 
-        counts: dict[str, int] = {}
-        index_uses: dict[str, int] = {}
-        # Per-var tallies that drive the expression-temporary check
-        # below.  ``ax_resident_uses`` counts Var refs sitting on the
-        # LEFT of a comparison whose right side is an integer literal
-        # — those are exactly the sites ``emit_comparison`` reuses an
-        # AX-resident value for via the ``ax_local`` fast path.  Right
-        # operands and non-cmp uses go to ``other_uses`` because the
-        # left operand's expression eval clobbers AX before they're
-        # reached, so they need either a memory load or a pin.
-        ax_resident_uses: dict[str, int] = {}
-        other_uses: dict[str, int] = {}
-        init_count: dict[str, int] = {}
-        init_expr: dict[str, Node] = {}
-        address_taken: set[str] = set()
-        comparison_operations = {"==", "!=", "<", "<=", ">", ">="}
-
-        def count_visit(node: Node, *, role: str = "other") -> None:
-            if isinstance(node, (Var, Assign)):
-                counts[node.name] = counts.get(node.name, 0) + 1
-            elif isinstance(node, (Index, IndexAssign)):
-                counts[node.array.name] = counts.get(node.array.name, 0) + 1
-            if isinstance(node, Switch) and isinstance(node.discriminant, Var):
-                # Each case-label dispatch reads the discriminant once.  If the
-                # switch is structured so that no case body falls through to the
-                # next (every non-empty body always-exits, and empty multi-label
-                # intermediates are followed by another case), the interleaved
-                # dispatch shape in :meth:`generate_switch` can use a pinned-
-                # register `cmp R, imm; jne short` per arm — a 4-byte saving
-                # versus the separated `cmp al, imm; je near` form.  Boost the
-                # discriminant's ref count so the pin allocator ranks it above
-                # candidates whose only use is a single read.  The generic walk
-                # below already counts the discriminant once, so add ``arm_count
-                # - 1`` here for a total of ``arm_count`` from the switch.
-                case_arms = [case for case in node.cases if case.value is not None]
-                if case_arms and self._switch_can_interleave(case_arms):
-                    counts[node.discriminant.name] = counts.get(node.discriminant.name, 0) + len(case_arms) - 1
-                    # The Call-init filter in ``collect`` above excludes
-                    # ``int x = getchar();`` and similar from the candidate
-                    # list (the rationale: pinning a callee's AX return adds
-                    # a ``mov R, eax`` that often outweighs the per-ref save).
-                    # For a switch discriminant with N >= 4 always-exit arms
-                    # the interleaved-dispatch win (4 bytes per arm vs the
-                    # separated near-jump form) easily covers that move, so
-                    # add the discriminant here when it isn't already a body
-                    # candidate.
-                    existing_names = {body_name for body_name, _ in body_candidates}
-                    if node.discriminant.name not in existing_names and len(case_arms) >= 4:
-                        body_candidates.append((node.discriminant.name, len(body_candidates)))
-                    # Tell ``can_auto_pin`` to honor the pin even when the
-                    # declaration's init is a ``Call`` — the per-arm win
-                    # easily covers the extra ``mov R, eax`` after the call.
-                    self.switch_pin_overrides.add(node.discriminant.name)
-            if isinstance(node, VarDecl) and node.init is not None:
-                init_count[node.name] = init_count.get(node.name, 0) + 1
-                init_expr[node.name] = node.init
-                count_visit(node.init)
-                return
-            if isinstance(node, Assign):
-                init_count[node.name] = init_count.get(node.name, 0) + 1
-                init_expr[node.name] = node.expr
-                count_visit(node.expr)
-                return
-            if isinstance(node, Var):
-                if role == "cmp_left_imm":
-                    ax_resident_uses[node.name] = ax_resident_uses.get(node.name, 0) + 1
-                else:
-                    other_uses[node.name] = other_uses.get(node.name, 0) + 1
-            if isinstance(node, BinaryOperation):
-                if node.operation in comparison_operations:
-                    # Only the LEFT operand can reuse an AX-resident
-                    # value: the right side is loaded into CX after the
-                    # left's evaluation has overwritten AX.  Even on
-                    # the left, the fast path requires the right side
-                    # to be a constant (Int or NAMED_CONSTANT) so the
-                    # cmp can be ``cmp ax, imm`` / ``cmp ax, NAME``.
-                    right_is_const = isinstance(node.right, Int) or (
-                        isinstance(node.right, Var) and node.right.name in self.NAMED_CONSTANTS
-                    )
-                    left_role = "cmp_left_imm" if right_is_const else "other"
-                    count_visit(node.left, role=left_role)
-                    count_visit(node.right, role="other")
-                else:
-                    count_visit(node.left, role="other")
-                    count_visit(node.right, role="other")
-                return
-            if isinstance(node, (Index, IndexAssign)):
-                # The `array` Var was already tallied via the counts[] branch
-                # above; recursing into it would double-count and add a
-                # spurious other_uses tally.  Walk the remaining children
-                # explicitly and bail before the generic walk.
-                self._tally_subscript_var_uses(node.index, index_uses=index_uses)
-                count_visit(node.index)
-                if isinstance(node, IndexAssign):
-                    count_visit(node.expr)
-                return
-            if isinstance(node, Call):
-                # ``&x`` at an ``out_register`` arg position is a fake
-                # address — the callee writes the named register and
-                # the caller captures it, so *x* doesn't need a memory
-                # address and stays eligible for auto-pin.  Count those
-                # args as a Var read (so the ref count reflects the
-                # captured write that follows the call) but skip the
-                # ``address_taken`` mark the generic AddressOf branch
-                # below would record.  Real-address args (anything else)
-                # fall through to that branch.
-                out_regs = self.out_register_params.get(node.name, {})
-                for index, arg in enumerate(node.args):
-                    if index in out_regs and isinstance(arg, AddressOf):
-                        count_visit(arg.var)
-                    else:
-                        count_visit(arg)
-                return
-            if isinstance(node, AddressOf):
-                # ``&x`` computes an address, not a value read — pre-refactor
-                # AddressOf carried ``name`` as a plain str so the inner var
-                # never tallied; preserve that by skipping the generic walk's
-                # descent into ``var``.  Track the name so the candidate
-                # filter below can disqualify it: an auto-pinned register
-                # has no memory address, and keeping the slot in sync with
-                # the register across writes through the pointer would
-                # require spill+reload at every access.
-                address_taken.add(node.var.name)
-                return
-            if isinstance(node, DerefAssign):
-                # ``*p = expr`` writes through a pointer — pre-refactor the
-                # pointer was a str field, so it never counted as a read.
-                # Walk only the right-hand side.
-                count_visit(node.expr)
-                return
-            for node_field in fields(node):
-                value = getattr(node, node_field.name)
-                if isinstance(value, Node):
-                    count_visit(value)
-                elif isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, Node):
-                            count_visit(item)
-
+        # ``ax_resident_uses`` (inside *state*) counts Var refs sitting
+        # on the LEFT of a comparison whose right side is an integer
+        # literal — those are exactly the sites ``emit_comparison``
+        # reuses an AX-resident value for via the ``ax_local`` fast
+        # path.  Right operands and non-cmp uses go to ``other_uses``
+        # because the left operand's expression eval clobbers AX before
+        # they're reached, so they need either a memory load or a pin.
+        state = AutoPinTallyState(body_candidates=body_candidates)
         for statement in body:
-            count_visit(statement)
+            self._tally_auto_pin_counts(statement, state=state)
+        address_taken = state.address_taken
+        ax_resident_uses = state.ax_resident_uses
+        body_candidates = state.body_candidates
+        counts = state.counts
+        index_uses = state.index_uses
+        init_count = state.init_count
+        init_expr = state.init_expr
+        other_uses = state.other_uses
 
         # Per-candidate-per-register count of calls that ran BEFORE the
         # candidate's first AST-level store.  PR #454's liveness pre-pass
@@ -2946,58 +2843,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         pre_store_clobbers: dict[str, dict[str, int]] = {name: {} for name in candidate_names}
         written: dict[str, bool] = dict.fromkeys(candidate_names, False)
 
-        def pre_store_visit(node: Node) -> None:
-            if isinstance(node, (DoWhile, While)):
-                for name in self._loop_assigned_names(node.body):
-                    if name in candidate_names:
-                        written[name] = True
-                for body_statement in node.body:
-                    pre_store_visit(body_statement)
-                return
-            if isinstance(node, Call):
-                # Walk args first so a store inside an arg expression
-                # (rare but possible) lands in `written` before the
-                # call itself is counted.  Then tally clobbers for
-                # candidates still pre-store.
-                for arg in node.args:
-                    pre_store_visit(arg)
-                regs = self._clobbers_for_call(node, function_pointer_vars=function_pointer_vars)
-                for cand_name, already_written in written.items():
-                    if not already_written:
-                        per_reg = pre_store_clobbers[cand_name]
-                        for register in regs:
-                            per_reg[register] = per_reg.get(register, 0) + 1
-                # ``out_register("REG")`` args capture into the named
-                # local AFTER the call returns — mirror the IR pre-pass
-                # by marking those candidates as written here so any
-                # subsequent call counts as post-store for them.
-                out_regs = self.out_register_params.get(node.name, {})
-                for index, arg in enumerate(node.args):
-                    if index in out_regs and isinstance(arg, AddressOf) and arg.var.name in candidate_names:
-                        written[arg.var.name] = True
-                return
-            if isinstance(node, Assign):
-                pre_store_visit(node.expr)
-                if node.name in candidate_names:
-                    written[node.name] = True
-                return
-            if isinstance(node, VarDecl):
-                if node.init is not None:
-                    pre_store_visit(node.init)
-                    if node.name in candidate_names:
-                        written[node.name] = True
-                return
-            for node_field in fields(node):
-                value = getattr(node, node_field.name)
-                if isinstance(value, Node):
-                    pre_store_visit(value)
-                elif isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, Node):
-                            pre_store_visit(item)
-
         for statement in body:
-            pre_store_visit(statement)
+            self._tally_pre_store_clobbers(
+                statement,
+                candidate_names=candidate_names,
+                function_pointer_vars=function_pointer_vars,
+                pre_store_clobbers=pre_store_clobbers,
+                written=written,
+            )
 
         combined = self._rank_candidates(body_candidates, counts=counts) + self._rank_candidates(param_candidates, counts=counts)
         # Drop expression-temporary vars: pinning them adds a 2-byte
@@ -3131,6 +2984,249 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """Pair with :meth:`_si_scratch_guard_begin` — emit ``pop si``."""
         if guarded:
             self.emit(f"        pop {self.target.si_register}")
+
+    def _tally_auto_pin_counts(self, node: Node, /, *, role: str = "other", state: AutoPinTallyState) -> None:
+        """Tally per-var reference counts for :meth:`_select_auto_pin_candidates`.
+
+        Walks *node* and writes into *state*'s dicts and sets:
+        ``counts`` (combined Var + Assign + Index/IndexAssign ref total),
+        ``ax_resident_uses`` (LEFT-of-cmp-against-const Vars),
+        ``other_uses`` (every other Var read),
+        ``init_count``/``init_expr`` (VarDecl/Assign initializer tallies),
+        ``index_uses`` (Vars appearing inside subscripts),
+        and ``address_taken`` (``&x`` targets).  ``body_candidates`` is
+        mid-walk read-then-write — the Switch-discriminant boost path
+        appends to it after consulting the existing entries.
+
+        *role* threads the comparison-operand context: ``"cmp_left_imm"``
+        for the left operand of a comparison whose right side is a
+        compile-time constant, ``"other"`` everywhere else.
+        """
+        if isinstance(node, (Var, Assign)):
+            state.counts[node.name] = state.counts.get(node.name, 0) + 1
+        elif isinstance(node, (Index, IndexAssign)):
+            state.counts[node.array.name] = state.counts.get(node.array.name, 0) + 1
+        if isinstance(node, Switch) and isinstance(node.discriminant, Var):
+            # Each case-label dispatch reads the discriminant once.  If the
+            # switch is structured so that no case body falls through to the
+            # next (every non-empty body always-exits, and empty multi-label
+            # intermediates are followed by another case), the interleaved
+            # dispatch shape in :meth:`generate_switch` can use a pinned-
+            # register `cmp R, imm; jne short` per arm — a 4-byte saving
+            # versus the separated `cmp al, imm; je near` form.  Boost the
+            # discriminant's ref count so the pin allocator ranks it above
+            # candidates whose only use is a single read.  The generic walk
+            # below already counts the discriminant once, so add ``arm_count
+            # - 1`` here for a total of ``arm_count`` from the switch.
+            case_arms = [case for case in node.cases if case.value is not None]
+            if case_arms and self._switch_can_interleave(case_arms):
+                state.counts[node.discriminant.name] = state.counts.get(node.discriminant.name, 0) + len(case_arms) - 1
+                # The Call-init filter in ``collect`` above excludes
+                # ``int x = getchar();`` and similar from the candidate
+                # list (the rationale: pinning a callee's AX return adds
+                # a ``mov R, eax`` that often outweighs the per-ref save).
+                # For a switch discriminant with N >= 4 always-exit arms
+                # the interleaved-dispatch win (4 bytes per arm vs the
+                # separated near-jump form) easily covers that move, so
+                # add the discriminant here when it isn't already a body
+                # candidate.
+                existing_names = {body_name for body_name, _ in state.body_candidates}
+                if node.discriminant.name not in existing_names and len(case_arms) >= 4:
+                    state.body_candidates.append((node.discriminant.name, len(state.body_candidates)))
+                # Tell ``can_auto_pin`` to honor the pin even when the
+                # declaration's init is a ``Call`` — the per-arm win
+                # easily covers the extra ``mov R, eax`` after the call.
+                self.switch_pin_overrides.add(node.discriminant.name)
+        if isinstance(node, VarDecl) and node.init is not None:
+            state.init_count[node.name] = state.init_count.get(node.name, 0) + 1
+            state.init_expr[node.name] = node.init
+            self._tally_auto_pin_counts(node.init, state=state)
+            return
+        if isinstance(node, Assign):
+            state.init_count[node.name] = state.init_count.get(node.name, 0) + 1
+            state.init_expr[node.name] = node.expr
+            self._tally_auto_pin_counts(node.expr, state=state)
+            return
+        if isinstance(node, Var):
+            if role == "cmp_left_imm":
+                state.ax_resident_uses[node.name] = state.ax_resident_uses.get(node.name, 0) + 1
+            else:
+                state.other_uses[node.name] = state.other_uses.get(node.name, 0) + 1
+        if isinstance(node, BinaryOperation):
+            if node.operation in COMPARISON_OPERATIONS:
+                # Only the LEFT operand can reuse an AX-resident
+                # value: the right side is loaded into CX after the
+                # left's evaluation has overwritten AX.  Even on
+                # the left, the fast path requires the right side
+                # to be a constant (Int or NAMED_CONSTANT) so the
+                # cmp can be ``cmp ax, imm`` / ``cmp ax, NAME``.
+                right_is_const = isinstance(node.right, Int) or (isinstance(node.right, Var) and node.right.name in self.NAMED_CONSTANTS)
+                left_role = "cmp_left_imm" if right_is_const else "other"
+                self._tally_auto_pin_counts(node.left, role=left_role, state=state)
+                self._tally_auto_pin_counts(node.right, role="other", state=state)
+            else:
+                self._tally_auto_pin_counts(node.left, role="other", state=state)
+                self._tally_auto_pin_counts(node.right, role="other", state=state)
+            return
+        if isinstance(node, (Index, IndexAssign)):
+            # The `array` Var was already tallied via the counts[] branch
+            # above; recursing into it would double-count and add a
+            # spurious other_uses tally.  Walk the remaining children
+            # explicitly and bail before the generic walk.
+            self._tally_subscript_var_uses(node.index, index_uses=state.index_uses)
+            self._tally_auto_pin_counts(node.index, state=state)
+            if isinstance(node, IndexAssign):
+                self._tally_auto_pin_counts(node.expr, state=state)
+            return
+        if isinstance(node, Call):
+            # ``&x`` at an ``out_register`` arg position is a fake
+            # address — the callee writes the named register and
+            # the caller captures it, so *x* doesn't need a memory
+            # address and stays eligible for auto-pin.  Count those
+            # args as a Var read (so the ref count reflects the
+            # captured write that follows the call) but skip the
+            # ``address_taken`` mark the generic AddressOf branch
+            # below would record.  Real-address args (anything else)
+            # fall through to that branch.
+            out_regs = self.out_register_params.get(node.name, {})
+            for index, arg in enumerate(node.args):
+                if index in out_regs and isinstance(arg, AddressOf):
+                    self._tally_auto_pin_counts(arg.var, state=state)
+                else:
+                    self._tally_auto_pin_counts(arg, state=state)
+            return
+        if isinstance(node, AddressOf):
+            # ``&x`` computes an address, not a value read — pre-refactor
+            # AddressOf carried ``name`` as a plain str so the inner var
+            # never tallied; preserve that by skipping the generic walk's
+            # descent into ``var``.  Track the name so the candidate
+            # filter below can disqualify it: an auto-pinned register
+            # has no memory address, and keeping the slot in sync with
+            # the register across writes through the pointer would
+            # require spill+reload at every access.
+            state.address_taken.add(node.var.name)
+            return
+        if isinstance(node, DerefAssign):
+            # ``*p = expr`` writes through a pointer — pre-refactor the
+            # pointer was a str field, so it never counted as a read.
+            # Walk only the right-hand side.
+            self._tally_auto_pin_counts(node.expr, state=state)
+            return
+        for node_field in fields(node):
+            value = getattr(node, node_field.name)
+            if isinstance(value, Node):
+                self._tally_auto_pin_counts(value, state=state)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node):
+                        self._tally_auto_pin_counts(item, state=state)
+
+    def _tally_pre_store_clobbers(
+        self,
+        node: Node,
+        /,
+        *,
+        candidate_names: set[str],
+        function_pointer_vars: set[str],
+        pre_store_clobbers: dict[str, dict[str, int]],
+        written: dict[str, bool],
+    ) -> None:
+        """Tally pre-first-store call clobbers per auto-pin candidate.
+
+        Walks *node* and, for each ``Call`` encountered before a
+        candidate's first AST-level store, adds one to that candidate's
+        entry in *pre_store_clobbers* for every register the call
+        clobbers.  ``DoWhile``/``While`` bodies pre-mark their assigned
+        candidates as written so back-edge re-entries don't get billed
+        for clobbers that the steady-state loop will spill anyway.
+
+        *pre_store_clobbers* and *written* are mutated; *candidate_names*
+        and *function_pointer_vars* are read-only inputs.
+        """
+        if isinstance(node, (DoWhile, While)):
+            for name in self._loop_assigned_names(node.body):
+                if name in candidate_names:
+                    written[name] = True
+            for body_statement in node.body:
+                self._tally_pre_store_clobbers(
+                    body_statement,
+                    candidate_names=candidate_names,
+                    function_pointer_vars=function_pointer_vars,
+                    pre_store_clobbers=pre_store_clobbers,
+                    written=written,
+                )
+            return
+        if isinstance(node, Call):
+            # Walk args first so a store inside an arg expression
+            # (rare but possible) lands in `written` before the
+            # call itself is counted.  Then tally clobbers for
+            # candidates still pre-store.
+            for arg in node.args:
+                self._tally_pre_store_clobbers(
+                    arg,
+                    candidate_names=candidate_names,
+                    function_pointer_vars=function_pointer_vars,
+                    pre_store_clobbers=pre_store_clobbers,
+                    written=written,
+                )
+            regs = self._clobbers_for_call(node, function_pointer_vars=function_pointer_vars)
+            for cand_name, already_written in written.items():
+                if not already_written:
+                    per_reg = pre_store_clobbers[cand_name]
+                    for register in regs:
+                        per_reg[register] = per_reg.get(register, 0) + 1
+            # ``out_register("REG")`` args capture into the named
+            # local AFTER the call returns — mirror the IR pre-pass
+            # by marking those candidates as written here so any
+            # subsequent call counts as post-store for them.
+            out_regs = self.out_register_params.get(node.name, {})
+            for index, arg in enumerate(node.args):
+                if index in out_regs and isinstance(arg, AddressOf) and arg.var.name in candidate_names:
+                    written[arg.var.name] = True
+            return
+        if isinstance(node, Assign):
+            self._tally_pre_store_clobbers(
+                node.expr,
+                candidate_names=candidate_names,
+                function_pointer_vars=function_pointer_vars,
+                pre_store_clobbers=pre_store_clobbers,
+                written=written,
+            )
+            if node.name in candidate_names:
+                written[node.name] = True
+            return
+        if isinstance(node, VarDecl):
+            if node.init is not None:
+                self._tally_pre_store_clobbers(
+                    node.init,
+                    candidate_names=candidate_names,
+                    function_pointer_vars=function_pointer_vars,
+                    pre_store_clobbers=pre_store_clobbers,
+                    written=written,
+                )
+                if node.name in candidate_names:
+                    written[node.name] = True
+            return
+        for node_field in fields(node):
+            value = getattr(node, node_field.name)
+            if isinstance(value, Node):
+                self._tally_pre_store_clobbers(
+                    value,
+                    candidate_names=candidate_names,
+                    function_pointer_vars=function_pointer_vars,
+                    pre_store_clobbers=pre_store_clobbers,
+                    written=written,
+                )
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node):
+                        self._tally_pre_store_clobbers(
+                            item,
+                            candidate_names=candidate_names,
+                            function_pointer_vars=function_pointer_vars,
+                            pre_store_clobbers=pre_store_clobbers,
+                            written=written,
+                        )
 
     @staticmethod
     def _tally_subscript_var_uses(node: Node, /, *, index_uses: dict[str, int]) -> None:
