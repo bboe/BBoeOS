@@ -137,12 +137,6 @@ class LivenessAnalyzer:
         """
         if expression is None:
             return
-        if isinstance(expression, (Int, Char, SizeofExpr, SizeofType, SizeofVar, String)):
-            # Leaf literals and sizeof (compile-time, no runtime Var uses).
-            return
-        if isinstance(expression, Var):
-            accumulator.add(expression.name)
-            return
         if isinstance(expression, AddressOf):
             # ``&x`` references x's address — record the use; the
             # allocator separately disqualifies address-taken locals
@@ -150,36 +144,42 @@ class LivenessAnalyzer:
             if isinstance(expression.var, Var):
                 accumulator.add(expression.var.name)
             return
-        if isinstance(expression, Index):
-            accumulator.add(expression.array.name)
-            self._add_expression_uses(expression.index, accumulator)
-            return
-        if isinstance(expression, DoubleIndex):
-            accumulator.add(expression.array.name)
-            self._add_expression_uses(expression.outer_index, accumulator)
-            self._add_expression_uses(expression.inner_index, accumulator)
-            return
         if isinstance(expression, BinaryOperation):
             self._add_expression_uses(expression.left, accumulator)
             self._add_expression_uses(expression.right, accumulator)
             return
-        if isinstance(expression, (LogicalAnd, LogicalOr)):
-            self._add_expression_uses(expression.left, accumulator)
-            self._add_expression_uses(expression.right, accumulator)
+        if isinstance(expression, Call):
+            for argument in expression.args:
+                self._add_expression_uses(argument, accumulator)
             return
         if isinstance(expression, Conditional):
             self._add_expression_uses(expression.condition, accumulator)
             self._add_expression_uses(expression.then_expr, accumulator)
             self._add_expression_uses(expression.else_expr, accumulator)
             return
-        if isinstance(expression, Call):
-            for argument in expression.args:
-                self._add_expression_uses(argument, accumulator)
+        if isinstance(expression, DoubleIndex):
+            accumulator.add(expression.array.name)
+            self._add_expression_uses(expression.outer_index, accumulator)
+            self._add_expression_uses(expression.inner_index, accumulator)
+            return
+        if isinstance(expression, Index):
+            accumulator.add(expression.array.name)
+            self._add_expression_uses(expression.index, accumulator)
+            return
+        if isinstance(expression, (Char, Int, SizeofExpr, SizeofType, SizeofVar, String)):
+            # Leaf literals and sizeof (compile-time, no runtime Var uses).
+            return
+        if isinstance(expression, (LogicalAnd, LogicalOr)):
+            self._add_expression_uses(expression.left, accumulator)
+            self._add_expression_uses(expression.right, accumulator)
             return
         if isinstance(expression, (MemberAccess, MemberIndex)):
             accumulator.add(expression.object_name)
             if isinstance(expression, MemberIndex):
                 self._add_expression_uses(expression.index, accumulator)
+            return
+        if isinstance(expression, Var):
+            accumulator.add(expression.name)
             return
         if isinstance(expression, Node):
             message = f"liveness: unhandled expression node {type(expression).__name__}"
@@ -236,11 +236,6 @@ class LivenessAnalyzer:
         """
         statement_id = self.node_to_id[id(statement)]
         statement_info = self.statements[statement_id]
-        if isinstance(statement, VarDecl):
-            statement_info.definitions.add(statement.name)
-            if statement.init is not None:
-                self._add_expression_uses(statement.init, statement_info.uses)
-            return
         if isinstance(statement, ArrayDecl):
             statement_info.definitions.add(statement.name)
             if isinstance(statement.init, ArrayInit):
@@ -251,6 +246,20 @@ class LivenessAnalyzer:
             statement_info.definitions.add(statement.name)
             self._add_expression_uses(statement.expr, statement_info.uses)
             return
+        if isinstance(statement, (Break, Compound, Continue, Goto, InlineAsm, Label)):
+            # No expression operands at the statement level.
+            return
+        if isinstance(statement, (Call, TailCall)):
+            for argument in statement.args:
+                self._add_expression_uses(argument, statement_info.uses)
+            return
+        if isinstance(statement, DerefAssign):
+            statement_info.uses.add(statement.pointer.name)
+            self._add_expression_uses(statement.expr, statement_info.uses)
+            return
+        if isinstance(statement, (DoWhile, If, While)):
+            self._add_expression_uses(statement.cond, statement_info.uses)
+            return
         if isinstance(statement, IndexAssign):
             # The array name is *read* (its address used as base) and
             # the slot it points at is written — we treat this as a
@@ -260,34 +269,25 @@ class LivenessAnalyzer:
             self._add_expression_uses(statement.index, statement_info.uses)
             self._add_expression_uses(statement.expr, statement_info.uses)
             return
-        if isinstance(statement, DerefAssign):
-            statement_info.uses.add(statement.pointer.name)
+        if isinstance(statement, MemberAssign):
+            statement_info.uses.add(statement.object_name)
             self._add_expression_uses(statement.expr, statement_info.uses)
             return
         if isinstance(statement, PointerDereferenceAssign):
             self._add_expression_uses(statement.address, statement_info.uses)
             self._add_expression_uses(statement.value, statement_info.uses)
             return
-        if isinstance(statement, MemberAssign):
-            statement_info.uses.add(statement.object_name)
-            self._add_expression_uses(statement.expr, statement_info.uses)
-            return
         if isinstance(statement, Return):
             if statement.value is not None:
                 self._add_expression_uses(statement.value, statement_info.uses)
             return
-        if isinstance(statement, (DoWhile, If, While)):
-            self._add_expression_uses(statement.cond, statement_info.uses)
-            return
         if isinstance(statement, Switch):
             self._add_expression_uses(statement.discriminant, statement_info.uses)
             return
-        if isinstance(statement, (Call, TailCall)):
-            for argument in statement.args:
-                self._add_expression_uses(argument, statement_info.uses)
-            return
-        if isinstance(statement, (Break, Compound, Continue, Goto, InlineAsm, Label)):
-            # No expression operands at the statement level.
+        if isinstance(statement, VarDecl):
+            statement_info.definitions.add(statement.name)
+            if statement.init is not None:
+                self._add_expression_uses(statement.init, statement_info.uses)
             return
         message = f"liveness: unhandled statement node {type(statement).__name__}"
         raise LivenessAnalysisError(message)
@@ -362,9 +362,6 @@ class LivenessAnalyzer:
         """Populate successor edges + control flow for *statement*."""
         statement_id = self.node_to_id[id(statement)]
         statement_info = self.statements[statement_id]
-        if isinstance(statement, Return):
-            statement_info.successors = [EXIT_ID]
-            return
         if isinstance(statement, Break):
             if self._switch_break_stack and (not self._loop_stack or self._switch_break_stack[-1] > self._loop_stack[-1][1]):
                 statement_info.successors = [self._switch_break_stack[-1]]
@@ -373,11 +370,22 @@ class LivenessAnalyzer:
             else:
                 statement_info.successors = [EXIT_ID]
             return
+        if isinstance(statement, Compound):
+            body_entry = self._build_control_flow_graph(statement.body, fallthrough=fallthrough)
+            statement_info.successors = [body_entry]
+            return
         if isinstance(statement, Continue):
             if self._loop_stack:
                 statement_info.successors = [self._loop_stack[-1][0]]
             else:
                 statement_info.successors = [EXIT_ID]
+            return
+        if isinstance(statement, DoWhile):
+            # body runs first; its last statement falls into the cond
+            # (which is *this* statement's id).  cond → body_entry
+            # OR after-loop.
+            body_entry = self._build_control_flow_graph_loop(statement.body, continue_id=statement_id, break_id=fallthrough)
+            statement_info.successors = [body_entry, fallthrough]
             return
         if isinstance(statement, Goto):
             self._pending_gotos.append((statement_id, statement.name))
@@ -390,18 +398,12 @@ class LivenessAnalyzer:
             else:
                 statement_info.successors = [body_entry, fallthrough]
             return
-        if isinstance(statement, While):
-            # cond evaluates → body OR after-loop.  Last body statement
-            # falls back to the cond (back-edge).
-            body_entry = self._build_control_flow_graph_loop(statement.body, continue_id=statement_id, break_id=fallthrough)
-            statement_info.successors = [body_entry, fallthrough]
+        if isinstance(statement, Label):
+            # Label itself just falls through to whatever follows.
+            statement_info.successors = [fallthrough]
             return
-        if isinstance(statement, DoWhile):
-            # body runs first; its last statement falls into the cond
-            # (which is *this* statement's id).  cond → body_entry
-            # OR after-loop.
-            body_entry = self._build_control_flow_graph_loop(statement.body, continue_id=statement_id, break_id=fallthrough)
-            statement_info.successors = [body_entry, fallthrough]
+        if isinstance(statement, Return):
+            statement_info.successors = [EXIT_ID]
             return
         if isinstance(statement, Switch):
             # Each case entry is reachable from the dispatch.  If
@@ -413,13 +415,11 @@ class LivenessAnalyzer:
             finally:
                 self._switch_break_stack.pop()
             return
-        if isinstance(statement, Compound):
-            body_entry = self._build_control_flow_graph(statement.body, fallthrough=fallthrough)
-            statement_info.successors = [body_entry]
-            return
-        if isinstance(statement, Label):
-            # Label itself just falls through to whatever follows.
-            statement_info.successors = [fallthrough]
+        if isinstance(statement, While):
+            # cond evaluates → body OR after-loop.  Last body statement
+            # falls back to the cond (back-edge).
+            body_entry = self._build_control_flow_graph_loop(statement.body, continue_id=statement_id, break_id=fallthrough)
+            statement_info.successors = [body_entry, fallthrough]
             return
         # Default: linear fall-through.  Unknown statement kinds are
         # still wired with a single fallthrough edge — the
