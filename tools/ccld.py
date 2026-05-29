@@ -295,10 +295,7 @@ def _validate_ccar_member(*, index: int, manifest_directory: Path, member: dict,
     # Stash the resolved path so _pull_archive_members doesn't re-resolve.
     member["path"] = member_path
     provides = member.get("provides")
-    if not isinstance(provides, list) or not all(isinstance(name, str) and name for name in provides):
-        sys.exit(f"ccld: {path}: member #{index}: `provides` must be a list of non-empty strings")
-    if len(set(provides)) != len(provides):
-        sys.exit(f"ccld: {path}: member #{index}: `provides` contains duplicate names")
+    _validate_string_list(error_prefix=f"ccld: {path}: member #{index}: ", items=provides, label="provides")
     # Replace the list with a frozenset so _pull_archive_members can call
     # `.intersection(unresolved)` directly each pass without rebuilding.
     member["provides"] = frozenset(provides)
@@ -361,11 +358,7 @@ def _validate_ccobj_shape(*, path: Path, payload: dict) -> None:
             sys.exit(f"ccld: {path}: symbol name must be a non-empty string")
         _validate_symbol_entry(info=info, path=path, section_sizes=section_sizes, symbol_name=symbol_name)
 
-    extern = payload["extern"]
-    if not isinstance(extern, list) or not all(isinstance(name, str) and name for name in extern):
-        sys.exit(f"ccld: {path}: `extern` must be a list of non-empty strings")
-    if len(set(extern)) != len(extern):
-        sys.exit(f"ccld: {path}: `extern` contains duplicate names")
+    _validate_string_list(error_prefix=f"ccld: {path}: ", items=payload["extern"], label="extern")
 
     _validate_ccobj_relocations(path=path, relocations=payload["relocations"], section_sizes=section_sizes)
 
@@ -445,6 +438,19 @@ def _validate_section_entry(*, path: Path, section: dict, section_name: str) -> 
         section["bytes"] = base64.b64decode(encoded, validate=True)
     except binascii.Error as error:
         sys.exit(f"ccld: {path}: section .{section_name}: invalid base64 `bytes` ({error})")
+
+
+def _validate_string_list(*, error_prefix: str, items: object, label: str) -> None:
+    """Validate ``items`` is a list of non-empty unique strings.
+
+    ``error_prefix`` is prepended to the failure message (e.g. ``"ccld: {path}: "``
+    or ``"ccld: {path}: member #{index}: "``); ``label`` names the field so the
+    message reads ``...`<label>` must be a list of non-empty strings``.
+    """
+    if not isinstance(items, list) or not all(isinstance(name, str) and name for name in items):
+        sys.exit(f"{error_prefix}`{label}` must be a list of non-empty strings")
+    if len(set(items)) != len(items):
+        sys.exit(f"{error_prefix}`{label}` contains duplicate names")
 
 
 def _validate_symbol_entry(*, info: dict, path: Path, section_sizes: dict[str, int], symbol_name: str) -> None:
