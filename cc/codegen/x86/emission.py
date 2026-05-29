@@ -1268,7 +1268,12 @@ class EmissionMixin:
 
         Extracted from :meth:`generate_expression` to keep that method readable.
         """
-        self.ax_clear()
+        # Defer ``ax_clear`` until each emit path's tail so that an
+        # index expression naming the AX-resident var (the
+        # ``temp = X; arr[temp]`` IR-temp pattern, where the prior
+        # store left ``ax_local`` == ``temp``) can short-circuit
+        # its reload via :meth:`generate_expression`'s
+        # ``Var(name=ax_local)`` fast path.
         vname = expression.array.name
         index_expression = expression.index
         self._check_defined(vname, line=expression.line)
@@ -1354,7 +1359,6 @@ class EmissionMixin:
                 else:
                     self.emit(f"        mov {self.target.acc}, [{addr}]")
                 self._si_scratch_guard_end(guarded=guarded)
-                self.ax_clear()
             else:
                 guarded = self._si_scratch_guard_begin(vname)
                 self._emit_load_var(vname, register=self.target.si_register)
@@ -1405,9 +1409,14 @@ class EmissionMixin:
                 else:
                     self.emit(f"        mov {self.target.acc}, [{si}]")
                 self._si_scratch_guard_end(guarded=guarded)
-                # AX now holds the subscript result, not the index —
-                # invalidate the tracking that generate_expression set.
-                self.ax_clear()
+        # AX now holds the subscript result regardless of branch — the
+        # constant-index paths emit a direct load, the dynamic-index
+        # paths consume the index via ``generate_expression`` (which
+        # may set ``ax_local`` to the index var) and overwrite AX with
+        # the loaded value.  Either way the pre-call ``ax_local`` is
+        # stale and any tracking ``generate_expression`` set above is
+        # for the index, not the result.
+        self.ax_clear()
 
     def _generate_logical_value(self, expression: Node, /) -> None:
         """Materialize a ``LogicalAnd`` / ``LogicalOr`` into the accumulator as 0 or 1.
