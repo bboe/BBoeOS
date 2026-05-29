@@ -73,11 +73,16 @@ def _apply_relocations(
             section = object_payload["sections"][relocation["section"]]
             patch_address = section["slot_address"] + relocation["offset"]
             patch_offset_in_image = patch_address - base
-            symbol_name = relocation["symbol"]
             # Object-local symbols (cc.py's _g_/_l_/_str_/_arr_ labels)
             # resolve from the owning object's per-file table first;
             # global symbols fall through to the cross-object table.
-            symbol_address = local_addresses.get(symbol_name) or symbol_addresses[symbol_name]
+            # _validate_relocations already proved every symbol resolves,
+            # so the helper's return value is never None here.
+            symbol_address = _resolve_symbol_address(
+                local_addresses=local_addresses,
+                symbol_addresses=symbol_addresses,
+                symbol_name=relocation["symbol"],
+            )
             packed = (
                 struct.pack("<i", symbol_address - (patch_address + 4))
                 if relocation["type"] == "rel32"
@@ -231,6 +236,19 @@ def _pull_archive_members(
             break
 
 
+def _resolve_symbol_address(*, local_addresses: dict[str, int], symbol_addresses: dict[str, int], symbol_name: str) -> int | None:
+    """Look up ``symbol_name`` in the per-object local table, then the global table.
+
+    Returns the resolved address or ``None`` if the symbol is defined in
+    neither.  Callers decide whether a miss is an error (``_validate_relocations``
+    raises a user-friendly message) or impossible (``_apply_relocations`` runs
+    post-validation, where misses cannot occur).
+    """
+    if (address := local_addresses.get(symbol_name)) is not None:
+        return address
+    return symbol_addresses.get(symbol_name)
+
+
 def _resolve_symbols(*, object_payloads: list[dict]) -> None:
     """Validate every extern has a defining global symbol.
 
@@ -277,10 +295,7 @@ def _validate_ccar_member(*, index: int, manifest_directory: Path, member: dict,
     # Stash the resolved path so _pull_archive_members doesn't re-resolve.
     member["path"] = member_path
     provides = member.get("provides")
-    if not isinstance(provides, list) or not all(isinstance(name, str) and name for name in provides):
-        sys.exit(f"ccld: {path}: member #{index}: `provides` must be a list of non-empty strings")
-    if len(set(provides)) != len(provides):
-        sys.exit(f"ccld: {path}: member #{index}: `provides` contains duplicate names")
+    _validate_string_list(error_prefix=f"ccld: {path}: member #{index}: ", items=provides, label="provides")
     # Replace the list with a frozenset so _pull_archive_members can call
     # `.intersection(unresolved)` directly each pass without rebuilding.
     member["provides"] = frozenset(provides)
@@ -343,11 +358,7 @@ def _validate_ccobj_shape(*, path: Path, payload: dict) -> None:
             sys.exit(f"ccld: {path}: symbol name must be a non-empty string")
         _validate_symbol_entry(info=info, path=path, section_sizes=section_sizes, symbol_name=symbol_name)
 
-    extern = payload["extern"]
-    if not isinstance(extern, list) or not all(isinstance(name, str) and name for name in extern):
-        sys.exit(f"ccld: {path}: `extern` must be a list of non-empty strings")
-    if len(set(extern)) != len(extern):
-        sys.exit(f"ccld: {path}: `extern` contains duplicate names")
+    _validate_string_list(error_prefix=f"ccld: {path}: ", items=payload["extern"], label="extern")
 
     _validate_ccobj_relocations(path=path, relocations=payload["relocations"], section_sizes=section_sizes)
 
@@ -357,10 +368,11 @@ def _validate_relocation_entry(*, index: int, path: Path, relocation: dict, sect
     if not isinstance(relocation, dict):
         sys.exit(f"ccld: {path}: relocation #{index} must be an object")
     section_name = relocation.get("section")
-    if section_name not in KNOWN_SECTIONS:
-        sys.exit(f"ccld: {path}: relocation #{index}: `section` must be one of {KNOWN_SECTIONS}")
-    if section_name not in section_sizes:
-        sys.exit(f"ccld: {path}: relocation #{index}: references undefined section .{section_name}")
+    _validate_section_reference(
+        error_prefix=f"ccld: {path}: relocation #{index}: ",
+        section_name=section_name,
+        section_sizes=section_sizes,
+    )
     offset = relocation.get("offset")
     if not isinstance(offset, int) or offset < 0:
         sys.exit(f"ccld: {path}: relocation #{index}: `offset` must be a non-negative int")
@@ -385,11 +397,13 @@ def _validate_relocations(*, object_payloads: list[dict], symbol_addresses: dict
         local_addresses = object_payload.get("local_addresses", {})
         for relocation in object_payload["relocations"]:
             symbol = relocation["symbol"]
-            symbol_address = local_addresses.get(symbol)
+            symbol_address = _resolve_symbol_address(
+                local_addresses=local_addresses,
+                symbol_addresses=symbol_addresses,
+                symbol_name=symbol,
+            )
             if symbol_address is None:
-                if symbol not in symbol_addresses:
-                    sys.exit(f"ccld: {object_payload['source']}: relocation references unknown symbol {symbol!r}")
-                symbol_address = symbol_addresses[symbol]
+                sys.exit(f"ccld: {object_payload['source']}: relocation references unknown symbol {symbol!r}")
             if relocation["type"] != "rel32":
                 continue
             section = object_payload["sections"][relocation["section"]]
@@ -427,6 +441,33 @@ def _validate_section_entry(*, path: Path, section: dict, section_name: str) -> 
         sys.exit(f"ccld: {path}: section .{section_name}: invalid base64 `bytes` ({error})")
 
 
+def _validate_section_reference(*, error_prefix: str, section_name: object, section_sizes: dict[str, int]) -> None:
+    """Validate ``section_name`` names a KNOWN section that the payload defines.
+
+    ``error_prefix`` is prepended to the failure message (e.g.
+    ``"ccld: {path}: relocation #{index}: "`` or
+    ``"ccld: {path}: symbol {name!r}: "``) so the call site's owner shows up
+    in both the "unknown section" and "references undefined section" cases.
+    """
+    if section_name not in KNOWN_SECTIONS:
+        sys.exit(f"{error_prefix}`section` must be one of {KNOWN_SECTIONS}")
+    if section_name not in section_sizes:
+        sys.exit(f"{error_prefix}references undefined section .{section_name}")
+
+
+def _validate_string_list(*, error_prefix: str, items: object, label: str) -> None:
+    """Validate ``items`` is a list of non-empty unique strings.
+
+    ``error_prefix`` is prepended to the failure message (e.g. ``"ccld: {path}: "``
+    or ``"ccld: {path}: member #{index}: "``); ``label`` names the field so the
+    message reads ``...`<label>` must be a list of non-empty strings``.
+    """
+    if not isinstance(items, list) or not all(isinstance(name, str) and name for name in items):
+        sys.exit(f"{error_prefix}`{label}` must be a list of non-empty strings")
+    if len(set(items)) != len(items):
+        sys.exit(f"{error_prefix}`{label}` contains duplicate names")
+
+
 def _validate_symbol_entry(*, info: dict, path: Path, section_sizes: dict[str, int], symbol_name: str) -> None:
     """Validate the shape of a single symbol entry."""
     if not isinstance(info, dict):
@@ -434,10 +475,11 @@ def _validate_symbol_entry(*, info: dict, path: Path, section_sizes: dict[str, i
     if info.get("binding") not in KNOWN_BINDINGS:
         sys.exit(f"ccld: {path}: symbol {symbol_name!r}: `binding` must be 'global' or 'local'")
     section_name = info.get("section")
-    if section_name not in KNOWN_SECTIONS:
-        sys.exit(f"ccld: {path}: symbol {symbol_name!r}: `section` must be one of {KNOWN_SECTIONS}")
-    if section_name not in section_sizes:
-        sys.exit(f"ccld: {path}: symbol {symbol_name!r}: references undefined section .{section_name}")
+    _validate_section_reference(
+        error_prefix=f"ccld: {path}: symbol {symbol_name!r}: ",
+        section_name=section_name,
+        section_sizes=section_sizes,
+    )
     offset = info.get("offset")
     if not isinstance(offset, int) or offset < 0:
         sys.exit(f"ccld: {path}: symbol {symbol_name!r}: `offset` must be a non-negative int")
