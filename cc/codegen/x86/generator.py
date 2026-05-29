@@ -722,7 +722,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # lowering leaves :attr:`_current_call_pinned_initialized`
             # at ``None`` so any nested calls fall back to the
             # conservative full save-set.
-            if isinstance(instruction, (ir.Call, ir.CarryBranch)):
+            if isinstance(instruction, (ir.Call, ir.CarryBranch, ir.TailCall)):
                 result[id(instruction)] = frozenset(defined)
             for target_name in self._ir_instruction_store_targets(instruction):
                 if target_name in pinned_locals:

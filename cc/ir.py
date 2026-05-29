@@ -143,6 +143,22 @@ class Return:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class TailCall:
+    """name(args) in tail position — codegen lowers to ``jmp name`` (no ``ret``).
+
+    Produced by :func:`cc.ir_optimize.optimize` when a :class:`Call`
+    whose result is consumed only by an immediately-following
+    :class:`Return` is rewritten as a single control-flow terminator.
+    The codegen falls back to a normal call / return sequence when the
+    call site fails the runtime eligibility check (e.g. stack args,
+    pinned saves required, callee is a builtin).
+    """
+
+    args: tuple[Value, ...]
+    name: str
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class InlineAsm:
     """Pass-through inline-asm block."""
 
@@ -181,6 +197,7 @@ Instruction = (
     | BranchFalse
     | CarryBranch
     | Return
+    | TailCall
     | InlineAsm
     | Block
     | LoopBoundary
