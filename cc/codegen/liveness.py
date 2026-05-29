@@ -88,17 +88,6 @@ class LivenessAnalysisError(Exception):
     """
 
 
-@dataclass(slots=True)
-class StatementInfo:
-    """Per-statement liveness state."""
-
-    definitions: set[str] = field(default_factory=set)
-    live_in: set[str] = field(default_factory=set)
-    live_out: set[str] = field(default_factory=set)
-    successors: list[int] = field(default_factory=list)
-    uses: set[str] = field(default_factory=set)
-
-
 class LivenessAnalyzer:
     """Compute liveness and interference for a function body.
 
@@ -510,3 +499,14 @@ class LivenessAnalyzer:
                         continue
                     add_edge(defined, other)
         return adjacency
+
+
+@dataclass(slots=True)
+class StatementInfo:
+    """Per-statement liveness state."""
+
+    definitions: set[str] = field(default_factory=set)
+    live_in: set[str] = field(default_factory=set)
+    live_out: set[str] = field(default_factory=set)
+    successors: list[int] = field(default_factory=list)
+    uses: set[str] = field(default_factory=set)
