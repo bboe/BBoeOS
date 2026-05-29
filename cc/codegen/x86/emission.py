@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 from dataclasses import fields
 
-from cc import ir
+from cc import ir, ir_optimize
 from cc.ast_nodes import (
     AddressOf,
     ArrayDecl,
@@ -1631,6 +1631,24 @@ class EmissionMixin:
             case ir.Return(value=value):
                 stmt = Return(value=self._ir_value_to_ast(value) if value is not None else None)
                 self.generate_return(stmt)
+            case ir.TailCall(name=name, args=args):
+                call = Call(args=[self._ir_value_to_ast(a) for a in args], name=name)
+                self._current_call_pinned_initialized = self._ir_call_pinned_initialized.get(id(instruction))
+                try:
+                    if self._is_tail_call_eligible(call):
+                        self.generate_call(call, tail_call=True)
+                    else:
+                        # Fall back to a regular ``call`` followed by a
+                        # ``Return`` whose value is already in AX.
+                        # ``_is_tail_call_eligible`` rejects calls with
+                        # stack args, pinned saves, or non-user callees
+                        # — the tail ``jmp`` would skip teardown those
+                        # cases need, so let the normal call shape
+                        # handle them.
+                        self.generate_call(call)
+                        self.generate_return(Return(value=None))
+                finally:
+                    self._current_call_pinned_initialized = None
             case ir.InlineAsm(content=content):
                 for line in decode_string_escapes(content).splitlines():
                     self.emit(line)
@@ -1990,6 +2008,7 @@ class EmissionMixin:
         # its special handling (argc/argv startup, printf fusion, frame-
         # elide data labels) is deeply tied to the AST shape.
         ir_program = ir.Builder(carry_return_functions=frozenset(self.carry_return_functions)).build_program(ast)
+        ir_optimize.optimize(ir_program)
         ir_by_name = {
             f.ast_node.name: f
             for f in ir_program.functions

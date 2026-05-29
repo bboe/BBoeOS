@@ -279,7 +279,7 @@ class CodeGeneratorBase:
             match instruction:
                 case ir.Label():
                     continue  # skip trailing labels
-                case ir.Return():
+                case ir.Return() | ir.TailCall():
                     return True
                 case ir.Block(node=node):
                     return CodeGeneratorBase.always_exits([node])
