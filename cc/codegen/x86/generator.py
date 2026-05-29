@@ -542,6 +542,45 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         _walk(body)
         return result
 
+    def _collect_auto_pin_body_candidates(
+        self, statements: list[Node], /, *, body_candidates: list[tuple[str, int]], top_level: bool
+    ) -> None:
+        """Walk *statements*, appending eligible VarDecls to *body_candidates*.
+
+        Recurses into Compound/DoWhile/While/For/If/Switch bodies.  The
+        ``top_level`` flag controls constant-alias filtering: only
+        directly-enclosed VarDecls (``top_level=True``) defer to
+        :meth:`_is_constant_alias`, matching the legacy closure that
+        relied on the parent ``nodes`` reference to distinguish.
+
+        The original closure also threaded an ``order`` nonlocal int
+        that incremented at each append.  Because this method is the
+        only writer of *body_candidates* during the auto-pin selection
+        phase, ``len(body_candidates)`` at each append equals the next
+        order value, so the nonlocal is gone.
+        """
+        for statement in statements:
+            if isinstance(statement, VarDecl):
+                eligible = (
+                    statement.type_name not in ("unsigned long", "function_pointer")
+                    and not (top_level and self._is_constant_alias(body=statements, statement=statement))
+                    and not isinstance(statement.init, Call)
+                )
+                if eligible:
+                    body_candidates.append((statement.name, len(body_candidates)))
+            if isinstance(statement, (Compound, DoWhile, While)):
+                self._collect_auto_pin_body_candidates(statement.body, body_candidates=body_candidates, top_level=False)
+            elif isinstance(statement, For):
+                self._collect_auto_pin_body_candidates(statement.init, body_candidates=body_candidates, top_level=False)
+                self._collect_auto_pin_body_candidates(statement.body, body_candidates=body_candidates, top_level=False)
+            elif isinstance(statement, If):
+                self._collect_auto_pin_body_candidates(statement.body, body_candidates=body_candidates, top_level=False)
+                if statement.else_body is not None:
+                    self._collect_auto_pin_body_candidates(statement.else_body, body_candidates=body_candidates, top_level=False)
+            elif isinstance(statement, Switch):
+                for case in statement.cases:
+                    self._collect_auto_pin_body_candidates(case.body, body_candidates=body_candidates, top_level=False)
+
     def _collect_function_pointer_vars(self, body: list[Node], /, *, parameters: list | None = None) -> set[str]:
         """Return every name that names a function_pointer (params + locals + file-scope globals).
 
@@ -2780,35 +2819,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             param_candidates.append((param.name, order))
 
         body_candidates: list[tuple[str, int]] = []
-        order = 0
         function_pointer_vars: set[str] = self._collect_function_pointer_vars(body, parameters=parameters)
 
-        def collect(nodes: list[Node], *, top_level: bool) -> None:
-            nonlocal order
-            for statement in nodes:
-                if isinstance(statement, VarDecl):
-                    eligible = (
-                        statement.type_name not in ("unsigned long", "function_pointer")
-                        and not (top_level and self._is_constant_alias(body=nodes, statement=statement))
-                        and not isinstance(statement.init, Call)
-                    )
-                    if eligible:
-                        body_candidates.append((statement.name, order))
-                        order += 1
-                if isinstance(statement, (Compound, DoWhile, While)):
-                    collect(statement.body, top_level=False)
-                elif isinstance(statement, For):
-                    collect(statement.init, top_level=False)
-                    collect(statement.body, top_level=False)
-                elif isinstance(statement, If):
-                    collect(statement.body, top_level=False)
-                    if statement.else_body is not None:
-                        collect(statement.else_body, top_level=False)
-                elif isinstance(statement, Switch):
-                    for case in statement.cases:
-                        collect(case.body, top_level=False)
-
-        collect(body, top_level=True)
+        self._collect_auto_pin_body_candidates(body, body_candidates=body_candidates, top_level=True)
 
         asm_operand_vars = self._collect_asm_operand_vars(body)
         body_candidates = [(name, o) for name, o in body_candidates if name not in asm_operand_vars]
