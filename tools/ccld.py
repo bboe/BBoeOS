@@ -368,10 +368,11 @@ def _validate_relocation_entry(*, index: int, path: Path, relocation: dict, sect
     if not isinstance(relocation, dict):
         sys.exit(f"ccld: {path}: relocation #{index} must be an object")
     section_name = relocation.get("section")
-    if section_name not in KNOWN_SECTIONS:
-        sys.exit(f"ccld: {path}: relocation #{index}: `section` must be one of {KNOWN_SECTIONS}")
-    if section_name not in section_sizes:
-        sys.exit(f"ccld: {path}: relocation #{index}: references undefined section .{section_name}")
+    _validate_section_reference(
+        error_prefix=f"ccld: {path}: relocation #{index}: ",
+        section_name=section_name,
+        section_sizes=section_sizes,
+    )
     offset = relocation.get("offset")
     if not isinstance(offset, int) or offset < 0:
         sys.exit(f"ccld: {path}: relocation #{index}: `offset` must be a non-negative int")
@@ -440,6 +441,20 @@ def _validate_section_entry(*, path: Path, section: dict, section_name: str) -> 
         sys.exit(f"ccld: {path}: section .{section_name}: invalid base64 `bytes` ({error})")
 
 
+def _validate_section_reference(*, error_prefix: str, section_name: object, section_sizes: dict[str, int]) -> None:
+    """Validate ``section_name`` names a KNOWN section that the payload defines.
+
+    ``error_prefix`` is prepended to the failure message (e.g.
+    ``"ccld: {path}: relocation #{index}: "`` or
+    ``"ccld: {path}: symbol {name!r}: "``) so the call site's owner shows up
+    in both the "unknown section" and "references undefined section" cases.
+    """
+    if section_name not in KNOWN_SECTIONS:
+        sys.exit(f"{error_prefix}`section` must be one of {KNOWN_SECTIONS}")
+    if section_name not in section_sizes:
+        sys.exit(f"{error_prefix}references undefined section .{section_name}")
+
+
 def _validate_string_list(*, error_prefix: str, items: object, label: str) -> None:
     """Validate ``items`` is a list of non-empty unique strings.
 
@@ -460,10 +475,11 @@ def _validate_symbol_entry(*, info: dict, path: Path, section_sizes: dict[str, i
     if info.get("binding") not in KNOWN_BINDINGS:
         sys.exit(f"ccld: {path}: symbol {symbol_name!r}: `binding` must be 'global' or 'local'")
     section_name = info.get("section")
-    if section_name not in KNOWN_SECTIONS:
-        sys.exit(f"ccld: {path}: symbol {symbol_name!r}: `section` must be one of {KNOWN_SECTIONS}")
-    if section_name not in section_sizes:
-        sys.exit(f"ccld: {path}: symbol {symbol_name!r}: references undefined section .{section_name}")
+    _validate_section_reference(
+        error_prefix=f"ccld: {path}: symbol {symbol_name!r}: ",
+        section_name=section_name,
+        section_sizes=section_sizes,
+    )
     offset = info.get("offset")
     if not isinstance(offset, int) or offset < 0:
         sys.exit(f"ccld: {path}: symbol {symbol_name!r}: `offset` must be a non-negative int")
