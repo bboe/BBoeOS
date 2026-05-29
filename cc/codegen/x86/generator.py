@@ -2230,6 +2230,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return False
         return isinstance(init_expr.get(name), (Call, Index, BinaryOperation))
 
+    def _load_member_base(self, object_name: str, /) -> str:
+        """Return a base register holding the struct address for ``object_name``.
+
+        When the auto-pin live-range for ``object_name`` is intact and
+        SI/ESI still holds the variable's value, return SI directly —
+        every ``generate_member_*`` lowerer can read fields off it
+        without a fresh load.  Otherwise emit a load into BX/EBX and
+        return that.  Used by the prologue of every member-access /
+        member-assign / member-index lowerer that needs the struct
+        base in a register.
+        """
+        if self.si_local == object_name:
+            return self.target.si_register
+        self._emit_load_var(object_name, register=self.target.bx_register)
+        return self.target.bx_register
+
     def _local_address(self, name: str, /) -> str:
         """Return the memory operand string for a local or global scalar.
 
@@ -4540,11 +4556,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # them to memcpy / memcmp, or a function expecting a pointer).
         if is_array_field or is_struct_value:
             self.ax_clear()
-            if self.si_local == object_name:
-                base_reg = self.target.si_register
-            else:
-                self._emit_load_var(object_name, register=self.target.bx_register)
-                base_reg = self.target.bx_register
+            base_reg = self._load_member_base(object_name)
             if offset:
                 self.emit(f"        lea {self.target.acc}, [{base_reg}+{offset}]")
             else:
@@ -4556,11 +4568,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
             raise CompileError(message, line=expression.line)
         self.ax_clear()
-        if self.si_local == object_name:
-            base_reg = self.target.si_register
-        else:
-            self._emit_load_var(object_name, register=self.target.bx_register)
-            base_reg = self.target.bx_register
+        base_reg = self._load_member_base(object_name)
         addr = self._build_address(base_reg, offset)
         if info.bit_width is not None:
             self._emit_bitfield_read(info, addr=addr)
@@ -4710,11 +4718,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # Peephole: 1-bit field with a literal 0 / 1 rhs — no expression
             # evaluation needed, so resolve the base register and addr first.
             if info.bit_width == 1 and isinstance(statement.expr, Int) and statement.expr.value in (0, 1):
-                if self.si_local == object_name:
-                    base_reg = self.target.si_register
-                else:
-                    self._emit_load_var(object_name, register=self.target.bx_register)
-                    base_reg = self.target.bx_register
+                base_reg = self._load_member_base(object_name)
                 addr = self._build_address(base_reg, offset)
                 self._emit_bitfield_write_literal(info, addr=addr, value=statement.expr.value)
                 return
@@ -4724,11 +4728,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.generate_expression(statement.expr)  # rhs → EAX (low byte = AL)
             # If SI still holds the struct pointer (no intervening call), use it
             # directly as the base register to avoid a BX round-trip.
-            if self.si_local == object_name:
-                base_reg = self.target.si_register
-            else:
-                self._emit_load_var(object_name, register=self.target.bx_register)
-                base_reg = self.target.bx_register
+            base_reg = self._load_member_base(object_name)
             addr = self._build_address(base_reg, offset)
             self._emit_bitfield_write(info, addr=addr)
             return
@@ -4740,11 +4740,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.generate_expression(statement.expr)
         # If SI still holds the struct pointer (no intervening call), use it
         # directly as the base register to avoid a BX round-trip.
-        if self.si_local == object_name:
-            base_reg = self.target.si_register
-        else:
-            self._emit_load_var(object_name, register=self.target.bx_register)
-            base_reg = self.target.bx_register
+        base_reg = self._load_member_base(object_name)
         addr = self._build_address(base_reg, offset)
         self._emit_field_store(addr=addr, field_size=field_size)
 
