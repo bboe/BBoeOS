@@ -179,9 +179,14 @@ class LoopBoundary:
     Emitted around loop bodies so that ``Continue`` / ``Break`` nodes
     inside ``Block``-wrapped AST statements (e.g. a Switch inside a
     while loop) can resolve to the correct jump targets.
+
+    ``continue_label`` is ``None`` for switch lowerings: ``break``
+    applies to the switch's end label but ``continue`` passes through
+    to the enclosing loop (per C semantics).  In that case the
+    push/pop affects only ``loop_end_labels``.
     """
 
-    continue_label: str
+    continue_label: str | None
     end_label: str
     push: bool
 
@@ -405,8 +410,14 @@ class Builder:
                 # right-hand sides can't round-trip through an int-typed
                 # IR temp — let the AST codegen lower the whole
                 # assignment in one shot so the DX:AX (16-bit) / EAX
-                # (32-bit) shape is preserved end-to-end.
-                if self._var_types.get(name) == "unsigned long" or self._is_long_pointee_index(expr):
+                # (32-bit) shape is preserved end-to-end.  ``dest = cond
+                # ? dest : other`` / ``dest = cond ? other : dest``
+                # (the MIN / MAX guarded-update shape) is also routed
+                # to the AST path so ``_try_emit_guarded_update``'s
+                # tight ``cmp / Jcc / mov dest, other`` lowering fires;
+                # the IR-temp path would round-trip through AX and
+                # break the fast-path test.
+                if self._var_types.get(name) == "unsigned long" or self._is_long_pointee_index(expr) or self._is_guarded_update(name, expr):
                     out.append(Block(node=stmt))
                 else:
                     source = self._build_expr(expr, out, strings=strings)
@@ -728,6 +739,22 @@ class Builder:
             elif isinstance(statement, ast_nodes.Switch):
                 for case in statement.cases:
                     self._collect_local_types(case.body)
+
+    @staticmethod
+    def _is_guarded_update(name: str, expression: ast_nodes.Node) -> bool:
+        """Return True if *expression* is ``cond ? <name> : other`` or ``cond ? other : <name>``.
+
+        That's the shape ``MIN(name, other)`` / ``MAX(name, other)`` produce —
+        the AST-codegen fast path ``_try_emit_guarded_update`` lowers it to a
+        tight ``cmp / Jcc / mov dest, other`` that bypasses an AX round-trip.
+        Routing such assignments through the IR-temp path would defeat the
+        fast path, so they stay on the AST path via :class:`Block`.
+        """
+        if not isinstance(expression, ast_nodes.Conditional):
+            return False
+        then_is_self = isinstance(expression.then_expr, ast_nodes.Var) and expression.then_expr.name == name
+        else_is_self = isinstance(expression.else_expr, ast_nodes.Var) and expression.else_expr.name == name
+        return then_is_self or else_is_self
 
     def _is_long_pointee_index(self, expression: ast_nodes.Node) -> bool:
         """Return True if *expression* is ``base[i]`` whose pointee is a 4-byte unsigned int.
