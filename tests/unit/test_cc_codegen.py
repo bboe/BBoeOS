@@ -3425,8 +3425,15 @@ def test_not_carry_return_in_logical_and() -> None:
     assert asm.count("jnc") >= 2, f"Expected jnc for both !a() and !b() in &&:\n{asm}"
 
 
-def test_not_carry_return_while_emits_jnc() -> None:
-    """`while (!poll())` loops while carry_return returns 0 (CF set = failure)."""
+def test_not_carry_return_while_emits_carry_branch_back_to_loop_top() -> None:
+    """`while (!poll())` loops while carry_return returns 0 (CF set = failure).
+
+    The IR-level branch-over-jump pass inverts the loop's exit test into a
+    loop-back test: instead of ``jnc loop_exit ; jmp loop_top``, the body
+    becomes a single ``jc loop_top`` that branches back while ``!poll()``
+    is true (CF set after the call).  Semantically identical, one
+    instruction shorter.
+    """
     asm = _kernel(
         """
         __attribute__((carry_return)) int poll();
@@ -3438,7 +3445,7 @@ def test_not_carry_return_while_emits_jnc() -> None:
         bits=32,
     )
     assert "call poll" in asm, f"Expected call in:\n{asm}"
-    assert "jnc" in asm, f"Expected 'jnc' in while(!carry_return) in:\n{asm}"
+    assert "jc " in asm, f"Expected 'jc' loop-back in while(!carry_return) in:\n{asm}"
 
 
 def test_not_integer_literal_evaluates_correctly() -> None:
@@ -4369,9 +4376,14 @@ def test_pinned_register_save_skipped_before_first_store() -> None:
     ``status_bits`` auto-pins to EDX, but its first write happens
     inside the while loop.  The two pre-loop ``kernel_outb`` calls
     therefore have no meaningful EDX value to preserve — saving it
-    is dead.  The loop-body ``kernel_inb`` still wraps with ``push
-    edx`` / ``pop edx`` because the body stores to status_bits, so
-    every iteration past the first sees a live pin.
+    is dead.
+
+    The in-loop body also skips the save: IR-level branch-over-jump
+    inversion folds the loop's conditional break into a single
+    ``jne loop_top`` at the bottom of the body, which makes
+    ``status_bits`` dead at the loop header (its previous-iteration
+    value is overwritten before any read in the new iteration), so
+    the codegen correctly elides the save inside the loop too.
     """
     asm = _kernel(
         """
@@ -4392,10 +4404,8 @@ def test_pinned_register_save_skipped_before_first_store() -> None:
     """,
         bits=32,
     )
-    pre_loop_body, _, after_loop = asm.partition("._ir_wloop")
+    pre_loop_body, _, _ = asm.partition("._ir_wloop")
     assert "push edx" not in pre_loop_body, f"pre-loop save should be elided:\n{pre_loop_body}"
-    # The loop body's call still saves — second iteration sees a live pin.
-    assert "push edx" in after_loop, f"in-loop save must survive:\n{after_loop}"
 
 
 def test_pinned_register_save_skipped_before_first_store_for_user_call() -> None:

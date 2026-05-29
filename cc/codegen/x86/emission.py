@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 from dataclasses import fields
 
-from cc import ir, ir_optimize
+from cc import ir
 from cc.ast_nodes import (
     AddressOf,
     ArrayDecl,
@@ -88,6 +88,7 @@ from cc.ast_nodes import (
 from cc.codegen.x86.jumps import JUMP_WHEN_FALSE, JUMP_WHEN_FALSE_UNSIGNED, JUMP_WHEN_TRUE, JUMP_WHEN_TRUE_UNSIGNED
 from cc.codegen.x86.peephole import Peepholer
 from cc.errors import CompileError
+from cc.ir_optimize import Optimizer
 from cc.target import CodegenTarget, X86CodegenTarget16
 from cc.tokens import COMPARISON_OPERATIONS
 from cc.utils import decode_string_escapes, string_byte_length
@@ -1653,11 +1654,17 @@ class EmissionMixin:
                 for line in decode_string_escapes(content).splitlines():
                     self.emit(line)
             case ir.LoopBoundary(continue_label=continue_label, end_label=end_label, push=push):
+                # ``continue_label=None`` marks a switch boundary: ``break``
+                # targets the switch's end but ``continue`` keeps applying
+                # to the enclosing loop (per C semantics), so we leave
+                # the continue stack alone.
                 if push:
-                    self.loop_continue_labels.append(continue_label)
+                    if continue_label is not None:
+                        self.loop_continue_labels.append(continue_label)
                     self.loop_end_labels.append(end_label)
                 else:
-                    self.loop_continue_labels.pop()
+                    if continue_label is not None:
+                        self.loop_continue_labels.pop()
                     self.loop_end_labels.pop()
             case ir.Block(node=node):
                 self.generate_statement(node)
@@ -2005,10 +2012,20 @@ class EmissionMixin:
 
         # Build IR for all non-main, non-always-inline functions.  The IR
         # is consumed by generate_function; main keeps the AST path because
-        # its special handling (argc/argv startup, printf fusion, frame-
-        # elide data labels) is deeply tied to the AST shape.
+        # the IR codegen path doesn't yet match the AST codegen's register
+        # tracking (ax_local) and fast-path shape recognition
+        # (_try_emit_guarded_update) on the patterns main typically holds.
+        # Moving main through IR regressed real bytes across archived
+        # programs without a clean win, so defer until the IR codegen
+        # closes the parity gap.
         ir_program = ir.Builder(carry_return_functions=frozenset(self.carry_return_functions)).build_program(ast)
-        ir_optimize.optimize(ir_program)
+        # IR-level optimization: dead-code elimination + copy / constant
+        # propagation + control-flow simplification + automatic tail-call
+        # elimination across single-definition ``_ir_*`` temps.  Runs
+        # before codegen so every backend (current x86, future ARM /
+        # x86-64) benefits without having to re-implement equivalent
+        # peephole rewrites at the asm-text level.
+        ir_program = Optimizer().optimize(ir_program)
         ir_by_name = {
             f.ast_node.name: f
             for f in ir_program.functions
