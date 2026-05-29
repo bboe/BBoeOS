@@ -334,6 +334,11 @@ class LivenessAnalyzer:
         self.statements[statement_id] = StatementInfo()
         return statement_id
 
+    def _number_children(self, statements: list[Node], /) -> None:
+        """Recursively assign ids to every statement in *statements*."""
+        for child in statements:
+            self._number_statement(child)
+
     def _number_statement(self, statement: Node) -> None:
         """Recursively assign ids to *statement* and any nested statements."""
         if id(statement) in self.node_to_id:
@@ -342,21 +347,16 @@ class LivenessAnalyzer:
         if isinstance(statement, Label):
             self.labels[statement.name] = statement_id
         if isinstance(statement, If):
-            for child in statement.body:
-                self._number_statement(child)
+            self._number_children(statement.body)
             if statement.else_body is not None:
-                for child in statement.else_body:
-                    self._number_statement(child)
+                self._number_children(statement.else_body)
         elif isinstance(statement, (DoWhile, While)):
-            for child in statement.body:
-                self._number_statement(child)
+            self._number_children(statement.body)
         elif isinstance(statement, Switch):
             for case in statement.cases:
-                for child in case.body:
-                    self._number_statement(child)
+                self._number_children(case.body)
         elif isinstance(statement, Compound):
-            for child in statement.body:
-                self._number_statement(child)
+            self._number_children(statement.body)
 
     def _wire_statement(self, statement: Node, *, fallthrough: int) -> None:
         """Populate successor edges + control flow for *statement*."""
