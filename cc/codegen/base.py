@@ -341,20 +341,29 @@ class CodeGeneratorBase:
         """Return IR-generated temp names (``_ir_*``) that appear as destinations."""
         seen: set[str] = set()
         result: list[str] = []
-        for instruction in body:
-            destination: str | None = None
-            match instruction:
-                case ir.BinaryOperation(destination=name) | ir.Copy(destination=name) | ir.Index(destination=name):
-                    destination = name
-                case ir.Call(destination=name):
-                    destination = name
-                case ir.Block(node=Assign(name=name)):
-                    destination = name
-                case _:
-                    pass
-            if destination is not None and destination.startswith("_ir_") and destination not in seen:
-                seen.add(destination)
-                result.append(destination)
+
+        def walk(instructions: list[ir.Instruction]) -> None:
+            for instruction in instructions:
+                destination: str | None = None
+                match instruction:
+                    case ir.BinaryOperation(destination=name) | ir.Copy(destination=name) | ir.Index(destination=name):
+                        destination = name
+                    case ir.Call(destination=name):
+                        destination = name
+                    case ir.Block(node=Assign(name=name)):
+                        destination = name
+                    case ir.Switch(cases=cases):
+                        # IR Switch arms hold lowered IR instructions;
+                        # recurse so temps inside arms get a frame slot.
+                        for case in cases:
+                            walk(case.body)
+                    case _:
+                        pass
+                if destination is not None and destination.startswith("_ir_") and destination not in seen:
+                    seen.add(destination)
+                    result.append(destination)
+
+        walk(body)
         return result
 
     def _constant_expression(self, init: Node, /) -> str | None:
@@ -857,6 +866,10 @@ class CodeGeneratorBase:
         carries the actual body — they're folded into a single emission
         group by :meth:`generate_switch`.  The final case in the list
         must have a non-empty always-exits body.
+
+        Case bodies are either AST node lists (legacy ``Block``-wrapped
+        Switch path) or IR instruction lists (``ir.Switch`` path).  The
+        ``always_exits`` predicate is dispatched accordingly.
         """
         if not case_arms:
             return False
@@ -867,10 +880,51 @@ class CodeGeneratorBase:
                 if index == len(case_arms) - 1:
                     return False
                 continue
-            if not CodeGeneratorBase.always_exits(case.body):
+            if not CodeGeneratorBase._case_body_always_exits(case.body):
                 return False
         # The very last case must carry a non-empty body.
         return bool(case_arms[-1].body)
+
+    @staticmethod
+    def _case_body_always_exits(body: list, /) -> bool:
+        """Return True if *body* (AST or IR) transfers control away at its end.
+
+        For AST bodies this is :meth:`always_exits` (``break`` /
+        ``return`` / ``die`` etc.).  For IR bodies a trailing
+        :class:`ir.Jump` also counts: switch-case ``break`` lowers to
+        ``Jump(target=end_label)`` which already redirects control past
+        the next case, satisfying the interleave precondition.
+        """
+        if not body:
+            return False
+        last = body[-1]
+        if isinstance(last, ir.Jump):
+            return True
+        if isinstance(last, ir.Return):
+            return True
+        if isinstance(last, ir.Block):
+            return CodeGeneratorBase.always_exits([last.node])
+        if isinstance(last, ir.Label):
+            # Trailing label means control could still fall off the end.
+            return False
+        if isinstance(
+            last,
+            (
+                ir.BinaryOperation,
+                ir.Copy,
+                ir.Call,
+                ir.Index,
+                ir.IndexAssign,
+                ir.BranchFalse,
+                ir.CarryBranch,
+                ir.InlineAsm,
+                ir.LoopBoundary,
+                ir.Switch,
+            ),
+        ):
+            return False
+        # Otherwise treat as AST node list — delegate.
+        return CodeGeneratorBase.always_exits(body)
 
     def _transform_branch_printf(self, body: list[Node], /) -> list[Node]:
         """Replace trailing simple printf(msg) with die(msg) in a branch body."""

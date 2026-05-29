@@ -37,7 +37,11 @@ LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
 # flag we add to every subprocess call).
 _STDINT_PREAMBLE = "#include <stdint.h>\n"
 sys.path.insert(0, str(REPO_ROOT))
+from cc import ast_nodes, ir  # noqa: E402
 from cc.codegen.x86.peephole import Peepholer  # noqa: E402
+from cc.lexer import tokenize  # noqa: E402
+from cc.parser import Parser  # noqa: E402
+from cc.preprocessor import apply_defines, preprocess  # noqa: E402
 from cc.target import X86CodegenTarget16  # noqa: E402
 
 # FD layout constants from kernel/include/constants.asm (must match exactly).
@@ -270,10 +274,22 @@ def test_auto_pin_cost_model_subtracts_pre_first_store_calls() -> None:
     # store pattern is ``mov eRR, eax`` rather than a stack-slot
     # spill (``mov [ebp-N], eax``).  Before the refinement, refs (6)
     # didn't beat the function-wide EBX clobber count (8 user-call
-    # clobbers), so auto-pin bailed and counter spilled.
-    pinned_store_forms = ("mov ebx, eax", "mov ecx, eax", "mov edx, eax", "mov edi, eax")
-    assert any(form in asm for form in pinned_store_forms), (
-        f"expected counter to pin to an E-register (store via {pinned_store_forms}):\n{asm}"
+    # clobbers), so auto-pin bailed and counter spilled.  The AST
+    # in-place self-mod path (``inc reg`` for ``counter = counter +
+    # 1``) is also accepted — same register residency, different
+    # instruction shape.
+    pinned_evidence_forms = (
+        "mov ebx, eax",
+        "mov ecx, eax",
+        "mov edx, eax",
+        "mov edi, eax",
+        "inc ebx",
+        "inc ecx",
+        "inc edx",
+        "inc edi",
+    )
+    assert any(form in asm for form in pinned_evidence_forms), (
+        f"expected counter to pin to an E-register (evidence via {pinned_evidence_forms}):\n{asm}"
     )
     assert "[ebp-4], eax" not in asm, f"counter should not spill to its frame slot:\n{asm}"
 
@@ -6454,6 +6470,132 @@ def test_user_switch_rejects_duplicate_case_values() -> None:
     )
     assert not ok, f"expected duplicate-case error, compilation succeeded:\n{message}"
     assert "duplicate case value" in message, message
+
+
+def test_user_switch_lowers_to_ir_switch_in_helper() -> None:
+    """A ``switch`` inside a non-main helper goes through ``ir.Switch``.
+
+    The IR builder emits :class:`cc.ir.Switch` for non-main bodies; its
+    case bodies hold IR instructions (so labels / gotos inside arms are
+    visible to IR-level passes).  This test checks the IR shape directly
+    rather than only the lowered assembly, which is also smoke-tested
+    by the other switch tests.
+    """
+    source_text = textwrap.dedent(
+        """
+        int helper(int op) {
+            int result;
+            switch (op) {
+            case 1:
+                result = 10;
+                break;
+            case 2:
+                result = 20;
+                break;
+            default:
+                result = -1;
+            }
+            return result;
+        }
+        int main() { return helper(1); }
+        """
+    )
+    source, defines, function_defines = preprocess(source_text)
+    raw_tokens = tokenize(source)
+    tokens = apply_defines(defines=defines, function_defines=function_defines, tokens=raw_tokens)
+    ast = Parser(tokens).parse_program()
+    ir_program = ir.Builder().build_program(ast)
+    helper_function = next(function for function in ir_program.functions if function.ast_node.name == "helper")
+    switches = [instruction for instruction in helper_function.body if isinstance(instruction, ir.Switch)]
+    assert len(switches) == 1, f"expected exactly one ir.Switch, got {len(switches)}"
+    switch_instruction = switches[0]
+    assert isinstance(switch_instruction.original_ast, ast_nodes.Switch), "original_ast must be the source AST switch"
+    assert len(switch_instruction.cases) == 3, f"expected 3 cases (2 + default), got {len(switch_instruction.cases)}"
+    case_values = [case.value for case in switch_instruction.cases]
+    assert case_values == [1, 2, None], f"unexpected case values: {case_values}"
+    # Every case body must be a list of IR instructions (not AST nodes).
+    for case in switch_instruction.cases:
+        for entry in case.body:
+            assert not isinstance(entry, ast_nodes.Node), f"case body must contain IR instructions, got AST {type(entry).__name__}"
+    # The break inside an arm body lowers to ir.Jump targeting the switch's end label.
+    case_one_jumps = [entry for entry in switch_instruction.cases[0].body if isinstance(entry, ir.Jump)]
+    assert any(jump.target == switch_instruction.end_label for jump in case_one_jumps), (
+        f"expected break to lower to Jump(target={switch_instruction.end_label}), got jumps {case_one_jumps}"
+    )
+
+
+def test_user_switch_with_goto_out_of_arm_compiles() -> None:
+    """A ``goto`` inside a switch arm jumps to a label in the surrounding function.
+
+    Previously, switch arms were AST-processed (via ``Block(Switch)``),
+    so the user label was registered when the AST codegen walked the
+    arm.  Now arms are IR-lowered: the ``ir.Switch`` instruction holds
+    IR instruction lists that include ``ir.Jump(target='.user_done')``
+    and the matching ``ir.Label`` lives outside the switch.  The
+    compile succeeding (with the right exit label) confirms the
+    IR-level goto target resolution still finds the label.
+    """
+    asm = _user(
+        """
+        int helper(int op) {
+            int result;
+            result = 0;
+            switch (op) {
+            case 1:
+                result = 1;
+                goto done;
+            case 2:
+                result = 2;
+                break;
+            }
+            done:
+            return result;
+        }
+        int main() { return helper(1); }
+        """
+    )
+    assert ".user_done:" in asm, f"expected user-label `.user_done:`:\n{asm}"
+    assert any("jmp .user_done" in line for line in asm.splitlines()), f"expected goto jmp:\n{asm}"
+
+
+def test_user_switch_nested_in_loop_lowers_break_to_switch_end() -> None:
+    """A ``break`` inside a switch nested in a loop exits only the switch.
+
+    With the IR builder generating a fresh end-label per ``ir.Switch``
+    and threading it as ``break_tgt`` while leaving ``cont_tgt`` for
+    the enclosing loop, a ``break`` inside the switch should target the
+    switch's end (not the loop's), and the loop should iterate
+    normally.
+    """
+    asm = _user(
+        """
+        int helper(int limit) {
+            int i;
+            int total;
+            i = 0;
+            total = 0;
+            while (i < limit) {
+                switch (i) {
+                case 0:
+                    total = total + 1;
+                    break;
+                case 1:
+                    total = total + 10;
+                    break;
+                default:
+                    total = total + 100;
+                }
+                i = i + 1;
+            }
+            return total;
+        }
+        int main() { return helper(3); }
+        """
+    )
+    # Both label families must exist; the switch break targets the
+    # switch end and the surrounding loop continues to its own end.
+    assert ".switch_" in asm and "_end" in asm, f"missing switch end label:\n{asm}"
+    assert ".while_" in asm or "._ir_wend" in asm, f"missing while end:\n{asm}"
 
 
 def test_user_switch_rejects_non_constant_case_label() -> None:
