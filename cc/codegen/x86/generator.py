@@ -473,6 +473,24 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return self.target.type_size(base)
         return 1
 
+    @staticmethod
+    def _build_address(base: str, offset: int, /, *, index: str = "") -> str:
+        """Return ``[base+offset+index]``, collapsing zero ``offset``.
+
+        Every NASM memory-operand site that adds a literal byte offset
+        to a base operand (frame slot, register, label) goes through
+        here so the ``[base+0]`` case stays out of the emitted text.
+        ``index`` is appended after ``offset`` for the constant-base /
+        register-index addresses emitted by the ``index_member_*``
+        lowerers (``[label+12+bx]``).
+        """
+        parts = [base]
+        if offset:
+            parts.append(str(offset))
+        if index:
+            parts.append(index)
+        return f"[{'+'.join(parts)}]"
+
     def _bx_holds_pinned_var(self) -> bool:
         """Return True if any variable is auto-pinned to BX/EBX.
 
@@ -2031,7 +2049,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if field_size not in allowed_sizes:
                 message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
                 raise CompileError(message, line=expression.line)
-            addr = f"[{direct_address}+{offset}]" if offset else f"[{direct_address}]"
+            addr = self._build_address(direct_address, offset)
             if info.bit_width is not None:
                 self._emit_bitfield_read(info, addr=addr)
                 return
@@ -2054,7 +2072,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if field_size not in allowed_sizes:
             message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
             raise CompileError(message, line=expression.line)
-        addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
+        addr = self._build_address(base_reg, offset)
         if info.bit_width is not None:
             self._emit_bitfield_read(info, addr=addr)
             return
@@ -2099,7 +2117,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
         self.ax_clear()
         self.generate_expression(statement.expr)
-        addr = f"[{self.target.bx_register}+{offset}]" if offset else f"[{self.target.bx_register}]"
+        addr = self._build_address(self.target.bx_register, offset)
         self._emit_field_store(addr=addr, field_size=field_size)
 
     def _has_remainder(self, left: Node, right: Node, /) -> bool:
@@ -2211,6 +2229,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if ax_resident_uses.get(name, 0) == 0:
             return False
         return isinstance(init_expr.get(name), (Call, Index, BinaryOperation))
+
+    def _load_member_base(self, object_name: str, /) -> str:
+        """Return a base register holding the struct address for ``object_name``.
+
+        When the auto-pin live-range for ``object_name`` is intact and
+        SI/ESI still holds the variable's value, return SI directly —
+        every ``generate_member_*`` lowerer can read fields off it
+        without a fresh load.  Otherwise emit a load into BX/EBX and
+        return that.  Used by the prologue of every member-access /
+        member-assign / member-index lowerer that needs the struct
+        base in a register.
+        """
+        if self.si_local == object_name:
+            return self.target.si_register
+        self._emit_load_var(object_name, register=self.target.bx_register)
+        return self.target.bx_register
 
     def _local_address(self, name: str, /) -> str:
         """Return the memory operand string for a local or global scalar.
@@ -4327,15 +4361,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         is_array_field = field_size != element_size
         if is_array_field:
             # Yield the address of the array member.
-            if field_offset:
-                self.emit(f"        lea {acc}, [{const_base}+{field_offset}+{bx}]")
-            else:
-                self.emit(f"        lea {acc}, [{const_base}+{bx}]")
+            self.emit(f"        lea {acc}, {self._build_address(const_base, field_offset, index=bx)}")
             if protect_bx:
                 self.emit(f"        pop {bx}")
             self.ax_clear()
             return
-        addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
+        addr = self._build_address(const_base, field_offset, index=bx)
         self._emit_field_load(addr=addr, field_size=field_size)
         if protect_bx:
             self.emit(f"        pop {bx}")
@@ -4370,7 +4401,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self._emit_struct_element_offset(statement.index, struct_size)  # BX = i*stride
         self.emit(f"        pop {acc}")  # AX = value
         self.ax_clear()
-        addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
+        addr = self._build_address(const_base, field_offset, index=bx)
         self._emit_field_store(addr=addr, field_size=field_size)
         if protect_bx:
             self.emit(f"        pop {bx}")  # restore pinned var
@@ -4398,7 +4429,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        shl {acc}, 1")  # AX = n*2
         self.emit(f"        pop {bx}")  # BX = i*stride
         self.emit(f"        add {bx}, {acc}")  # BX = i*stride + n*element_size
-        addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
+        addr = self._build_address(const_base, field_offset, index=bx)
         if element_size == 1:
             self.emit_byte_load_zx(addr)
         else:
@@ -4432,7 +4463,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.emit(f"        add {bx}, {acc}")  # BX = i*stride + n*element_size
         self.emit(f"        pop {acc}")  # AX = value
         self.ax_clear()
-        addr = f"[{const_base}+{field_offset}+{bx}]" if field_offset else f"[{const_base}+{bx}]"
+        addr = self._build_address(const_base, field_offset, index=bx)
         if element_size == 1:
             self.emit(f"        mov byte {addr}, al")
         else:
@@ -4502,7 +4533,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if field_size not in allowed_sizes:
                 message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
                 raise CompileError(message, line=expression.line)
-            addr = f"[{base_operand}+{offset}]" if offset else f"[{base_operand}]"
+            addr = self._build_address(base_operand, offset)
             if info.bit_width is not None:
                 self._emit_bitfield_read(info, addr=addr)
                 return
@@ -4525,11 +4556,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # them to memcpy / memcmp, or a function expecting a pointer).
         if is_array_field or is_struct_value:
             self.ax_clear()
-            if self.si_local == object_name:
-                base_reg = self.target.si_register
-            else:
-                self._emit_load_var(object_name, register=self.target.bx_register)
-                base_reg = self.target.bx_register
+            base_reg = self._load_member_base(object_name)
             if offset:
                 self.emit(f"        lea {self.target.acc}, [{base_reg}+{offset}]")
             else:
@@ -4541,12 +4568,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
             raise CompileError(message, line=expression.line)
         self.ax_clear()
-        if self.si_local == object_name:
-            base_reg = self.target.si_register
-        else:
-            self._emit_load_var(object_name, register=self.target.bx_register)
-            base_reg = self.target.bx_register
-        addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
+        base_reg = self._load_member_base(object_name)
+        addr = self._build_address(base_reg, offset)
         if info.bit_width is not None:
             self._emit_bitfield_read(info, addr=addr)
             return
@@ -4651,7 +4674,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             info = layout[statement.member_name]
             offset = info.byte_offset
             field_size = info.field_size
-            addr = f"[{base_operand}+{offset}]" if offset else f"[{base_operand}]"
+            addr = self._build_address(base_operand, offset)
             if info.bit_width is not None:
                 if info.bit_width == 1 and isinstance(statement.expr, Int) and statement.expr.value in (0, 1):
                     self._emit_bitfield_write_literal(info, addr=addr, value=statement.expr.value)
@@ -4695,12 +4718,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # Peephole: 1-bit field with a literal 0 / 1 rhs — no expression
             # evaluation needed, so resolve the base register and addr first.
             if info.bit_width == 1 and isinstance(statement.expr, Int) and statement.expr.value in (0, 1):
-                if self.si_local == object_name:
-                    base_reg = self.target.si_register
-                else:
-                    self._emit_load_var(object_name, register=self.target.bx_register)
-                    base_reg = self.target.bx_register
-                addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
+                base_reg = self._load_member_base(object_name)
+                addr = self._build_address(base_reg, offset)
                 self._emit_bitfield_write_literal(info, addr=addr, value=statement.expr.value)
                 return
             # General read-modify-write.  Evaluate rhs first so that
@@ -4709,12 +4728,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.generate_expression(statement.expr)  # rhs → EAX (low byte = AL)
             # If SI still holds the struct pointer (no intervening call), use it
             # directly as the base register to avoid a BX round-trip.
-            if self.si_local == object_name:
-                base_reg = self.target.si_register
-            else:
-                self._emit_load_var(object_name, register=self.target.bx_register)
-                base_reg = self.target.bx_register
-            addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
+            base_reg = self._load_member_base(object_name)
+            addr = self._build_address(base_reg, offset)
             self._emit_bitfield_write(info, addr=addr)
             return
         allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
@@ -4725,12 +4740,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.generate_expression(statement.expr)
         # If SI still holds the struct pointer (no intervening call), use it
         # directly as the base register to avoid a BX round-trip.
-        if self.si_local == object_name:
-            base_reg = self.target.si_register
-        else:
-            self._emit_load_var(object_name, register=self.target.bx_register)
-            base_reg = self.target.bx_register
-        addr = f"[{base_reg}+{offset}]" if offset else f"[{base_reg}]"
+        base_reg = self._load_member_base(object_name)
+        addr = self._build_address(base_reg, offset)
         self._emit_field_store(addr=addr, field_size=field_size)
 
     def generate_member_index(self, expression: MemberIndex, /) -> None:
@@ -4778,13 +4789,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 base_reg = self.target.bx_register
             if is_pointer_field:
                 # Load pointer, then offset by index*element_size.
-                ptr_addr = f"[{base_reg}+{field_offset}]" if field_offset else f"[{base_reg}]"
+                ptr_addr = self._build_address(base_reg, field_offset)
                 self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
                 disp = expression.index.value * element_size
-                addr = f"[{self.target.bx_register}+{disp}]" if disp else f"[{self.target.bx_register}]"
+                addr = self._build_address(self.target.bx_register, disp)
             else:
                 total_offset = field_offset + expression.index.value * element_size
-                addr = f"[{base_reg}+{total_offset}]" if total_offset else f"[{base_reg}]"
+                addr = self._build_address(base_reg, total_offset)
             emit_load(addr)
             self.ax_clear()
             return
@@ -4801,14 +4812,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self._emit_member_index_base(arrow=expression.arrow, object_name=object_name, register=self.target.bx_register)
         if is_pointer_field:
-            ptr_addr = f"[{self.target.bx_register}+{field_offset}]" if field_offset else f"[{self.target.bx_register}]"
+            ptr_addr = self._build_address(self.target.bx_register, field_offset)
             self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
         self.emit(f"        pop {self.target.acc}")
         self.emit(f"        add {self.target.bx_register}, {self.target.acc}")
         if is_pointer_field:
             addr = f"[{self.target.bx_register}]"
         else:
-            addr = f"[{self.target.bx_register}+{field_offset}]" if field_offset else f"[{self.target.bx_register}]"
+            addr = self._build_address(self.target.bx_register, field_offset)
         emit_load(addr)
         self.ax_clear()
 
@@ -4856,13 +4867,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self._emit_member_index_base(arrow=statement.arrow, object_name=object_name, register=self.target.bx_register)
                 base_reg = self.target.bx_register
             if is_pointer_field:
-                ptr_addr = f"[{base_reg}+{field_offset}]" if field_offset else f"[{base_reg}]"
+                ptr_addr = self._build_address(base_reg, field_offset)
                 self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
                 disp = statement.index.value * element_size
-                addr = f"[{self.target.bx_register}+{disp}]" if disp else f"[{self.target.bx_register}]"
+                addr = self._build_address(self.target.bx_register, disp)
             else:
                 total_offset = field_offset + statement.index.value * element_size
-                addr = f"[{base_reg}+{total_offset}]" if total_offset else f"[{base_reg}]"
+                addr = self._build_address(base_reg, total_offset)
             emit_store(addr)
             self.ax_clear()
             return
@@ -4884,7 +4895,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self._emit_member_index_base(arrow=statement.arrow, object_name=object_name, register=self.target.bx_register)
         if is_pointer_field:
-            ptr_addr = f"[{self.target.bx_register}+{field_offset}]" if field_offset else f"[{self.target.bx_register}]"
+            ptr_addr = self._build_address(self.target.bx_register, field_offset)
             self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
         self.emit(f"        pop {self.target.acc}")  # scaled index
         self.emit(f"        add {self.target.bx_register}, {self.target.acc}")
@@ -4892,7 +4903,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if is_pointer_field:
             addr = f"[{self.target.bx_register}]"
         else:
-            addr = f"[{self.target.bx_register}+{field_offset}]" if field_offset else f"[{self.target.bx_register}]"
+            addr = self._build_address(self.target.bx_register, field_offset)
         emit_store(addr)
         self.ax_clear()
 

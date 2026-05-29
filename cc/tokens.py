@@ -11,6 +11,12 @@ import re
 
 ADDITIVE_OPERATORS = frozenset({"MINUS", "PLUS"})
 
+BITWISE_AND_OPERATORS = frozenset({"AMP"})
+
+BITWISE_OR_OPERATORS = frozenset({"PIPE"})
+
+BITWISE_XOR_OPERATORS = frozenset({"CARET"})
+
 #: Comparison operators as source strings (not token kinds).  Shared
 #: between the parser (deciding when to wrap a bare expression in
 #: ``!= 0``) and the IR builder (deciding which BinaryOperation nodes

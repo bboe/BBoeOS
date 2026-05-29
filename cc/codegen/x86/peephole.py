@@ -993,6 +993,37 @@ class Peepholer:
             del self.lines[i : i + 2]
             i = max(1, i - 1)
 
+    @staticmethod
+    def _match_acc_op(line: str, /, *, register: str) -> tuple[str, str] | None:
+        """Match ``<op> <register>, <operand>`` for arithmetic / bitwise ops.
+
+        ``op`` is one of add / sub / and / or / xor — the five binary
+        operations every :meth:`peephole_memory_arithmetic*` pass scans
+        for between a load and a store.  Returns ``(op, operand)`` on a
+        hit, ``None`` otherwise.
+        """
+        for operation in ("add", "sub", "and", "or", "xor"):
+            prefix = f"{operation} {register}, "
+            if line.startswith(prefix):
+                return operation, line[len(prefix) :]
+        return None
+
+    @staticmethod
+    def _parse_byte_load(line: str, /) -> str | None:
+        """Return the ``[mem]`` source of ``mov al, [mem]``, or ``None``.
+
+        Shared by both passes of :meth:`peephole_memory_arithmetic_byte`,
+        which both scan for the byte-global compound-assign prologue
+        (``mov al, [_g_X] / xor ah, ah / ...``).
+        """
+        prefix = "mov al, "
+        if not line.startswith(prefix):
+            return None
+        source = line[len(prefix) :]
+        if not (source.startswith("[") and source.endswith("]")):
+            return None
+        return source
+
     def _parse_load_acc(self, line: str, /) -> tuple[str, bool] | None:
         """Match ``mov acc, <source>`` where source is memory or a 16-bit GP register.
 
@@ -1063,7 +1094,6 @@ class Peepholer:
         #   mov ax, D / inc ax  / mov D, ax                → inc D
         #   mov ax, D / dec ax  / mov D, ax                → dec D
         #   mov ax, D / (add|sub|and) ax, <reg> / mov D, ax → operation D, <reg>
-        mnemonic_operations = {"add", "sub", "and", "or", "xor"}
         i = 0
         while i < len(self.lines) - 2:
             a = self.lines[i].strip()
@@ -1074,24 +1104,16 @@ class Peepholer:
                 i += 1
                 continue
             source, is_memory = parsed
-            operator = None
-            operand = None
             if b == f"inc {self.target.acc}":
-                operator = "inc"
-                operand = ""
+                operator, operand = "inc", ""
             elif b == f"dec {self.target.acc}":
-                operator = "dec"
-                operand = ""
+                operator, operand = "dec", ""
             else:
-                for operation in mnemonic_operations:
-                    prefix = f"{operation} {self.target.acc}, "
-                    if b.startswith(prefix):
-                        operator = operation
-                        operand = b[len(prefix) :]
-                        break
-            if operator is None:
-                i += 1
-                continue
+                match = self._match_acc_op(b, register=self.target.acc)
+                if match is None:
+                    i += 1
+                    continue
+                operator, operand = match
             # Reject memory operands — would need swapping to ``mov ax, [X] /
             # operation D, ax`` and handled by the next pass instead.
             if operand.startswith("["):
@@ -1127,17 +1149,11 @@ class Peepholer:
                 i += 1
                 continue
             source = parsed[0]
-            operator = None
-            rhs = None
-            for operation in ("add", "sub", "and", "or", "xor"):
-                prefix = f"{operation} {self.target.acc}, "
-                if b.startswith(prefix):
-                    operator = operation
-                    rhs = b[len(prefix) :]
-                    break
-            if operator is None:
+            match = self._match_acc_op(b, register=self.target.acc)
+            if match is None:
                 i += 1
                 continue
+            operator, rhs = match
             if not (rhs.startswith("[") and rhs.endswith("]")):
                 i += 1
                 continue
@@ -1197,18 +1213,14 @@ class Peepholer:
 
         # 4-line pattern without CX intermediate:
         #   mov al, [mem] / xor ah, ah / <operation> ax, <imm|reg> / mov [mem], al
-        single_immediate_operations = {"add", "sub", "and", "or", "xor"}
         i = 0
         while i < len(self.lines) - 3:
             a = self.lines[i].strip()
             b = self.lines[i + 1].strip()
             c = self.lines[i + 2].strip()
             d = self.lines[i + 3].strip()
-            if not a.startswith("mov al, ["):
-                i += 1
-                continue
-            source = a[len("mov al, ") :]
-            if not (source.startswith("[") and source.endswith("]")):
+            source = self._parse_byte_load(a)
+            if source is None:
                 i += 1
                 continue
             if b != "xor ah, ah":
@@ -1225,17 +1237,11 @@ class Peepholer:
                 self.lines[i] = f"        dec byte {source}"
                 del self.lines[i + 1 : i + 4]
                 continue
-            operation_name: str | None = None
-            operand: str | None = None
-            for operation in single_immediate_operations:
-                prefix = f"{operation} ax, "
-                if c.startswith(prefix):
-                    operation_name = operation
-                    operand = c[len(prefix) :]
-                    break
-            if operation_name is None:
+            match = self._match_acc_op(c, register="ax")
+            if match is None:
                 i += 1
                 continue
+            operation_name, operand = match
             if operand.startswith("["):
                 i += 1
                 continue
@@ -1268,11 +1274,8 @@ class Peepholer:
             c = self.lines[i + 2].strip()
             d = self.lines[i + 3].strip()
             e = self.lines[i + 4].strip()
-            if not a.startswith("mov al, ["):
-                i += 1
-                continue
-            source = a[len("mov al, ") :]
-            if not (source.startswith("[") and source.endswith("]")):
+            source = self._parse_byte_load(a)
+            if source is None:
                 i += 1
                 continue
             if b != "xor ah, ah":
