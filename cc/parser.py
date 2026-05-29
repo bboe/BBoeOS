@@ -7,6 +7,8 @@ Consumes the token stream produced by :mod:`cc.lexer` / processed by
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from cc.ast_nodes import (
     AddressOf,
     ArrayDecl,
@@ -76,6 +78,9 @@ from cc.ast_nodes import (
 from cc.errors import CompileError
 from cc.tokens import (
     ADDITIVE_OPERATORS,
+    BITWISE_AND_OPERATORS,
+    BITWISE_OR_OPERATORS,
+    BITWISE_XOR_OPERATORS,
     COMPARISON_OPERATIONS,
     COMPARISON_OPERATORS,
     COMPOUND_ASSIGN_OPERATORS,
@@ -84,6 +89,9 @@ from cc.tokens import (
     TYPE_TOKENS,
 )
 from cc.utils import decode_first_character
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class Parser:
@@ -997,6 +1005,23 @@ class Parser:
         expr = self.parse_expression()
         return IndexAssign(array=Var(line=token[2], name=name), expr=expr, index=index, line=token[2])
 
+    def _parse_left_assoc(self, next_level: Callable[[], Node], operators: frozenset[str], /) -> Node:
+        """Parse a left-associative binary expression that folds via ``fold_binop``.
+
+        Used by every C-precedence rung whose AST shape is just a chain of
+        ``BinaryOperation`` nodes — additive, multiplicative, shift, and
+        the three bitwise operators.  The literal operator string lives
+        in the token's source-text slot (``token[1]``) so the same helper
+        handles ``+``, ``*``, ``<<``, ``&`` etc. without a per-operator
+        branch.
+        """
+        node = next_level()
+        while self.peek()[0] in operators:
+            operator_token = self.eat()
+            right = next_level()
+            node = self.fold_binop(operator_token[1], node, right)
+        return node
+
     def _parse_member_assign_no_semi(self) -> MemberAssign | MemberIndexAssign:
         """Parse ``name (. | ->) member = expr`` or the indexed variant without consuming the trailing semicolon.
 
@@ -1684,12 +1709,7 @@ class Parser:
             An AST node for the additive expression.
 
         """
-        node = self.parse_multiplicative()
-        while self.peek()[0] in ADDITIVE_OPERATORS:
-            operator_token = self.eat()
-            right = self.parse_multiplicative()
-            node = self.fold_binop(operator_token[1], node, right)
-        return node
+        return self._parse_left_assoc(self.parse_multiplicative, ADDITIVE_OPERATORS)
 
     def parse_arguments(self) -> list[Node]:
         """Parse a comma-separated argument list through the closing paren.
@@ -1752,36 +1772,21 @@ class Parser:
             A ``BinaryOperation`` chain or the underlying comparison.
 
         """
-        left = self.parse_comparison()
-        while self.peek()[0] == "AMP":
-            self.eat()
-            right = self.parse_comparison()
-            left = self.fold_binop("&", left, right)
-        return left
+        return self._parse_left_assoc(self.parse_comparison, BITWISE_AND_OPERATORS)
 
     def parse_bitwise_or(self) -> Node:
         """Parse a left-associative bitwise ``|`` expression.
 
         Lower precedence than ``^`` and ``&``, higher than ``&&``.
         """
-        left = self.parse_bitwise_xor()
-        while self.peek()[0] == "PIPE":
-            self.eat()
-            right = self.parse_bitwise_xor()
-            left = self.fold_binop("|", left, right)
-        return left
+        return self._parse_left_assoc(self.parse_bitwise_xor, BITWISE_OR_OPERATORS)
 
     def parse_bitwise_xor(self) -> Node:
         """Parse a left-associative bitwise ``^`` expression.
 
         Lower precedence than ``&``, higher than ``|``.
         """
-        left = self.parse_bitwise_and()
-        while self.peek()[0] == "CARET":
-            self.eat()
-            right = self.parse_bitwise_and()
-            left = self.fold_binop("^", left, right)
-        return left
+        return self._parse_left_assoc(self.parse_bitwise_and, BITWISE_XOR_OPERATORS)
 
     def parse_block(self) -> list[Node]:
         """Parse statements until a closing brace and consume it.
@@ -2024,12 +2029,7 @@ class Parser:
             An AST node for the multiplicative expression.
 
         """
-        node = self.parse_primary()
-        while self.peek()[0] in MULTIPLICATIVE_OPERATORS:
-            operator_token = self.eat()
-            right = self.parse_primary()
-            node = self.fold_binop(operator_token[1], node, right)
-        return node
+        return self._parse_left_assoc(self.parse_primary, MULTIPLICATIVE_OPERATORS)
 
     def parse_parameter(self) -> Param:
         """Parse a single function parameter.
@@ -2312,12 +2312,7 @@ class Parser:
         Higher precedence than comparison, lower than additive — matches
         C's precedence order.
         """
-        node = self.parse_additive()
-        while self.peek()[0] in SHIFT_OPERATORS:
-            operator_token = self.eat()
-            right = self.parse_additive()
-            node = self.fold_binop(operator_token[1], node, right)
-        return node
+        return self._parse_left_assoc(self.parse_additive, SHIFT_OPERATORS)
 
     def parse_sizeof(self) -> Node:
         """Parse a sizeof expression.
