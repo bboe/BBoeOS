@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate user/libbboeos/libbboeos_stubs.S from kernel/include/constants.asm.
+"""Generate user/libbboeos/libbboeos_stubs.asm from kernel/include/constants.asm.
 
 Emits a tiny `jmp [FUNCTION_<NAME>_PTR]` thunk per libbboeos C export.
 Clang-built userland programs (the out-of-tree ports/doom build)
@@ -25,15 +25,17 @@ import re
 import sys
 from pathlib import Path
 
-ASSIGN = re.compile(r"^\s*%assign\s+(?P<name>\w+)\s+(?P<value>.+?)\s*(?:;.*)?$")
-PROTOTYPE = re.compile(
+RE_ASM_HEX = re.compile(r"\b([0-9A-Fa-f]+)h\b")
+RE_ASSIGN = re.compile(r"^\s*%assign\s+(?P<name>\w+)\s+(?P<value>.+?)\s*(?:;.*)?$")
+RE_PROTOTYPE = re.compile(
     r"^[\w\s\*]+?\b(\w+)\s*\(([^)]*)\)\s*;",
     re.MULTILINE,
 )
+RE_TOKENS = re.compile(r"\w+|[+\-*/()]")
 
 REPO = Path(__file__).resolve().parent.parent
-DESTINATION = REPO / "user" / "libbboeos" / "libbboeos_stubs.asm"
 INCLUDE_DIRECTORY = REPO / "user" / "libbboeos" / "include"
+DESTINATION = REPO / "user" / "libbboeos" / "libbboeos_stubs.asm"
 SOURCE = REPO / "kernel" / "include" / "constants.asm"
 
 
@@ -44,26 +46,22 @@ def _collect_function_constants() -> dict[str, int]:
     looping until a pass adds nothing new.  NASM hex literals (`0x...` or
     trailing `h`) and decimal integers are accepted.
     """
-    raw: dict[str, str] = {}
+    initial_values: dict[str, str] = {}
     for line in SOURCE.read_text().splitlines():
-        match = ASSIGN.match(line)
-        if match is None:
+        if (match := RE_ASSIGN.match(line)) is None:
             continue
-        raw[match.group("name")] = match.group("value").strip()
-    resolved: dict[str, int] = {}
-    while True:
+        initial_values[match.group("name")] = match.group("value").strip()
+
+    progress = True
+    resolved_values: dict[str, int] = {}
+    while progress:
         progress = False
-        for name, value in raw.items():
-            if name in resolved:
+        for name, value in initial_values.items():
+            if name in resolved_values or (integer := _try_evaluate(resolved_values=resolved_values, value=value)) is None:
                 continue
-            integer = _try_evaluate(value=value, environment=resolved)
-            if integer is None:
-                continue
-            resolved[name] = integer
             progress = True
-        if not progress:
-            break
-    return {name: value for name, value in resolved.items() if name.startswith("FUNCTION_")}
+            resolved_values[name] = integer
+    return {name: value for name, value in resolved_values.items() if name.startswith("FUNCTION_")}
 
 
 def _collect_prototype_parameter_counts() -> dict[str, int | None]:
@@ -74,7 +72,7 @@ def _collect_prototype_parameter_counts() -> dict[str, int | None]:
     """
     result: dict[str, int | None] = {}
     for header in sorted(INCLUDE_DIRECTORY.glob("*.h")):
-        for match in PROTOTYPE.finditer(header.read_text()):
+        for match in RE_PROTOTYPE.finditer(header.read_text()):
             name = match.group(1)
             parameters = match.group(2).strip()
             if "..." in parameters:
@@ -125,19 +123,17 @@ def _render_stubs(*, exports: list[tuple[str, int, int | None]]) -> str:
     return "\n".join(lines)
 
 
-def _try_evaluate(*, environment: dict[str, int], value: str) -> int | None:
+def _try_evaluate(*, resolved_values: dict[str, int], value: str) -> int | None:
     """Try to evaluate a NASM `%assign` RHS using already-resolved names.
 
     Returns None if any token references an unresolved name.
     """
-    normalized = re.sub(r"\b([0-9A-Fa-f]+)h\b", r"0x\1", value)
-    tokens = re.findall(r"\w+|[+\-*/()]", normalized)
     expression_parts: list[str] = []
-    for token in tokens:
+    for token in RE_TOKENS.findall(RE_ASM_HEX.sub(r"0x\1", value)):
         if re.fullmatch(r"\w+", token) and not re.fullmatch(r"(?:0x[0-9a-fA-F]+|[0-9]+)", token):
-            if token not in environment:
+            if token not in resolved_values:
                 return None
-            expression_parts.append(str(environment[token]))
+            expression_parts.append(str(resolved_values[token]))
         else:
             expression_parts.append(token)
     try:
@@ -147,29 +143,26 @@ def _try_evaluate(*, environment: dict[str, int], value: str) -> int | None:
 
 
 def main() -> int:
-    """Regenerate libbboeos_stubs.S from constants.asm; idempotent."""
-    constants = _collect_function_constants()
+    """Regenerate libbboeos_stubs.asm from constants.asm; idempotent."""
     exports: list[tuple[str, int]] = []
-    for full_name, address in constants.items():
-        if not full_name.endswith("_PTR"):
+    function_constants = _collect_function_constants()
+    for name, address in function_constants.items():
+        if not name.endswith("_PTR"):
             continue
-        base = full_name[len("FUNCTION_") : -len("_PTR")]
-        legacy = f"FUNCTION_{base}"
-        if legacy in constants:
+        base = name[len("FUNCTION_") : -len("_PTR")]
+        if f"FUNCTION_{base}" in function_constants:
             continue
         exports.append((base, address))
-    exports.sort()
 
-    prototypes = _collect_prototype_parameter_counts()
     exports_with_parameters: list[tuple[str, int, int | None]] = []
-    for name, address in exports:
-        parameter_count = prototypes.get(name.lower())
-        exports_with_parameters.append((name, address, parameter_count))
+    prototypes = _collect_prototype_parameter_counts()
+    for name, address in sorted(exports):
+        exports_with_parameters.append((name, address, prototypes[name.lower()]))
 
-    new = _render_stubs(exports=exports_with_parameters)
-    if DESTINATION.exists() and DESTINATION.read_text() == new:
+    output = _render_stubs(exports=exports_with_parameters)
+    if DESTINATION.exists() and DESTINATION.read_text() == output:
         return 0
-    DESTINATION.write_text(new)
+    DESTINATION.write_text(output)
     print(f"wrote {DESTINATION.relative_to(REPO)} ({len(exports)} stubs)", file=sys.stderr)
     return 0
 
