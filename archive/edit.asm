@@ -583,20 +583,36 @@ move_down:
         push eax
         push ebx
         push ecx
+        push edx
         mov ecx, [cursor_column]   ; target column
+        xor edx, edx               ; chars advanced while scanning for \n
         ;; Advance past chars until we hit a newline (or end of buffer)
         .to_newline:
         mov ebx, [gap_end]
         cmp ebx, EDIT_BUFFER_SIZE
-        jae .done               ; at end of buffer
+        jae .rewind             ; last line, no \n ahead: undo and stay put
         mov al, [EDIT_BUFFER_BASE + ebx]
         mov ebx, [gap_start]
         mov [EDIT_BUFFER_BASE + ebx], al
         inc dword [gap_start]
         inc dword [gap_end]
+        inc edx
         cmp al, 0Ah
         je .found_newline
         jmp .to_newline
+        .rewind:
+        ;; No following newline — slide the gap back the edx chars we
+        ;; advanced so the insertion point stays where the cursor is drawn.
+        test edx, edx
+        jz .done
+        mov ebx, [gap_start]
+        mov al, [EDIT_BUFFER_BASE + ebx - 1]
+        mov ebx, [gap_end]
+        mov [EDIT_BUFFER_BASE + ebx - 1], al
+        dec dword [gap_start]
+        dec dword [gap_end]
+        dec edx
+        jmp .rewind
         .found_newline:
         inc dword [cursor_line]
         mov dword [cursor_column], 0
@@ -619,6 +635,7 @@ move_down:
         dec ecx
         jmp .forward
         .done:
+        pop edx
         pop ecx
         pop ebx
         pop eax
