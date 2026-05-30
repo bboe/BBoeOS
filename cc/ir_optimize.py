@@ -78,7 +78,7 @@ _NON_TAIL_CALLABLE_NAMES = frozenset({"asm"})
 _TEMP_PREFIX = "_ir_"
 
 
-def _branch_target(instruction: ir.Instruction) -> str | None:
+def _branch_target(instruction: ir.Instruction, /) -> str | None:
     """Return the destination label of a control-transfer instruction, else None.
 
     ``Jump`` / ``BranchFalse`` / ``CarryBranch`` all carry a ``target``
@@ -90,7 +90,7 @@ def _branch_target(instruction: ir.Instruction) -> str | None:
     return None
 
 
-def _evaluate_constant_comparison(left: int, operation: str, right: int) -> bool | None:
+def _evaluate_constant_comparison(*, left: int, operation: str, right: int) -> bool | None:
     """Return the truth value of a comparison when both sides are integer literals.
 
     Only ``==`` / ``!=`` are evaluated (see :data:`_FOLDABLE_COMPARISON_OPS`);
@@ -104,7 +104,7 @@ def _evaluate_constant_comparison(left: int, operation: str, right: int) -> bool
     return None
 
 
-def _fold_binary_operation(instruction: ir.BinaryOperation) -> ir.Copy | None:
+def _fold_binary_operation(instruction: ir.BinaryOperation, /) -> ir.Copy | None:
     """Constant-fold a ``BinaryOperation`` whose operands are both int; else None.
 
     Only the operations in :data:`_FOLDABLE_BINARY_OPS` are evaluated.
@@ -131,7 +131,7 @@ def _fold_binary_operation(instruction: ir.BinaryOperation) -> ir.Copy | None:
     return ir.Copy(destination=instruction.destination, source=result)
 
 
-def _has_side_effects(instruction: ir.Instruction) -> bool:
+def _has_side_effects(instruction: ir.Instruction, /) -> bool:
     """Return True when *instruction* must not be removed even with a dead destination."""
     return isinstance(
         instruction,
@@ -151,7 +151,7 @@ def _has_side_effects(instruction: ir.Instruction) -> bool:
     )
 
 
-def _instruction_destination(instruction: ir.Instruction) -> str | None:
+def _instruction_destination(instruction: ir.Instruction, /) -> str | None:
     """Return the destination name written by *instruction*, or None.
 
     ``Call.destination`` is ``None`` when the return value is discarded.
@@ -164,7 +164,7 @@ def _instruction_destination(instruction: ir.Instruction) -> str | None:
     return None
 
 
-def _instruction_value_operands(instruction: ir.Instruction) -> tuple[ir.Value, ...]:
+def _instruction_value_operands(instruction: ir.Instruction, /) -> tuple[ir.Value, ...]:
     """Return the *non-destination* ``Value`` operands read by *instruction*.
 
     ``Index.base`` / ``IndexAssign.base`` are variable-name strings
@@ -188,7 +188,7 @@ def _instruction_value_operands(instruction: ir.Instruction) -> tuple[ir.Value, 
     return ()
 
 
-def _is_tail_callable_name(name: str) -> bool:
+def _is_tail_callable_name(name: str, /) -> bool:
     """Return True if a call to *name* is safe to lower as a tail-call.
 
     Conservative: rejects ``asm`` (no standard register convention) and any
@@ -198,17 +198,17 @@ def _is_tail_callable_name(name: str) -> bool:
     return name not in _NON_TAIL_CALLABLE_NAMES and not name.startswith("_")
 
 
-def _is_temp(value: object) -> bool:
+def _is_temp(value: object, /) -> bool:
     """Return True if *value* names a compiler-generated single-assignment temp."""
     return isinstance(value, str) and value.startswith(_TEMP_PREFIX)
 
 
-def _is_unconditional_transfer(instruction: ir.Instruction) -> bool:
+def _is_unconditional_transfer(instruction: ir.Instruction, /) -> bool:
     """Return True if control cannot fall through *instruction* to the next."""
     return isinstance(instruction, (ir.Jump, ir.Return, ir.TailCall))
 
 
-def _iter_ast_goto_targets(node: object) -> Iterator[str]:
+def _iter_ast_goto_targets(node: object, /) -> Iterator[str]:
     """Yield every IR-form label name targeted by an AST ``Goto`` in *node*'s subtree.
 
     AST gotos lower to ``Jump(target=".user_<name>")`` when walked by the IR
@@ -234,7 +234,7 @@ def _iter_ast_goto_targets(node: object) -> Iterator[str]:
             yield from _iter_ast_goto_targets(item)
 
 
-def _iter_ast_var_names(node: object) -> Iterator[str]:
+def _iter_ast_var_names(node: object, /) -> Iterator[str]:
     """Yield every ``Var.name`` appearing anywhere in the AST subtree at *node*.
 
     Walks dataclass fields, lists, and tuples recursively.  Used to detect
@@ -257,7 +257,7 @@ def _iter_ast_var_names(node: object) -> Iterator[str]:
             yield from _iter_ast_var_names(item)
 
 
-def _next_non_metadata_index(body: list[ir.Instruction], start: int) -> int | None:
+def _next_non_metadata_index(*, body: list[ir.Instruction], start: int) -> int | None:
     """Return the index of the first instruction at or after *start* that's not ``LoopBoundary``.
 
     ``LoopBoundary`` is emission metadata for resolving ``Continue`` /
@@ -345,7 +345,7 @@ class Optimizer:
     function body is optimized independently — no inter-procedural state.
     """
 
-    def optimize(self, program: ir.Program) -> ir.Program:
+    def optimize(self, program: ir.Program, /) -> ir.Program:
         """Return a new ``Program`` with each function body optimized in place.
 
         Globals are passed through unchanged.  Each :class:`ir.Function`
@@ -365,7 +365,7 @@ class Optimizer:
         return ir.Program(functions=optimized_functions, globals=program.globals)
 
     @staticmethod
-    def _collapse_jump_to_next_label(body: list[ir.Instruction]) -> list[ir.Instruction]:
+    def _collapse_jump_to_next_label(body: list[ir.Instruction], /) -> list[ir.Instruction]:
         """Drop ``Jump(L)`` when the next real instruction is ``Label(L)``.
 
         ``LoopBoundary`` between the ``Jump`` and the ``Label`` is metadata
@@ -380,7 +380,7 @@ class Optimizer:
                 result.append(instruction)
                 index += 1
                 continue
-            next_index = _next_non_metadata_index(body, index + 1)
+            next_index = _next_non_metadata_index(body=body, start=index + 1)
             if next_index is None or not isinstance(body[next_index], ir.Label):
                 result.append(instruction)
                 index += 1
@@ -395,7 +395,7 @@ class Optimizer:
         return result
 
     @classmethod
-    def _collect_all_label_references(cls, body: list[ir.Instruction]) -> set[str]:
+    def _collect_all_label_references(cls, body: list[ir.Instruction], /) -> set[str]:
         """Return every label name referenced anywhere reachable from *body*.
 
         Recurses into ``ir.Switch.cases[].body`` so the optimizer's
@@ -413,7 +413,7 @@ class Optimizer:
         return referenced
 
     @staticmethod
-    def _collect_ast_goto_targets(body: list[ir.Instruction]) -> set[str]:
+    def _collect_ast_goto_targets(body: list[ir.Instruction], /) -> set[str]:
         """Return the set of IR labels (``.user_<name>``) referenced by Block-buried Gotos."""
         targets: set[str] = set()
         for instruction in body:
@@ -424,7 +424,7 @@ class Optimizer:
         return targets
 
     @staticmethod
-    def _compute_use_counts(body: list[ir.Instruction]) -> dict[str, int]:
+    def _compute_use_counts(body: list[ir.Instruction], /) -> dict[str, int]:
         """Count every read of every name across the function body.
 
         Reads include: ``Value`` operands (literals are skipped because
@@ -449,7 +449,7 @@ class Optimizer:
         return counts
 
     @staticmethod
-    def _count_definitions(body: list[ir.Instruction]) -> dict[str, int]:
+    def _count_definitions(body: list[ir.Instruction], /) -> dict[str, int]:
         """Return ``{name: def_count}`` covering every ``destination`` in *body*.
 
         Used by :meth:`_propagate` to exclude multi-def temps from
@@ -465,7 +465,7 @@ class Optimizer:
                 counts[destination] = counts.get(destination, 0) + 1
         return counts
 
-    def _dead_code_elimination(self, body: list[ir.Instruction]) -> list[ir.Instruction]:
+    def _dead_code_elimination(self, body: list[ir.Instruction], /) -> list[ir.Instruction]:
         """Drop side-effect-free instructions whose destination temp has zero remaining uses.
 
         ``Call`` is kept (it may have side effects) but its ``destination``
@@ -493,7 +493,7 @@ class Optimizer:
             # result no one reads.  Drop entirely.
         return result
 
-    def _eliminate_dead_labels(self, body: list[ir.Instruction]) -> list[ir.Instruction]:
+    def _eliminate_dead_labels(self, body: list[ir.Instruction], /) -> list[ir.Instruction]:
         """Drop ``Label`` instructions that no branch (IR or AST-via-Block) targets.
 
         Removing a label cannot change semantics because nothing branches
@@ -516,7 +516,7 @@ class Optimizer:
         return [instruction for instruction in body if not (isinstance(instruction, ir.Label) and instruction.name not in referenced)]
 
     @staticmethod
-    def _eliminate_tail_calls(body: list[ir.Instruction]) -> list[ir.Instruction]:
+    def _eliminate_tail_calls(body: list[ir.Instruction], /) -> list[ir.Instruction]:
         """Rewrite ``Call(destination=t) ; Return(value=t)`` as a single ``TailCall``.
 
         Fires only when the temp ``t`` has exactly one downstream use
@@ -543,7 +543,7 @@ class Optimizer:
                 and _is_temp(instruction.destination)
                 and _is_tail_callable_name(instruction.name)
             ):
-                return_index = _next_non_metadata_index(body, index + 1)
+                return_index = _next_non_metadata_index(body=body, start=index + 1)
                 if return_index is not None:
                     following = body[return_index]
                     if (
@@ -560,7 +560,7 @@ class Optimizer:
         return result
 
     @staticmethod
-    def _eliminate_unreachable_code(body: list[ir.Instruction]) -> list[ir.Instruction]:
+    def _eliminate_unreachable_code(body: list[ir.Instruction], /) -> list[ir.Instruction]:
         """Drop instructions strictly after an unconditional transfer until the next label.
 
         After ``Jump`` or ``Return`` control cannot reach the following
@@ -586,7 +586,7 @@ class Optimizer:
         return result
 
     @staticmethod
-    def _fold_constant_branches(body: list[ir.Instruction]) -> list[ir.Instruction]:
+    def _fold_constant_branches(body: list[ir.Instruction], /) -> list[ir.Instruction]:
         """Collapse ``BranchFalse`` whose operands are both integer literals.
 
         * Condition evaluates to **true** → the false-branch is never taken;
@@ -605,7 +605,7 @@ class Optimizer:
             if not isinstance(instruction.left, int) or not isinstance(instruction.right, int):
                 result.append(instruction)
                 continue
-            value = _evaluate_constant_comparison(instruction.left, instruction.operation, instruction.right)
+            value = _evaluate_constant_comparison(left=instruction.left, operation=instruction.operation, right=instruction.right)
             if value is None:
                 result.append(instruction)
                 continue
@@ -616,7 +616,7 @@ class Optimizer:
             result.append(ir.Jump(target=instruction.target))
         return result
 
-    def _forward_trivial_labels(self, body: list[ir.Instruction]) -> list[ir.Instruction]:
+    def _forward_trivial_labels(self, body: list[ir.Instruction], /) -> list[ir.Instruction]:
         """Redirect branches through ``Label(L1)`` immediately followed by ``Jump(L2)``.
 
         For every branch (``Jump`` / ``BranchFalse`` / ``CarryBranch``) whose
@@ -639,7 +639,7 @@ class Optimizer:
                 continue
             if instruction.name in ast_referenced_labels:
                 continue
-            next_index = _next_non_metadata_index(body, index + 1)
+            next_index = _next_non_metadata_index(body=body, start=index + 1)
             if next_index is None:
                 continue
             successor = body[next_index]
@@ -653,7 +653,7 @@ class Optimizer:
             return body
         # Resolve chains: if L1 -> L2 -> L3, both should ultimately point at L3.
 
-        def _resolve(label: str) -> str:
+        def _resolve(label: str, /) -> str:
             seen: set[str] = set()
             current = label
             while current in trampoline_target and current not in seen:
@@ -675,7 +675,7 @@ class Optimizer:
         return result
 
     @staticmethod
-    def _invert_branch_over_jump(body: list[ir.Instruction]) -> list[ir.Instruction]:
+    def _invert_branch_over_jump(body: list[ir.Instruction], /) -> list[ir.Instruction]:
         """Collapse ``BranchFalse(L1) ; Jump(L2) ; Label(L1)`` to ``BranchFalse_inv(L2) ; Label(L1)``.
 
         Eliminates the intermediate ``Jump`` by inverting the branch's
@@ -692,12 +692,12 @@ class Optimizer:
                 result.append(instruction)
                 index += 1
                 continue
-            jump_index = _next_non_metadata_index(body, index + 1)
+            jump_index = _next_non_metadata_index(body=body, start=index + 1)
             if jump_index is None or not isinstance(body[jump_index], ir.Jump):
                 result.append(instruction)
                 index += 1
                 continue
-            label_index = _next_non_metadata_index(body, jump_index + 1)
+            label_index = _next_non_metadata_index(body=body, start=jump_index + 1)
             if label_index is None or not isinstance(body[label_index], ir.Label):
                 result.append(instruction)
                 index += 1
@@ -756,7 +756,7 @@ class Optimizer:
             current = self._eliminate_unreachable_code(current)
         return current
 
-    def _propagate(self, body: list[ir.Instruction]) -> list[ir.Instruction]:
+    def _propagate(self, body: list[ir.Instruction], /) -> list[ir.Instruction]:
         """Apply one forward pass of copy + constant propagation, then constant folding.
 
         Walks *body* once.  For every ``Copy(destination=tempN, source=value)``
@@ -797,7 +797,7 @@ class Optimizer:
                     result[index] = folded
         return result
 
-    def _simplify_control_flow(self, body: list[ir.Instruction]) -> list[ir.Instruction]:
+    def _simplify_control_flow(self, body: list[ir.Instruction], /) -> list[ir.Instruction]:
         """Apply the IR-level CFG passes in dependency order.
 
         1. Fold constant-condition branches to expose dead arms.
