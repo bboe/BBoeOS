@@ -14,8 +14,8 @@ time.
 ### Fixed
 
 - **Linker dropped relocation addends (`ccld.py` / `pack-ccobj`).** An object-
-  pipeline program that referenced a global at a constant displacement — `buf[i
-  - 1]` compiles to `[buf-1+esi]` — was relinked as `buf[i]`: the linker
+  pipeline program that referenced a global at a constant displacement —
+  `buf[i-1]` compiles to `[buf-1+esi]` — was relinked as `buf[i]`: the linker
   overwrote the displacement with the bare symbol address and discarded the `-1`
   NASM baked into the placeholder.  `pack-ccobj` now records the addend
   (`placeholder − symbol_offset`) for each bracket relocation and `ccld.py`
