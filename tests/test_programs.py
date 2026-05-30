@@ -1111,6 +1111,43 @@ def _build_os(*, block_size: int, filesystem: str, large_file: bool, temporary_d
         _ext2_add_large_test_file(image=image)
 
 
+def _run_suite(
+    *,
+    fail_fast: bool,
+    filesystem: str,
+    floppy: bool,
+    label: str,
+    tests: list[ProgramTest],
+    temporary_directory: Path,
+) -> tuple[int, int, list[str]]:
+    """Run a list of ProgramTests; return (pass_count, fail_count, failed_names)."""
+    pass_count = 0
+    fail_count = 0
+    failed: list[str] = []
+    for test in tests:
+        display_name = f"{label}{test.name}" if label else test.name
+        if test.skip is not None:
+            print(f"  SKIP  {display_name:<24} ({test.skip})")
+            continue
+        ok, message, boot_time, command_time = _run_test(
+            filesystem=filesystem,
+            floppy=floppy,
+            temporary_directory=temporary_directory,
+            test=test,
+        )
+        timing = f"boot {boot_time:.2f}s  cmd {command_time:.2f}s"
+        if ok:
+            print(f"  PASS  {display_name:<24}              {timing}")
+            pass_count += 1
+        else:
+            print(f"  FAIL  {display_name:<24}  {message}   {timing}")
+            fail_count += 1
+            failed.append(display_name)
+            if fail_fast:
+                break
+    return pass_count, fail_count, failed
+
+
 def _run_test(*, filesystem: str, floppy: bool, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str, float, float]:
     """Run one ProgramTest; return (passed, message, boot_time, command_time).
 
@@ -1151,43 +1188,6 @@ def _run_test(*, filesystem: str, floppy: bool, temporary_directory: Path, test:
         if fsck_error:
             failures.append(f"fsck: {fsck_error}")
     return (not failures), "; ".join(failures), result.boot_time, command_time
-
-
-def _run_suite(
-    *,
-    fail_fast: bool,
-    filesystem: str,
-    floppy: bool,
-    label: str,
-    tests: list[ProgramTest],
-    temporary_directory: Path,
-) -> tuple[int, int, list[str]]:
-    """Run a list of ProgramTests; return (pass_count, fail_count, failed_names)."""
-    pass_count = 0
-    fail_count = 0
-    failed: list[str] = []
-    for test in tests:
-        display_name = f"{label}{test.name}" if label else test.name
-        if test.skip is not None:
-            print(f"  SKIP  {display_name:<24} ({test.skip})")
-            continue
-        ok, message, boot_time, command_time = _run_test(
-            filesystem=filesystem,
-            floppy=floppy,
-            temporary_directory=temporary_directory,
-            test=test,
-        )
-        timing = f"boot {boot_time:.2f}s  cmd {command_time:.2f}s"
-        if ok:
-            print(f"  PASS  {display_name:<24}              {timing}")
-            pass_count += 1
-        else:
-            print(f"  FAIL  {display_name:<24}  {message}   {timing}")
-            fail_count += 1
-            failed.append(display_name)
-            if fail_fast:
-                break
-    return pass_count, fail_count, failed
 
 
 def main() -> int:

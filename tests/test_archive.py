@@ -66,24 +66,6 @@ class Expected:
     delta: int
 
 
-def parse_readme_table(*, readme: Path) -> dict[str, Expected]:
-    """Return a mapping of program name -> Expected row from the README."""
-    rows: dict[str, Expected] = {}
-    for line in readme.read_text(encoding="utf-8").splitlines():
-        match = TABLE_ROW.match(line)
-        if match is None:
-            continue
-        if match.group("name") == "Program":
-            continue
-        rows[match.group("name")] = Expected(
-            asm_16=int(match.group("asm_16")),
-            asm=int(match.group("asm")),
-            c=int(match.group("c")),
-            delta=int(match.group("delta")),
-        )
-    return rows
-
-
 def assemble(*, source: Path, output: Path) -> tuple[bool, str]:
     """Run nasm on *source* writing to *output*.  Return (ok, stderr)."""
     result = subprocess.run(
@@ -102,20 +84,6 @@ def assemble(*, source: Path, output: Path) -> tuple[bool, str]:
         text=True,
     )
     return result.returncode == 0, result.stderr.strip()
-
-
-def compile_c(*, source: Path, output: Path, scratch: Path) -> tuple[bool, str]:
-    """Run cc.py + nasm on *source*, writing the binary to *output*."""
-    asm_path = scratch / f"{source.stem}.asm"
-    result = subprocess.run(
-        [sys.executable, str(CC_PY), str(source), str(asm_path)],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    if result.returncode != 0:
-        return False, f"cc.py failed: {result.stderr.strip() or result.stdout.strip()}"
-    return assemble(source=asm_path, output=output)
 
 
 def check_program(*, name: str, expected: Expected | None, scratch: Path) -> tuple[bool, str]:
@@ -147,6 +115,20 @@ def check_program(*, name: str, expected: Expected | None, scratch: Path) -> tup
     if problems:
         return False, "size drift: " + ", ".join(problems)
     return True, f"asm={actual_asm} c={actual_c} Δ={actual_delta:+d}"
+
+
+def compile_c(*, source: Path, output: Path, scratch: Path) -> tuple[bool, str]:
+    """Run cc.py + nasm on *source*, writing the binary to *output*."""
+    asm_path = scratch / f"{source.stem}.asm"
+    result = subprocess.run(
+        [sys.executable, str(CC_PY), str(source), str(asm_path)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False, f"cc.py failed: {result.stderr.strip() or result.stdout.strip()}"
+    return assemble(source=asm_path, output=output)
 
 
 def main() -> int:
@@ -191,6 +173,24 @@ def main() -> int:
     if fail_count:
         print("Failed:", " ".join(failed))
     return 1 if fail_count else 0
+
+
+def parse_readme_table(*, readme: Path) -> dict[str, Expected]:
+    """Return a mapping of program name -> Expected row from the README."""
+    rows: dict[str, Expected] = {}
+    for line in readme.read_text(encoding="utf-8").splitlines():
+        match = TABLE_ROW.match(line)
+        if match is None:
+            continue
+        if match.group("name") == "Program":
+            continue
+        rows[match.group("name")] = Expected(
+            asm_16=int(match.group("asm_16")),
+            asm=int(match.group("asm")),
+            c=int(match.group("c")),
+            delta=int(match.group("delta")),
+        )
+    return rows
 
 
 if __name__ == "__main__":

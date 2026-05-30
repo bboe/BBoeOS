@@ -63,117 +63,6 @@ def _parse_function_body(source: str, /) -> list:
     return ast.functions[0].body
 
 
-# --- Lexer ---------------------------------------------------------------
-
-
-def test_lexer_emits_question_and_colon_tokens() -> None:
-    """``?`` and ``:`` produce QUESTION / COLON tokens."""
-    tokens = tokenize("a ? b : c")
-    kinds = [kind for kind, _text, _line in tokens]
-    assert "QUESTION" in kinds
-    assert "COLON" in kinds
-
-
-# --- Parser --------------------------------------------------------------
-
-
-def test_parser_builds_conditional_node() -> None:
-    """A simple ternary parses as a ``Conditional`` AST node."""
-    body = _parse_function_body("""
-        int main(int argc, char *argv[]) {
-            int x = argc > 0 ? 1 : 2;
-            return x;
-        }
-    """)
-    declaration = body[0]
-    assert isinstance(declaration, VarDecl)
-    initializer = declaration.init
-    assert isinstance(initializer, Conditional)
-    assert isinstance(initializer.condition, BinaryOperation)
-    assert initializer.condition.operation == ">"
-    assert isinstance(initializer.then_expr, Int)
-    assert initializer.then_expr.value == 1
-    assert isinstance(initializer.else_expr, Int)
-    assert initializer.else_expr.value == 2
-
-
-def test_parser_is_right_associative() -> None:
-    """``a ? b : c ? d : e`` parses as ``a ? b : (c ? d : e)``."""
-    body = _parse_function_body("""
-        int main(int argc, char *argv[]) {
-            int x = argc ? 1 : argc ? 2 : 3;
-            return x;
-        }
-    """)
-    initializer = body[0].init
-    assert isinstance(initializer, Conditional)
-    # Right-associative: the else-branch is the *inner* conditional.
-    assert isinstance(initializer.else_expr, Conditional)
-    # And the then-branch of the *outer* conditional is a leaf.
-    assert isinstance(initializer.then_expr, Int)
-    inner = initializer.else_expr
-    assert isinstance(inner.then_expr, Int)
-    assert inner.then_expr.value == 2
-    assert isinstance(inner.else_expr, Int)
-    assert inner.else_expr.value == 3
-
-
-def test_parser_equality_binds_tighter_than_ternary() -> None:
-    """``a == b ? c : d`` parses with ``==`` inside the condition."""
-    body = _parse_function_body("""
-        int main(int argc, char *argv[]) {
-            int x = argc == 1 ? 10 : 20;
-            return x;
-        }
-    """)
-    initializer = body[0].init
-    assert isinstance(initializer, Conditional)
-    assert isinstance(initializer.condition, BinaryOperation)
-    assert initializer.condition.operation == "=="
-
-
-def test_parser_logical_or_binds_tighter_than_ternary() -> None:
-    """``a || b ? c : d`` parses with ``||`` inside the condition."""
-    body = _parse_function_body("""
-        int main(int argc, char *argv[]) {
-            int x = argc || 1 ? 10 : 20;
-            return x;
-        }
-    """)
-    initializer = body[0].init
-    assert isinstance(initializer, Conditional)
-    assert isinstance(initializer.condition, LogicalOr)
-
-
-def test_parser_ternary_inside_parens_then_arithmetic() -> None:
-    """``(a ? b : c) + 1`` puts the conditional inside a BinaryOperation."""
-    body = _parse_function_body("""
-        int main(int argc, char *argv[]) {
-            int x = (argc ? 10 : 20) + 1;
-            return x;
-        }
-    """)
-    initializer = body[0].init
-    assert isinstance(initializer, BinaryOperation)
-    assert initializer.operation == "+"
-    assert isinstance(initializer.left, Conditional)
-    assert isinstance(initializer.right, Int)
-    assert initializer.right.value == 1
-
-
-def test_parser_unterminated_ternary_raises() -> None:
-    """A ``?`` without a matching ``:`` raises a parser error."""
-    source = """
-        int main(int argc, char *argv[]) {
-            int x = argc ? 1;
-            return x;
-        }
-    """
-    tokens = tokenize(textwrap.dedent(source))
-    with pytest.raises(CompileError, match="COLON"):
-        Parser(tokens).parse_program()
-
-
 # --- Codegen -------------------------------------------------------------
 
 
@@ -201,91 +90,56 @@ def test_codegen_emits_branch_pattern(bits: int) -> None:
     assert ".cond_end_" in output
 
 
-def test_codegen_only_one_branch_evaluated() -> None:
-    """The unchosen branch's side effect must not fire.
+def test_codegen_guarded_update_collapses_self_branch() -> None:
+    """``dest = MIN(dest, lit);`` lowers without round-tripping through AX.
 
-    Uses two globals as observable side-effects: ``hit_then`` is written
-    only inside the then-branch, ``hit_else`` only inside the else-branch.
-    cc.py doesn't support assignment-as-expression, so the side effect is
-    expressed via a helper function whose return value the ternary picks.
-    The generated assembly must contain *both* function names but the
-    branch structure must guarantee only one ``call`` runs at a time.
+    Recognises the ``dest = (cond) ? dest : other`` shape that ``MAX`` /
+    ``MIN`` produce when one of the operands *is* the assignment
+    destination — the no-op stay-branch is elided, so the emission
+    looks like the hand-written ``if`` saturation: ``cmp / Jcc / mov dest,
+    other``.  The check pins this behaviour: regressions that re-introduce
+    the AX round-trip would emit a ``mov`` from the destination register
+    back to itself (or its memory slot) which is exactly what this
+    peephole eliminates.
     """
-    success, output = _compile(
-        """
-        int hit_then;
-        int hit_else;
-
-        int set_then(int v) { hit_then = 1; return v; }
-        int set_else(int v) { hit_else = 1; return v; }
+    test_source = textwrap.dedent("""
+        #include "macros.h"
 
         int main(int argc, char *argv[]) {
-            int r = argc > 0 ? set_then(7) : set_else(9);
-            return r;
+            int chunk = argc;
+            chunk = MIN(chunk, 512);
+            return chunk;
         }
-        """,
-    )
-    assert success, output
-    # Both calls must be emitted; the branch decides which one executes.
-    assert "call set_then" in output
-    assert "call set_else" in output
-    # ``set_else`` must sit *after* the else label so the then-path
-    # (which falls through then jumps over the else) never reaches it.
-    else_label_index = output.find(".cond_else_")
-    set_else_index = output.find("call set_else")
-    assert else_label_index != -1
-    assert set_else_index != -1
-    assert else_label_index < set_else_index
-
-
-def test_codegen_nested_ternary_assembles() -> None:
-    """A right-associative chain lowers without falling over on label collisions."""
-    success, output = _compile(
-        """
-        int main(int argc, char *argv[]) {
-            int r = argc ? 1 : argc ? 2 : 3;
-            return r;
-        }
-        """,
-    )
-    assert success, output
-    # Each ternary needs its own pair of labels.  Two ternaries → at
-    # least two distinct ``.cond_else_*`` labels.
-    label_lines = [line for line in output.splitlines() if ".cond_else_" in line and line.strip().endswith(":")]
-    assert len(label_lines) >= 2
-
-
-def test_codegen_ternary_inside_if_condition() -> None:
-    """``if (a ? b : c)`` compiles end-to-end (Conditional as a condition)."""
-    success, output = _compile(
-        """
-        int g;
-        int main(int argc, char *argv[]) {
-            g = argc;
-            if (g > 0 ? g : 1) {
-                return 1;
-            }
-            return 0;
-        }
-        """,
-    )
-    assert success, output
-
-
-def test_codegen_ternary_as_call_argument() -> None:
-    """``f(a ? b : c)`` lowers correctly: the ternary materialises a value before the call."""
-    success, output = _compile(
-        """
-        int passthrough(int x) { return x; }
-
-        int main(int argc, char *argv[]) {
-            int r = passthrough(argc > 0 ? 7 : 8);
-            return r;
-        }
-        """,
-    )
-    assert success, output
-    assert "call passthrough" in output
+    """)
+    with tempfile.NamedTemporaryFile(
+        suffix=".c",
+        prefix="_test_guarded_update_",
+        dir=str(REPO_ROOT / "user" / "programs"),
+        mode="w",
+        encoding="utf-8",
+        delete=True,
+    ) as src_file:
+        src_file.write(test_source)
+        src_file.flush()
+        result = subprocess.run(
+            ["python3", str(CC), "--bits", "16", src_file.name],
+            capture_output=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+            text=True,
+        )
+    assert result.returncode == 0, result.stderr
+    output = result.stdout
+    # The fast path emits a ``.cond_skip_*`` label and no
+    # ``.cond_else_*`` / ``.cond_end_*`` pair — that's the signal it
+    # went through ``_try_emit_guarded_update`` instead of the
+    # general AX-staged lowering.
+    assert ".cond_skip_" in output
+    assert ".cond_else_" not in output
+    assert ".cond_end_" not in output
+    # Exactly one ``mov ..., 512`` (the saturating store), and the
+    # comparison sits on the line just before the conditional jump.
+    assert "mov ax, 512" in output or "mov dx, 512" in output or "mov cx, 512" in output
 
 
 # --- kernel/include/macros.h ------------------------------------------------
@@ -345,56 +199,102 @@ def test_codegen_max_min_macro_avoids_redundant_subexpression() -> None:
     assert len(sub_lines) == 1, f"expected one sub instruction, got {len(sub_lines)}:\n{output}"
 
 
-def test_codegen_guarded_update_collapses_self_branch() -> None:
-    """``dest = MIN(dest, lit);`` lowers without round-tripping through AX.
+def test_codegen_nested_ternary_assembles() -> None:
+    """A right-associative chain lowers without falling over on label collisions."""
+    success, output = _compile(
+        """
+        int main(int argc, char *argv[]) {
+            int r = argc ? 1 : argc ? 2 : 3;
+            return r;
+        }
+        """,
+    )
+    assert success, output
+    # Each ternary needs its own pair of labels.  Two ternaries → at
+    # least two distinct ``.cond_else_*`` labels.
+    label_lines = [line for line in output.splitlines() if ".cond_else_" in line and line.strip().endswith(":")]
+    assert len(label_lines) >= 2
 
-    Recognises the ``dest = (cond) ? dest : other`` shape that ``MAX`` /
-    ``MIN`` produce when one of the operands *is* the assignment
-    destination — the no-op stay-branch is elided, so the emission
-    looks like the hand-written ``if`` saturation: ``cmp / Jcc / mov dest,
-    other``.  The check pins this behaviour: regressions that re-introduce
-    the AX round-trip would emit a ``mov`` from the destination register
-    back to itself (or its memory slot) which is exactly what this
-    peephole eliminates.
+
+def test_codegen_only_one_branch_evaluated() -> None:
+    """The unchosen branch's side effect must not fire.
+
+    Uses two globals as observable side-effects: ``hit_then`` is written
+    only inside the then-branch, ``hit_else`` only inside the else-branch.
+    cc.py doesn't support assignment-as-expression, so the side effect is
+    expressed via a helper function whose return value the ternary picks.
+    The generated assembly must contain *both* function names but the
+    branch structure must guarantee only one ``call`` runs at a time.
     """
-    test_source = textwrap.dedent("""
-        #include "macros.h"
+    success, output = _compile(
+        """
+        int hit_then;
+        int hit_else;
+
+        int set_then(int v) { hit_then = 1; return v; }
+        int set_else(int v) { hit_else = 1; return v; }
 
         int main(int argc, char *argv[]) {
-            int chunk = argc;
-            chunk = MIN(chunk, 512);
-            return chunk;
+            int r = argc > 0 ? set_then(7) : set_else(9);
+            return r;
         }
-    """)
-    with tempfile.NamedTemporaryFile(
-        suffix=".c",
-        prefix="_test_guarded_update_",
-        dir=str(REPO_ROOT / "user" / "programs"),
-        mode="w",
-        encoding="utf-8",
-        delete=True,
-    ) as src_file:
-        src_file.write(test_source)
-        src_file.flush()
-        result = subprocess.run(
-            ["python3", str(CC), "--bits", "16", src_file.name],
-            capture_output=True,
-            check=False,
-            cwd=str(REPO_ROOT),
-            text=True,
-        )
-    assert result.returncode == 0, result.stderr
-    output = result.stdout
-    # The fast path emits a ``.cond_skip_*`` label and no
-    # ``.cond_else_*`` / ``.cond_end_*`` pair — that's the signal it
-    # went through ``_try_emit_guarded_update`` instead of the
-    # general AX-staged lowering.
-    assert ".cond_skip_" in output
-    assert ".cond_else_" not in output
-    assert ".cond_end_" not in output
-    # Exactly one ``mov ..., 512`` (the saturating store), and the
-    # comparison sits on the line just before the conditional jump.
-    assert "mov ax, 512" in output or "mov dx, 512" in output or "mov cx, 512" in output
+        """,
+    )
+    assert success, output
+    # Both calls must be emitted; the branch decides which one executes.
+    assert "call set_then" in output
+    assert "call set_else" in output
+    # ``set_else`` must sit *after* the else label so the then-path
+    # (which falls through then jumps over the else) never reaches it.
+    else_label_index = output.find(".cond_else_")
+    set_else_index = output.find("call set_else")
+    assert else_label_index != -1
+    assert set_else_index != -1
+    assert else_label_index < set_else_index
+
+
+def test_codegen_ternary_as_call_argument() -> None:
+    """``f(a ? b : c)`` lowers correctly: the ternary materialises a value before the call."""
+    success, output = _compile(
+        """
+        int passthrough(int x) { return x; }
+
+        int main(int argc, char *argv[]) {
+            int r = passthrough(argc > 0 ? 7 : 8);
+            return r;
+        }
+        """,
+    )
+    assert success, output
+    assert "call passthrough" in output
+
+
+def test_codegen_ternary_inside_if_condition() -> None:
+    """``if (a ? b : c)`` compiles end-to-end (Conditional as a condition)."""
+    success, output = _compile(
+        """
+        int g;
+        int main(int argc, char *argv[]) {
+            g = argc;
+            if (g > 0 ? g : 1) {
+                return 1;
+            }
+            return 0;
+        }
+        """,
+    )
+    assert success, output
+
+
+# --- Lexer ---------------------------------------------------------------
+
+
+def test_lexer_emits_question_and_colon_tokens() -> None:
+    """``?`` and ``:`` produce QUESTION / COLON tokens."""
+    tokens = tokenize("a ? b : c")
+    kinds = [kind for kind, _text, _line in tokens]
+    assert "QUESTION" in kinds
+    assert "COLON" in kinds
 
 
 def test_macros_h_max_min_compile() -> None:
@@ -442,3 +342,103 @@ def test_macros_h_max_min_compile() -> None:
     # macros → two distinct ``.cond_end_*`` labels.
     label_lines = [line for line in result.stdout.splitlines() if ".cond_end_" in line and line.strip().endswith(":")]
     assert len(label_lines) == 2
+
+
+# --- Parser --------------------------------------------------------------
+
+
+def test_parser_builds_conditional_node() -> None:
+    """A simple ternary parses as a ``Conditional`` AST node."""
+    body = _parse_function_body("""
+        int main(int argc, char *argv[]) {
+            int x = argc > 0 ? 1 : 2;
+            return x;
+        }
+    """)
+    declaration = body[0]
+    assert isinstance(declaration, VarDecl)
+    initializer = declaration.init
+    assert isinstance(initializer, Conditional)
+    assert isinstance(initializer.condition, BinaryOperation)
+    assert initializer.condition.operation == ">"
+    assert isinstance(initializer.then_expr, Int)
+    assert initializer.then_expr.value == 1
+    assert isinstance(initializer.else_expr, Int)
+    assert initializer.else_expr.value == 2
+
+
+def test_parser_equality_binds_tighter_than_ternary() -> None:
+    """``a == b ? c : d`` parses with ``==`` inside the condition."""
+    body = _parse_function_body("""
+        int main(int argc, char *argv[]) {
+            int x = argc == 1 ? 10 : 20;
+            return x;
+        }
+    """)
+    initializer = body[0].init
+    assert isinstance(initializer, Conditional)
+    assert isinstance(initializer.condition, BinaryOperation)
+    assert initializer.condition.operation == "=="
+
+
+def test_parser_is_right_associative() -> None:
+    """``a ? b : c ? d : e`` parses as ``a ? b : (c ? d : e)``."""
+    body = _parse_function_body("""
+        int main(int argc, char *argv[]) {
+            int x = argc ? 1 : argc ? 2 : 3;
+            return x;
+        }
+    """)
+    initializer = body[0].init
+    assert isinstance(initializer, Conditional)
+    # Right-associative: the else-branch is the *inner* conditional.
+    assert isinstance(initializer.else_expr, Conditional)
+    # And the then-branch of the *outer* conditional is a leaf.
+    assert isinstance(initializer.then_expr, Int)
+    inner = initializer.else_expr
+    assert isinstance(inner.then_expr, Int)
+    assert inner.then_expr.value == 2
+    assert isinstance(inner.else_expr, Int)
+    assert inner.else_expr.value == 3
+
+
+def test_parser_logical_or_binds_tighter_than_ternary() -> None:
+    """``a || b ? c : d`` parses with ``||`` inside the condition."""
+    body = _parse_function_body("""
+        int main(int argc, char *argv[]) {
+            int x = argc || 1 ? 10 : 20;
+            return x;
+        }
+    """)
+    initializer = body[0].init
+    assert isinstance(initializer, Conditional)
+    assert isinstance(initializer.condition, LogicalOr)
+
+
+def test_parser_ternary_inside_parens_then_arithmetic() -> None:
+    """``(a ? b : c) + 1`` puts the conditional inside a BinaryOperation."""
+    body = _parse_function_body("""
+        int main(int argc, char *argv[]) {
+            int x = (argc ? 10 : 20) + 1;
+            return x;
+        }
+    """)
+    initializer = body[0].init
+    assert isinstance(initializer, BinaryOperation)
+    assert initializer.operation == "+"
+    assert isinstance(initializer.left, Conditional)
+    assert isinstance(initializer.right, Int)
+    assert initializer.right.value == 1
+
+
+def test_parser_unterminated_ternary_raises() -> None:
+    """A ``?`` without a matching ``:`` raises a parser error."""
+    source = """
+        int main(int argc, char *argv[]) {
+            int x = argc ? 1;
+            return x;
+        }
+    """
+    tokens = tokenize(textwrap.dedent(source))
+    with pytest.raises(CompileError, match="COLON"):
+        Parser(tokens).parse_program()

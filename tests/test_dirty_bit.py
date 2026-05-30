@@ -51,6 +51,13 @@ def _read_size_from_image(*, image_path: Path, name: str) -> int:
     raise AssertionError(message)
 
 
+def main() -> int:
+    """Build the OS image and run the dirty-bit regression test."""
+    test_open_wronly_no_write_preserves_size()
+    print("1 passed, 0 failed")
+    return 0
+
+
 def test_open_wronly_no_write_preserves_size() -> None:
     """Assert that open-WRONLY-then-close without any write preserves the existing file size."""
     subprocess.run(
@@ -80,13 +87,6 @@ def test_open_wronly_no_write_preserves_size() -> None:
     post_size = _read_size_from_image(image_path=image, name=_PROBE_NAME)
     assert post_size == pre_size, f"open-without-write must preserve size: pre={pre_size}, post={post_size}"
     print("PASS: test_open_wronly_no_write_preserves_size")
-
-
-def main() -> int:
-    """Build the OS image and run the dirty-bit regression test."""
-    test_open_wronly_no_write_preserves_size()
-    print("1 passed, 0 failed")
-    return 0
 
 
 if __name__ == "__main__":

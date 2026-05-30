@@ -89,6 +89,42 @@ def test_max_via_signed_int_local_saturates() -> None:
     assert "jg ." in asm, f"expected signed `jg` branch after `int` local copy; got:\n{asm}"
 
 
+def test_max_with_unsigned_char_saturates_via_signed_compare() -> None:
+    """``MAX(unsigned char_var - 1, 0)`` uses ``jg`` (signed compare).
+
+    Standard C promotes ``unsigned char`` to ``int`` for arithmetic, so
+    ``0 - 1`` evaluates as ``-1`` and ``MAX(-1, 0) == 0`` saturates
+    correctly.  The generated asm pattern is:
+        movzx eax, byte [...]   ; zero-extend unsigned char to int
+        dec eax                  ; signed int math: 0 - 1 = -1
+        test eax, eax
+        jg  .cond_end_*          ; signed greater-than
+        xor eax, eax             ; saturate to 0
+    """
+    asm = _compile_32bit("""
+        #include "macros.h"
+
+        struct holder {
+            unsigned char count;
+        };
+        struct holder g_holder;
+
+        int main(int argc, char *argv[]) {
+            g_holder.count = (unsigned char)argc;
+            int r = MAX(g_holder.count - 1, 0);
+            return r;
+        }
+    """)
+    # The body must contain a signed compare branch.  A regression that
+    # emits ``ja`` (unsigned) here would silently break the saturation
+    # because ``0xFF > 0`` is true unsigned but ``-1 > 0`` is false
+    # signed.
+    assert "jg ." in asm, f"expected signed `jg` branch in MAX(unsigned char - 1, 0); got:\n{asm}"
+    assert "ja ." not in asm or "jge ." in asm.replace("jg .", ""), (
+        f"unexpected unsigned `ja` branch in MAX(unsigned char - 1, 0); got:\n{asm}"
+    )
+
+
 def test_max_with_unsigned_int_underflows_via_unsigned_compare() -> None:
     """``MAX(unsigned int_var - 1, 0)`` uses ``ja`` (unsigned compare) — BROKEN.
 
@@ -128,39 +164,3 @@ def test_max_with_unsigned_int_underflows_via_unsigned_compare() -> None:
     # clang/gcc; if such a change ever lands it would also break this
     # test and prompt a docs update in macros.h.
     assert "ja ." in asm, f"expected unsigned `ja` branch in MAX(unsigned int - 1, 0); got:\n{asm}"
-
-
-def test_max_with_unsigned_char_saturates_via_signed_compare() -> None:
-    """``MAX(unsigned char_var - 1, 0)`` uses ``jg`` (signed compare).
-
-    Standard C promotes ``unsigned char`` to ``int`` for arithmetic, so
-    ``0 - 1`` evaluates as ``-1`` and ``MAX(-1, 0) == 0`` saturates
-    correctly.  The generated asm pattern is:
-        movzx eax, byte [...]   ; zero-extend unsigned char to int
-        dec eax                  ; signed int math: 0 - 1 = -1
-        test eax, eax
-        jg  .cond_end_*          ; signed greater-than
-        xor eax, eax             ; saturate to 0
-    """
-    asm = _compile_32bit("""
-        #include "macros.h"
-
-        struct holder {
-            unsigned char count;
-        };
-        struct holder g_holder;
-
-        int main(int argc, char *argv[]) {
-            g_holder.count = (unsigned char)argc;
-            int r = MAX(g_holder.count - 1, 0);
-            return r;
-        }
-    """)
-    # The body must contain a signed compare branch.  A regression that
-    # emits ``ja`` (unsigned) here would silently break the saturation
-    # because ``0xFF > 0`` is true unsigned but ``-1 > 0`` is false
-    # signed.
-    assert "jg ." in asm, f"expected signed `jg` branch in MAX(unsigned char - 1, 0); got:\n{asm}"
-    assert "ja ." not in asm or "jge ." in asm.replace("jg .", ""), (
-        f"unexpected unsigned `ja` branch in MAX(unsigned char - 1, 0); got:\n{asm}"
-    )

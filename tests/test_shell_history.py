@@ -28,6 +28,23 @@ def assert_in(*, expected: bytes, haystack: bytes, label: str) -> None:
         raise AssertionError(message)
 
 
+def main() -> int:
+    """Build the OS image and run all history smoke tests."""
+    subprocess.run(
+        ["./make_os.sh"],
+        check=True,
+        cwd=REPO_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    test_ctrl_p_recalls_previous_command()
+    test_down_at_live_line_is_noop()
+    test_down_restores_partial_line()
+    test_up_recalls_previous_command()
+    print("4 passed, 0 failed")
+    return 0
+
+
 def test_ctrl_p_recalls_previous_command() -> None:
     """Ctrl-P after a command recalls it, confirming Ctrl-P aliases Up arrow."""
     with qemu_session(monitor=False, snapshot=True) as session:
@@ -94,23 +111,6 @@ def test_up_recalls_previous_command() -> None:
         between = bytes(session.buffer[pre_length:])
         assert_in(expected=b"first\r\n", haystack=between, label="Up Up should recall the older command")
     print("PASS: test_up_recalls_previous_command")
-
-
-def main() -> int:
-    """Build the OS image and run all history smoke tests."""
-    subprocess.run(
-        ["./make_os.sh"],
-        check=True,
-        cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    test_ctrl_p_recalls_previous_command()
-    test_down_at_live_line_is_noop()
-    test_down_restores_partial_line()
-    test_up_recalls_previous_command()
-    print("4 passed, 0 failed")
-    return 0
 
 
 if __name__ == "__main__":

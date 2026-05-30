@@ -35,6 +35,27 @@ def _run_and_capture(*, command: str) -> bytes:
         return full[crlf + 2 :] if crlf >= 0 else full
 
 
+def main() -> int:
+    """Build the OS image and run all redirection tests."""
+    subprocess.run(
+        ["./make_os.sh"],
+        check=True,
+        cwd=REPO_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    test_append_redirect_keeps_prior()
+    test_builtin_redirect_captures_output()
+    test_input_redirect_reads_file()
+    test_open_failure_nonzero_status()
+    test_redirect_in_chain_truncates_even_on_failure()
+    test_syntax_error_nonzero_status()
+    test_truncate_redirect_writes_file()
+    test_truncate_replaces_prior()
+    print("8 passed, 0 failed")
+    return 0
+
+
 def test_append_redirect_keeps_prior() -> None:
     """`echo first > out; echo second >> out; cat out` => both lines, in order."""
     out = _run_and_capture(command="echo first > out_b; echo second >> out_b; cat out_b")
@@ -101,27 +122,6 @@ def test_truncate_replaces_prior() -> None:
     out = _run_and_capture(command="echo replace > out_c; echo only > out_c; cat out_c")
     assert b"only" in out and b"replace" not in out, f"got {out!r}"
     print("PASS: test_truncate_replaces_prior")
-
-
-def main() -> int:
-    """Build the OS image and run all redirection tests."""
-    subprocess.run(
-        ["./make_os.sh"],
-        check=True,
-        cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    test_append_redirect_keeps_prior()
-    test_builtin_redirect_captures_output()
-    test_input_redirect_reads_file()
-    test_open_failure_nonzero_status()
-    test_redirect_in_chain_truncates_even_on_failure()
-    test_syntax_error_nonzero_status()
-    test_truncate_redirect_writes_file()
-    test_truncate_replaces_prior()
-    print("8 passed, 0 failed")
-    return 0
 
 
 if __name__ == "__main__":

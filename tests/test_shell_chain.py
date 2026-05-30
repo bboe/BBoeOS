@@ -36,6 +36,30 @@ def assert_not_in(*, needle: bytes, haystack: bytes, label: str) -> None:
         raise AssertionError(message)
 
 
+def main() -> int:
+    """Build the OS image and run all chain smoke tests."""
+    subprocess.run(
+        ["./make_os.sh"],
+        check=True,
+        cwd=REPO_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    test_and_runs_on_success()
+    test_and_skips_on_failure()
+    test_color_sgr_command_runs_as_one_command()
+    test_dollar_question_between_segments()
+    test_mixed_chain_left_associative()
+    test_or_runs_on_failure()
+    test_or_skips_on_success()
+    test_quoted_and_stays_in_argv()
+    test_quoted_pipe_stays_in_argv()
+    test_quoted_semicolon_stays_in_argv()
+    test_semicolon_runs_both()
+    print("11 passed, 0 failed")
+    return 0
+
+
 def output_after_command(*, session: object, pre_length: int) -> bytes:
     r"""Return the bytes that appear after the typed command line.
 
@@ -50,57 +74,6 @@ def output_after_command(*, session: object, pre_length: int) -> bytes:
     if crlf < 0:
         return full
     return full[crlf + 2 :]
-
-
-def test_color_sgr_command_runs_as_one_command() -> None:
-    """Quoted 256-color SGR sequence lexes as a single WORD.
-
-    Before the lexer rewrite the shell's chain parser split on every ``;``
-    inside the quoted argument, producing 7 ``unknown command`` lines.
-    After the rewrite the whole quoted run is one argv entry — there is
-    no ``unknown command`` line in the output.
-    """
-    with qemu_session(monitor=False, snapshot=True) as session:
-        pre_length = len(session.buffer)
-        session.send_command("echo -e '\\e[38;5;196mred\\e[38;5;46m green\\e[38;5;21m blue\\e[0m'")
-        between = output_after_command(session=session, pre_length=pre_length)
-        assert_not_in(needle=b"unknown command", haystack=between, label="; in quotes must not split")
-        assert_in(expected=b"red", haystack=between, label="echo's text must appear")
-        assert_in(expected=b"blue", haystack=between, label="echo's text must appear")
-    print("PASS: test_color_sgr_command_runs_as_one_command")
-
-
-def test_quoted_and_stays_in_argv() -> None:
-    """``&&`` inside quotes does not start a new chain segment."""
-    with qemu_session(monitor=False, snapshot=True) as session:
-        pre_length = len(session.buffer)
-        session.send_command("echo 'x && y'")
-        between = output_after_command(session=session, pre_length=pre_length)
-        assert_in(expected=b"x && y", haystack=between, label="quoted && must reach echo intact")
-        assert_not_in(needle=b"unknown command", haystack=between, label="quoted && must not split")
-    print("PASS: test_quoted_and_stays_in_argv")
-
-
-def test_quoted_pipe_stays_in_argv() -> None:
-    """``|`` inside quotes does not start a pipeline."""
-    with qemu_session(monitor=False, snapshot=True) as session:
-        pre_length = len(session.buffer)
-        session.send_command("echo 'a | b'")
-        between = output_after_command(session=session, pre_length=pre_length)
-        assert_in(expected=b"a | b", haystack=between, label="quoted | must reach echo intact")
-        assert_not_in(needle=b"unknown command", haystack=between, label="quoted | must not split")
-    print("PASS: test_quoted_pipe_stays_in_argv")
-
-
-def test_quoted_semicolon_stays_in_argv() -> None:
-    """``;`` inside quotes does not start a new chain segment."""
-    with qemu_session(monitor=False, snapshot=True) as session:
-        pre_length = len(session.buffer)
-        session.send_command("echo 'a;b;c'")
-        between = output_after_command(session=session, pre_length=pre_length)
-        assert_in(expected=b"a;b;c", haystack=between, label="quoted ; must reach echo intact")
-        assert_not_in(needle=b"unknown command", haystack=between, label="quoted ; must not split")
-    print("PASS: test_quoted_semicolon_stays_in_argv")
 
 
 def test_and_runs_on_success() -> None:
@@ -121,6 +94,24 @@ def test_and_skips_on_failure() -> None:
         between = output_after_command(session=session, pre_length=pre_length)
         assert_not_in(needle=b"and_ran", haystack=between, label="&& after failure must skip RHS")
     print("PASS: test_and_skips_on_failure")
+
+
+def test_color_sgr_command_runs_as_one_command() -> None:
+    """Quoted 256-color SGR sequence lexes as a single WORD.
+
+    Before the lexer rewrite the shell's chain parser split on every ``;``
+    inside the quoted argument, producing 7 ``unknown command`` lines.
+    After the rewrite the whole quoted run is one argv entry — there is
+    no ``unknown command`` line in the output.
+    """
+    with qemu_session(monitor=False, snapshot=True) as session:
+        pre_length = len(session.buffer)
+        session.send_command("echo -e '\\e[38;5;196mred\\e[38;5;46m green\\e[38;5;21m blue\\e[0m'")
+        between = output_after_command(session=session, pre_length=pre_length)
+        assert_not_in(needle=b"unknown command", haystack=between, label="; in quotes must not split")
+        assert_in(expected=b"red", haystack=between, label="echo's text must appear")
+        assert_in(expected=b"blue", haystack=between, label="echo's text must appear")
+    print("PASS: test_color_sgr_command_runs_as_one_command")
 
 
 def test_dollar_question_between_segments() -> None:
@@ -164,6 +155,39 @@ def test_or_skips_on_success() -> None:
     print("PASS: test_or_skips_on_success")
 
 
+def test_quoted_and_stays_in_argv() -> None:
+    """``&&`` inside quotes does not start a new chain segment."""
+    with qemu_session(monitor=False, snapshot=True) as session:
+        pre_length = len(session.buffer)
+        session.send_command("echo 'x && y'")
+        between = output_after_command(session=session, pre_length=pre_length)
+        assert_in(expected=b"x && y", haystack=between, label="quoted && must reach echo intact")
+        assert_not_in(needle=b"unknown command", haystack=between, label="quoted && must not split")
+    print("PASS: test_quoted_and_stays_in_argv")
+
+
+def test_quoted_pipe_stays_in_argv() -> None:
+    """``|`` inside quotes does not start a pipeline."""
+    with qemu_session(monitor=False, snapshot=True) as session:
+        pre_length = len(session.buffer)
+        session.send_command("echo 'a | b'")
+        between = output_after_command(session=session, pre_length=pre_length)
+        assert_in(expected=b"a | b", haystack=between, label="quoted | must reach echo intact")
+        assert_not_in(needle=b"unknown command", haystack=between, label="quoted | must not split")
+    print("PASS: test_quoted_pipe_stays_in_argv")
+
+
+def test_quoted_semicolon_stays_in_argv() -> None:
+    """``;`` inside quotes does not start a new chain segment."""
+    with qemu_session(monitor=False, snapshot=True) as session:
+        pre_length = len(session.buffer)
+        session.send_command("echo 'a;b;c'")
+        between = output_after_command(session=session, pre_length=pre_length)
+        assert_in(expected=b"a;b;c", haystack=between, label="quoted ; must reach echo intact")
+        assert_not_in(needle=b"unknown command", haystack=between, label="quoted ; must not split")
+    print("PASS: test_quoted_semicolon_stays_in_argv")
+
+
 def test_semicolon_runs_both() -> None:
     """`echo a; echo b` runs both segments unconditionally."""
     with qemu_session(monitor=False, snapshot=True) as session:
@@ -173,30 +197,6 @@ def test_semicolon_runs_both() -> None:
         assert_in(expected=b"first_a", haystack=between, label="; must run LHS")
         assert_in(expected=b"second_b", haystack=between, label="; must run RHS")
     print("PASS: test_semicolon_runs_both")
-
-
-def main() -> int:
-    """Build the OS image and run all chain smoke tests."""
-    subprocess.run(
-        ["./make_os.sh"],
-        check=True,
-        cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    test_and_runs_on_success()
-    test_and_skips_on_failure()
-    test_color_sgr_command_runs_as_one_command()
-    test_dollar_question_between_segments()
-    test_mixed_chain_left_associative()
-    test_or_runs_on_failure()
-    test_or_skips_on_success()
-    test_quoted_and_stays_in_argv()
-    test_quoted_pipe_stays_in_argv()
-    test_quoted_semicolon_stays_in_argv()
-    test_semicolon_runs_both()
-    print("11 passed, 0 failed")
-    return 0
 
 
 if __name__ == "__main__":

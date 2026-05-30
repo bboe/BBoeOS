@@ -5055,6 +5055,222 @@ def test_uint16_pointer_load_is_word() -> None:
     assert "word" in asm, f"expected a ``word``-sized load for unsigned short *:\n{asm}"
 
 
+def test_unsigned_byte_global_in_naked_dispatcher_emits_jb() -> None:
+    """The ``read_sector`` shape (unsigned char global ``< 0x80``, naked, tail dispatch) compiles to ``cmp / jb / jmp``.
+
+    Regression test for the entire change: the unsigned compare picks
+    the right mnemonic, the naked attribute elides the frame, and the
+    tail-call detection through if/else turns both branches into jmps.
+    The peephole optimizer fuses ``jae .else ; jmp fdc ; .else: jmp ata``
+    into ``jb fdc ; jmp ata``.
+    """
+    src = """
+        unsigned char boot_disk __attribute__((asm_name("boot_disk")));
+        __attribute__((carry_return)) int fdc(int s __attribute__((in_register("ax"))));
+        __attribute__((carry_return)) int ata(int s __attribute__((in_register("ax"))));
+        __attribute__((carry_return)) __attribute__((naked))
+        int read_sector(int sector __attribute__((in_register("ax")))) {
+            if (boot_disk < 0x80) {
+                fdc(sector);
+            } else {
+                ata(sector);
+            }
+        }
+    """
+    asm = _kernel(src)
+    body = asm.split("read_sector:")[1].split("\n\n")[0]
+    assert "jb fdc" in body and "jmp ata" in body, f"expected fused 'jb fdc ; jmp ata' dispatcher\n{asm}"
+    assert "push bp" not in body and "        ret" not in body, f"naked must not emit prologue/ret\n{asm}"
+
+
+def test_unsigned_byte_global_less_than_emits_jb() -> None:
+    """``unsigned char < literal`` uses unsigned ``jb`` (false-branch ``jae``)."""
+    src = """
+        unsigned char flag __attribute__((asm_name("flag")));
+        void test() {
+            if (flag < 0x80) {
+                kernel_outb(0, 1);
+            }
+        }
+    """
+    asm = _kernel(src)
+    # ``cc.py`` either folds the conditional into the tail jmp (``jae``)
+    # or jumps past the body on the false branch (``jae``).  Either way
+    # the unsigned mnemonic must appear and the signed equivalent ``jge``
+    # must not.
+    assert "jae" in asm or "jb " in asm, f"expected unsigned 'jae' / 'jb' for unsigned char < 0x80\n{asm}"
+    assert "jge" not in asm, f"signed 'jge' must not appear for unsigned char comparison\n{asm}"
+
+
+def test_unsigned_char_local_compared_to_int_literal_compiles() -> None:
+    """``unsigned char`` classifies as integer (per the docstring), so ``b == 0`` is allowed."""
+    asm = _kernel("""
+        void f() {
+            unsigned char b;
+            b = 0;
+            if (b == 0) {
+                b = 1;
+            }
+        }
+    """)
+    assert "f:" in asm
+
+
+def test_unsigned_int_compiles_and_uses_unsigned_compare() -> None:
+    """``unsigned int`` is an accepted type spelling and compares unsigned."""
+    asm = _kernel("""
+        void f() {
+            unsigned int x;
+            x = 5;
+            x = x + 1;
+            if (x < 10) {
+                x = 0;
+            }
+        }
+    """)
+    assert "f:" in asm
+    assert "jae" in asm or "jb " in asm, f"expected unsigned compare for unsigned int < 10\n{asm}"
+    assert "jge" not in asm and "jl " not in asm, f"signed compare must not appear for unsigned int\n{asm}"
+
+
+def test_unsigned_int_size_tracks_int_size_16bit() -> None:
+    """sizeof(unsigned int) == 2 in --bits 16 mode (matches int width)."""
+    asm = _kernel("int f() { return sizeof(unsigned int); }", bits=16)
+    assert "mov ax, 2" in asm, f"expected sizeof(unsigned int)==2 in 16-bit mode\n{asm}"
+
+
+def test_unsigned_int_size_tracks_int_size_32bit() -> None:
+    """sizeof(unsigned int) == 4 in --bits 32 mode."""
+    asm = _kernel("int f() { return sizeof(unsigned int); }", bits=32)
+    assert "mov eax, 4" in asm, f"expected sizeof(unsigned int)==4 in 32-bit mode\n{asm}"
+
+
+def test_unsigned_long_double_pointer_parses() -> None:
+    """``unsigned long **`` parameter type parses (parser regression check)."""
+    src = """
+        void f(unsigned long **slots __attribute__((in_register("di")))) {
+            slots[0] = slots[1];
+        }
+    """
+    asm = _kernel(src)
+    assert "f:" in asm
+
+
+def test_unsigned_long_pointer_load_is_dword_on_kernel() -> None:
+    """``unsigned long *p; return p[0];`` on the 16-bit kernel target loads all 32 bits into DX:AX.
+
+    Symptom: the Index emit path uses the target's native acc width
+    (``ax``, 16 bits), so the high 16 bits are dropped.  An
+    ``unsigned long`` pointee on the 16-bit target needs DX:AX (two
+    word loads at ``[si]`` and ``[si+2]``).
+    """
+    src = """
+        unsigned long test(unsigned long *p __attribute__((in_register("di")))) {
+            return p[0];
+        }
+    """
+    asm = _kernel(src, bits=16)
+    # The 16-bit code must load both halves: low into AX, high into DX.
+    assert "[si]" in asm or "[di]" in asm, f"expected indexed load from pointer reg:\n{asm}"
+    # The high-word load is the distinguishing marker.
+    assert "[si+2]" in asm or "[di+2]" in asm, f"expected high-word load at +2 for 32-bit pointee on 16-bit target:\n{asm}"
+
+
+def test_unsigned_long_pointer_load_is_dword_on_kernel_via_spelling() -> None:
+    """``unsigned long *p; return p[0];`` reads all 4 bytes on the 16-bit target.
+
+    Mirrors :func:`test_unsigned_long_pointer_load_is_dword_on_kernel`;
+    ``unsigned long`` is the canonical 4-byte unsigned spelling on the
+    16-bit target (``unsigned int`` is only 2 bytes there).  Without
+    the long-pointer dispatch, ``unsigned long *`` silently loaded only
+    the low 16 bits.
+    """
+    src = """
+        unsigned long test(unsigned long *p __attribute__((in_register("di")))) {
+            return p[0];
+        }
+    """
+    asm = _kernel(src, bits=16)
+    # The 16-bit code must load both halves: low into AX, high into DX.
+    assert "[si]" in asm or "[di]" in asm, f"expected indexed load from pointer reg:\n{asm}"
+    # The high-word load is the distinguishing marker.
+    assert "[si+2]" in asm or "[di+2]" in asm, f"expected high-word load at +2 for 32-bit pointee on 16-bit target:\n{asm}"
+
+
+def test_unsigned_long_pointer_load_type_check() -> None:
+    """``unsigned long x = p[0];`` with ``unsigned long *p`` compiles cleanly.
+
+    Symptom: the IR builder lowers the Index through an ``int`` temp,
+    then ``generate_long_expression`` rejects it with
+    ``expected 'unsigned long' expression, got 'int' variable '_ir_0'``.
+    The fix recognises a long-pointee Index at IR-build time and
+    delegates the assignment to the AST codegen path, which knows how
+    to produce a DX:AX value.
+    """
+    src = """
+        void test(unsigned long *p __attribute__((in_register("di")))) {
+            unsigned long x;
+            x = p[0];
+            (void)x;
+        }
+    """
+    asm = _kernel(src, bits=16)
+    assert "test:" in asm, f"expected function label, got:\n{asm}"
+
+
+def test_unsigned_long_pointer_parses() -> None:
+    """``unsigned long *`` parameter type parses and compiles."""
+    src = """
+        void f(unsigned long *p __attribute__((in_register("di")))) {
+            p[0] = 0;
+        }
+    """
+    asm = _kernel(src)
+    assert "f:" in asm
+
+
+def test_unsigned_long_size_is_always_four_bytes_16bit() -> None:
+    """sizeof(unsigned long) == 4 in --bits 16 mode."""
+    asm = _kernel("int f() { return sizeof(unsigned long); }", bits=16)
+    assert "mov ax, 4" in asm, f"expected sizeof(unsigned long)==4 in 16-bit mode\n{asm}"
+
+
+def test_unsigned_long_size_is_always_four_bytes_32bit() -> None:
+    """sizeof(unsigned long) == 4 in --bits 32 mode."""
+    asm = _kernel("int f() { return sizeof(unsigned long); }", bits=32)
+    assert "mov eax, 4" in asm, f"expected sizeof(unsigned long)==4 in 32-bit mode\n{asm}"
+
+
+def test_unsigned_pointer_double_indirect_compares_unsigned() -> None:
+    """``int **`` (and other double-pointer types) compare as unsigned offsets.
+
+    Regression for the old hand-enumerated UNSIGNED_TYPES set, which
+    listed single-star pointer spellings but not double-star.  After the
+    pointer-by-suffix simplification, any type ending in ``*`` is
+    treated as unsigned by :meth:`_is_unsigned_type`.
+    """
+    src = """
+        int **p __attribute__((asm_name("p")));
+        int **q __attribute__((asm_name("q")));
+        int check() { return p < q; }
+    """
+    asm = _kernel(src)
+    assert "jb " in asm or "jae" in asm, f"expected unsigned mnemonic for int** comparison\n{asm}"
+    assert "jl " not in asm and "jge" not in asm, f"signed compare must not appear for int** comparison\n{asm}"
+
+
+def test_unsigned_pointer_uint8_double_indirect_compares_unsigned() -> None:
+    """``unsigned char **`` comparison uses unsigned mnemonics (suffix-detected)."""
+    src = """
+        unsigned char **p __attribute__((asm_name("p")));
+        unsigned char **q __attribute__((asm_name("q")));
+        int check() { return p < q; }
+    """
+    asm = _kernel(src)
+    assert "jb " in asm or "jae" in asm, f"expected unsigned mnemonic for unsigned char ** comparison\n{asm}"
+    assert "jl " not in asm and "jge" not in asm, f"signed compare must not appear for unsigned char ** comparison\n{asm}"
+
+
 def test_unsigned_short_global_array_accepted_and_halfword() -> None:
     """File-scope ``unsigned short arr[N]`` is allowed and uses halfword load/store.
 
@@ -5121,6 +5337,17 @@ def test_unsigned_short_global_array_variable_index_load_scales_by_two() -> None
     assert "shl esi, 2" not in asm, f"must not scale by 4 for unsigned short global:\n{asm}"
     assert "shl eax, 2" not in asm, f"must not scale by 4 for unsigned short global:\n{asm}"
     assert "movzx eax, word [_g_g" in asm, f"expected halfword load:\n{asm}"
+
+
+def test_unsigned_short_greater_or_equal_emits_jae() -> None:
+    """``unsigned short >= literal`` uses unsigned ``jae`` (true-branch) / ``jb`` (false)."""
+    src = """
+        unsigned short timeout __attribute__((asm_name("timeout")));
+        int check() { return timeout >= 32768; }
+    """
+    asm = _kernel(src)
+    assert "jae" in asm or "jb " in asm, f"expected unsigned mnemonic for unsigned short >= 32768\n{asm}"
+    assert "jge" not in asm and "jl " not in asm, f"signed mnemonic must not appear\n{asm}"
 
 
 def test_unsigned_short_local_array_load_const_index_is_halfword() -> None:
@@ -5224,233 +5451,6 @@ def test_unsigned_short_size_is_always_two_bytes_32bit() -> None:
     """sizeof(unsigned short) == 2 in --bits 32 mode (not widened to 4)."""
     asm = _kernel("int f() { return sizeof(unsigned short); }", bits=32)
     assert "mov eax, 2" in asm, f"expected sizeof(unsigned short)==2 in 32-bit mode\n{asm}"
-
-
-def test_unsigned_long_pointer_load_is_dword_on_kernel_via_spelling() -> None:
-    """``unsigned long *p; return p[0];`` reads all 4 bytes on the 16-bit target.
-
-    Mirrors :func:`test_unsigned_long_pointer_load_is_dword_on_kernel`;
-    ``unsigned long`` is the canonical 4-byte unsigned spelling on the
-    16-bit target (``unsigned int`` is only 2 bytes there).  Without
-    the long-pointer dispatch, ``unsigned long *`` silently loaded only
-    the low 16 bits.
-    """
-    src = """
-        unsigned long test(unsigned long *p __attribute__((in_register("di")))) {
-            return p[0];
-        }
-    """
-    asm = _kernel(src, bits=16)
-    # The 16-bit code must load both halves: low into AX, high into DX.
-    assert "[si]" in asm or "[di]" in asm, f"expected indexed load from pointer reg:\n{asm}"
-    # The high-word load is the distinguishing marker.
-    assert "[si+2]" in asm or "[di+2]" in asm, f"expected high-word load at +2 for 32-bit pointee on 16-bit target:\n{asm}"
-
-
-def test_unsigned_long_size_is_always_four_bytes_16bit() -> None:
-    """sizeof(unsigned long) == 4 in --bits 16 mode."""
-    asm = _kernel("int f() { return sizeof(unsigned long); }", bits=16)
-    assert "mov ax, 4" in asm, f"expected sizeof(unsigned long)==4 in 16-bit mode\n{asm}"
-
-
-def test_unsigned_long_size_is_always_four_bytes_32bit() -> None:
-    """sizeof(unsigned long) == 4 in --bits 32 mode."""
-    asm = _kernel("int f() { return sizeof(unsigned long); }", bits=32)
-    assert "mov eax, 4" in asm, f"expected sizeof(unsigned long)==4 in 32-bit mode\n{asm}"
-
-
-def test_unsigned_char_local_compared_to_int_literal_compiles() -> None:
-    """``unsigned char`` classifies as integer (per the docstring), so ``b == 0`` is allowed."""
-    asm = _kernel("""
-        void f() {
-            unsigned char b;
-            b = 0;
-            if (b == 0) {
-                b = 1;
-            }
-        }
-    """)
-    assert "f:" in asm
-
-
-def test_unsigned_byte_global_in_naked_dispatcher_emits_jb() -> None:
-    """The ``read_sector`` shape (unsigned char global ``< 0x80``, naked, tail dispatch) compiles to ``cmp / jb / jmp``.
-
-    Regression test for the entire change: the unsigned compare picks
-    the right mnemonic, the naked attribute elides the frame, and the
-    tail-call detection through if/else turns both branches into jmps.
-    The peephole optimizer fuses ``jae .else ; jmp fdc ; .else: jmp ata``
-    into ``jb fdc ; jmp ata``.
-    """
-    src = """
-        unsigned char boot_disk __attribute__((asm_name("boot_disk")));
-        __attribute__((carry_return)) int fdc(int s __attribute__((in_register("ax"))));
-        __attribute__((carry_return)) int ata(int s __attribute__((in_register("ax"))));
-        __attribute__((carry_return)) __attribute__((naked))
-        int read_sector(int sector __attribute__((in_register("ax")))) {
-            if (boot_disk < 0x80) {
-                fdc(sector);
-            } else {
-                ata(sector);
-            }
-        }
-    """
-    asm = _kernel(src)
-    body = asm.split("read_sector:")[1].split("\n\n")[0]
-    assert "jb fdc" in body and "jmp ata" in body, f"expected fused 'jb fdc ; jmp ata' dispatcher\n{asm}"
-    assert "push bp" not in body and "        ret" not in body, f"naked must not emit prologue/ret\n{asm}"
-
-
-def test_unsigned_byte_global_less_than_emits_jb() -> None:
-    """``unsigned char < literal`` uses unsigned ``jb`` (false-branch ``jae``)."""
-    src = """
-        unsigned char flag __attribute__((asm_name("flag")));
-        void test() {
-            if (flag < 0x80) {
-                kernel_outb(0, 1);
-            }
-        }
-    """
-    asm = _kernel(src)
-    # ``cc.py`` either folds the conditional into the tail jmp (``jae``)
-    # or jumps past the body on the false branch (``jae``).  Either way
-    # the unsigned mnemonic must appear and the signed equivalent ``jge``
-    # must not.
-    assert "jae" in asm or "jb " in asm, f"expected unsigned 'jae' / 'jb' for unsigned char < 0x80\n{asm}"
-    assert "jge" not in asm, f"signed 'jge' must not appear for unsigned char comparison\n{asm}"
-
-
-def test_unsigned_int_compiles_and_uses_unsigned_compare() -> None:
-    """``unsigned int`` is an accepted type spelling and compares unsigned."""
-    asm = _kernel("""
-        void f() {
-            unsigned int x;
-            x = 5;
-            x = x + 1;
-            if (x < 10) {
-                x = 0;
-            }
-        }
-    """)
-    assert "f:" in asm
-    assert "jae" in asm or "jb " in asm, f"expected unsigned compare for unsigned int < 10\n{asm}"
-    assert "jge" not in asm and "jl " not in asm, f"signed compare must not appear for unsigned int\n{asm}"
-
-
-def test_unsigned_int_size_tracks_int_size_16bit() -> None:
-    """sizeof(unsigned int) == 2 in --bits 16 mode (matches int width)."""
-    asm = _kernel("int f() { return sizeof(unsigned int); }", bits=16)
-    assert "mov ax, 2" in asm, f"expected sizeof(unsigned int)==2 in 16-bit mode\n{asm}"
-
-
-def test_unsigned_int_size_tracks_int_size_32bit() -> None:
-    """sizeof(unsigned int) == 4 in --bits 32 mode."""
-    asm = _kernel("int f() { return sizeof(unsigned int); }", bits=32)
-    assert "mov eax, 4" in asm, f"expected sizeof(unsigned int)==4 in 32-bit mode\n{asm}"
-
-
-def test_unsigned_long_double_pointer_parses() -> None:
-    """``unsigned long **`` parameter type parses (parser regression check)."""
-    src = """
-        void f(unsigned long **slots __attribute__((in_register("di")))) {
-            slots[0] = slots[1];
-        }
-    """
-    asm = _kernel(src)
-    assert "f:" in asm
-
-
-def test_unsigned_long_pointer_load_is_dword_on_kernel() -> None:
-    """``unsigned long *p; return p[0];`` on the 16-bit kernel target loads all 32 bits into DX:AX.
-
-    Symptom: the Index emit path uses the target's native acc width
-    (``ax``, 16 bits), so the high 16 bits are dropped.  An
-    ``unsigned long`` pointee on the 16-bit target needs DX:AX (two
-    word loads at ``[si]`` and ``[si+2]``).
-    """
-    src = """
-        unsigned long test(unsigned long *p __attribute__((in_register("di")))) {
-            return p[0];
-        }
-    """
-    asm = _kernel(src, bits=16)
-    # The 16-bit code must load both halves: low into AX, high into DX.
-    assert "[si]" in asm or "[di]" in asm, f"expected indexed load from pointer reg:\n{asm}"
-    # The high-word load is the distinguishing marker.
-    assert "[si+2]" in asm or "[di+2]" in asm, f"expected high-word load at +2 for 32-bit pointee on 16-bit target:\n{asm}"
-
-
-def test_unsigned_long_pointer_load_type_check() -> None:
-    """``unsigned long x = p[0];`` with ``unsigned long *p`` compiles cleanly.
-
-    Symptom: the IR builder lowers the Index through an ``int`` temp,
-    then ``generate_long_expression`` rejects it with
-    ``expected 'unsigned long' expression, got 'int' variable '_ir_0'``.
-    The fix recognises a long-pointee Index at IR-build time and
-    delegates the assignment to the AST codegen path, which knows how
-    to produce a DX:AX value.
-    """
-    src = """
-        void test(unsigned long *p __attribute__((in_register("di")))) {
-            unsigned long x;
-            x = p[0];
-            (void)x;
-        }
-    """
-    asm = _kernel(src, bits=16)
-    assert "test:" in asm, f"expected function label, got:\n{asm}"
-
-
-def test_unsigned_long_pointer_parses() -> None:
-    """``unsigned long *`` parameter type parses and compiles."""
-    src = """
-        void f(unsigned long *p __attribute__((in_register("di")))) {
-            p[0] = 0;
-        }
-    """
-    asm = _kernel(src)
-    assert "f:" in asm
-
-
-def test_unsigned_pointer_double_indirect_compares_unsigned() -> None:
-    """``int **`` (and other double-pointer types) compare as unsigned offsets.
-
-    Regression for the old hand-enumerated UNSIGNED_TYPES set, which
-    listed single-star pointer spellings but not double-star.  After the
-    pointer-by-suffix simplification, any type ending in ``*`` is
-    treated as unsigned by :meth:`_is_unsigned_type`.
-    """
-    src = """
-        int **p __attribute__((asm_name("p")));
-        int **q __attribute__((asm_name("q")));
-        int check() { return p < q; }
-    """
-    asm = _kernel(src)
-    assert "jb " in asm or "jae" in asm, f"expected unsigned mnemonic for int** comparison\n{asm}"
-    assert "jl " not in asm and "jge" not in asm, f"signed compare must not appear for int** comparison\n{asm}"
-
-
-def test_unsigned_pointer_uint8_double_indirect_compares_unsigned() -> None:
-    """``unsigned char **`` comparison uses unsigned mnemonics (suffix-detected)."""
-    src = """
-        unsigned char **p __attribute__((asm_name("p")));
-        unsigned char **q __attribute__((asm_name("q")));
-        int check() { return p < q; }
-    """
-    asm = _kernel(src)
-    assert "jb " in asm or "jae" in asm, f"expected unsigned mnemonic for unsigned char ** comparison\n{asm}"
-    assert "jl " not in asm and "jge" not in asm, f"signed compare must not appear for unsigned char ** comparison\n{asm}"
-
-
-def test_unsigned_short_greater_or_equal_emits_jae() -> None:
-    """``unsigned short >= literal`` uses unsigned ``jae`` (true-branch) / ``jb`` (false)."""
-    src = """
-        unsigned short timeout __attribute__((asm_name("timeout")));
-        int check() { return timeout >= 32768; }
-    """
-    asm = _kernel(src)
-    assert "jae" in asm or "jb " in asm, f"expected unsigned mnemonic for unsigned short >= 32768\n{asm}"
-    assert "jge" not in asm and "jl " not in asm, f"signed mnemonic must not appear\n{asm}"
 
 
 def test_user_asm_register_pins_global_to_register() -> None:
@@ -6372,6 +6372,98 @@ def test_user_switch_fall_through_between_cases() -> None:
     )
 
 
+def test_user_switch_lowers_to_ir_switch_in_helper() -> None:
+    """A ``switch`` inside a non-main helper goes through ``ir.Switch``.
+
+    The IR builder emits :class:`cc.ir.Switch` for non-main bodies; its
+    case bodies hold IR instructions (so labels / gotos inside arms are
+    visible to IR-level passes).  This test checks the IR shape directly
+    rather than only the lowered assembly, which is also smoke-tested
+    by the other switch tests.
+    """
+    source_text = textwrap.dedent(
+        """
+        int helper(int op) {
+            int result;
+            switch (op) {
+            case 1:
+                result = 10;
+                break;
+            case 2:
+                result = 20;
+                break;
+            default:
+                result = -1;
+            }
+            return result;
+        }
+        int main() { return helper(1); }
+        """
+    )
+    source, defines, function_defines = preprocess(source_text)
+    raw_tokens = tokenize(source)
+    tokens = apply_defines(defines=defines, function_defines=function_defines, tokens=raw_tokens)
+    ast = Parser(tokens).parse_program()
+    ir_program = ir.Builder().build_program(ast)
+    helper_function = next(function for function in ir_program.functions if function.ast_node.name == "helper")
+    switches = [instruction for instruction in helper_function.body if isinstance(instruction, ir.Switch)]
+    assert len(switches) == 1, f"expected exactly one ir.Switch, got {len(switches)}"
+    switch_instruction = switches[0]
+    assert isinstance(switch_instruction.original_ast, ast_nodes.Switch), "original_ast must be the source AST switch"
+    assert len(switch_instruction.cases) == 3, f"expected 3 cases (2 + default), got {len(switch_instruction.cases)}"
+    case_values = [case.value for case in switch_instruction.cases]
+    assert case_values == [1, 2, None], f"unexpected case values: {case_values}"
+    # Every case body must be a list of IR instructions (not AST nodes).
+    for case in switch_instruction.cases:
+        for entry in case.body:
+            assert not isinstance(entry, ast_nodes.Node), f"case body must contain IR instructions, got AST {type(entry).__name__}"
+    # The break inside an arm body lowers to ir.Jump targeting the switch's end label.
+    case_one_jumps = [entry for entry in switch_instruction.cases[0].body if isinstance(entry, ir.Jump)]
+    assert any(jump.target == switch_instruction.end_label for jump in case_one_jumps), (
+        f"expected break to lower to Jump(target={switch_instruction.end_label}), got jumps {case_one_jumps}"
+    )
+
+
+def test_user_switch_nested_in_loop_lowers_break_to_switch_end() -> None:
+    """A ``break`` inside a switch nested in a loop exits only the switch.
+
+    With the IR builder generating a fresh end-label per ``ir.Switch``
+    and threading it as ``break_tgt`` while leaving ``cont_tgt`` for
+    the enclosing loop, a ``break`` inside the switch should target the
+    switch's end (not the loop's), and the loop should iterate
+    normally.
+    """
+    asm = _user(
+        """
+        int helper(int limit) {
+            int i;
+            int total;
+            i = 0;
+            total = 0;
+            while (i < limit) {
+                switch (i) {
+                case 0:
+                    total = total + 1;
+                    break;
+                case 1:
+                    total = total + 10;
+                    break;
+                default:
+                    total = total + 100;
+                }
+                i = i + 1;
+            }
+            return total;
+        }
+        int main() { return helper(3); }
+        """
+    )
+    # Both label families must exist; the switch break targets the
+    # switch end and the surrounding loop continues to its own end.
+    assert ".switch_" in asm and "_end" in asm, f"missing switch end label:\n{asm}"
+    assert ".while_" in asm or "._ir_wend" in asm, f"missing while end:\n{asm}"
+
+
 def test_user_switch_on_char_discriminant_accepts_char_literal_cases() -> None:
     """``switch (char_var) { case 'A': ... }`` compiles cleanly.
 
@@ -6472,56 +6564,24 @@ def test_user_switch_rejects_duplicate_case_values() -> None:
     assert "duplicate case value" in message, message
 
 
-def test_user_switch_lowers_to_ir_switch_in_helper() -> None:
-    """A ``switch`` inside a non-main helper goes through ``ir.Switch``.
-
-    The IR builder emits :class:`cc.ir.Switch` for non-main bodies; its
-    case bodies hold IR instructions (so labels / gotos inside arms are
-    visible to IR-level passes).  This test checks the IR shape directly
-    rather than only the lowered assembly, which is also smoke-tested
-    by the other switch tests.
-    """
-    source_text = textwrap.dedent(
+def test_user_switch_rejects_non_constant_case_label() -> None:
+    """A ``case`` label that isn't a compile-time integer constant is rejected."""
+    ok, message = _compile(
         """
-        int helper(int op) {
-            int result;
-            switch (op) {
-            case 1:
-                result = 10;
-                break;
-            case 2:
-                result = 20;
-                break;
-            default:
-                result = -1;
+        int g;
+        int main() {
+            int x;
+            x = 0;
+            switch (x) {
+                case g: return 10;
             }
-            return result;
+            return 99;
         }
-        int main() { return helper(1); }
-        """
+        """,
+        target="user",
     )
-    source, defines, function_defines = preprocess(source_text)
-    raw_tokens = tokenize(source)
-    tokens = apply_defines(defines=defines, function_defines=function_defines, tokens=raw_tokens)
-    ast = Parser(tokens).parse_program()
-    ir_program = ir.Builder().build_program(ast)
-    helper_function = next(function for function in ir_program.functions if function.ast_node.name == "helper")
-    switches = [instruction for instruction in helper_function.body if isinstance(instruction, ir.Switch)]
-    assert len(switches) == 1, f"expected exactly one ir.Switch, got {len(switches)}"
-    switch_instruction = switches[0]
-    assert isinstance(switch_instruction.original_ast, ast_nodes.Switch), "original_ast must be the source AST switch"
-    assert len(switch_instruction.cases) == 3, f"expected 3 cases (2 + default), got {len(switch_instruction.cases)}"
-    case_values = [case.value for case in switch_instruction.cases]
-    assert case_values == [1, 2, None], f"unexpected case values: {case_values}"
-    # Every case body must be a list of IR instructions (not AST nodes).
-    for case in switch_instruction.cases:
-        for entry in case.body:
-            assert not isinstance(entry, ast_nodes.Node), f"case body must contain IR instructions, got AST {type(entry).__name__}"
-    # The break inside an arm body lowers to ir.Jump targeting the switch's end label.
-    case_one_jumps = [entry for entry in switch_instruction.cases[0].body if isinstance(entry, ir.Jump)]
-    assert any(jump.target == switch_instruction.end_label for jump in case_one_jumps), (
-        f"expected break to lower to Jump(target={switch_instruction.end_label}), got jumps {case_one_jumps}"
-    )
+    assert not ok, f"expected non-constant case error, compilation succeeded:\n{message}"
+    assert "compile-time integer constant" in message, message
 
 
 def test_user_switch_with_goto_out_of_arm_compiles() -> None:
@@ -6556,66 +6616,6 @@ def test_user_switch_with_goto_out_of_arm_compiles() -> None:
     )
     assert ".user_done:" in asm, f"expected user-label `.user_done:`:\n{asm}"
     assert any("jmp .user_done" in line for line in asm.splitlines()), f"expected goto jmp:\n{asm}"
-
-
-def test_user_switch_nested_in_loop_lowers_break_to_switch_end() -> None:
-    """A ``break`` inside a switch nested in a loop exits only the switch.
-
-    With the IR builder generating a fresh end-label per ``ir.Switch``
-    and threading it as ``break_tgt`` while leaving ``cont_tgt`` for
-    the enclosing loop, a ``break`` inside the switch should target the
-    switch's end (not the loop's), and the loop should iterate
-    normally.
-    """
-    asm = _user(
-        """
-        int helper(int limit) {
-            int i;
-            int total;
-            i = 0;
-            total = 0;
-            while (i < limit) {
-                switch (i) {
-                case 0:
-                    total = total + 1;
-                    break;
-                case 1:
-                    total = total + 10;
-                    break;
-                default:
-                    total = total + 100;
-                }
-                i = i + 1;
-            }
-            return total;
-        }
-        int main() { return helper(3); }
-        """
-    )
-    # Both label families must exist; the switch break targets the
-    # switch end and the surrounding loop continues to its own end.
-    assert ".switch_" in asm and "_end" in asm, f"missing switch end label:\n{asm}"
-    assert ".while_" in asm or "._ir_wend" in asm, f"missing while end:\n{asm}"
-
-
-def test_user_switch_rejects_non_constant_case_label() -> None:
-    """A ``case`` label that isn't a compile-time integer constant is rejected."""
-    ok, message = _compile(
-        """
-        int g;
-        int main() {
-            int x;
-            x = 0;
-            switch (x) {
-                case g: return 10;
-            }
-            return 99;
-        }
-        """,
-        target="user",
-    )
-    assert not ok, f"expected non-constant case error, compilation succeeded:\n{message}"
-    assert "compile-time integer constant" in message, message
 
 
 @pytest.mark.parametrize("source_path", sorted((REPO_ROOT / "user" / "programs").glob("*.c")))

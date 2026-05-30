@@ -57,6 +57,20 @@ def framebuffer_text(*, session: QemuSession) -> str:
     return "\n".join(rows)
 
 
+def main() -> int:
+    """Build the OS image and run the scrollback smoke test."""
+    subprocess.run(
+        ["./make_os.sh"],
+        check=True,
+        cwd=REPO_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    test_shift_pgup_reveals_scrolled_off_line()
+    print("1 passed, 0 failed")
+    return 0
+
+
 def test_shift_pgup_reveals_scrolled_off_line() -> None:
     """Shift+PgUp reveals a previously-scrolled-off marker line; a cooked-emit key collapses scrollback."""
     with qemu_session(monitor=True, snapshot=True) as session:
@@ -88,20 +102,6 @@ def test_shift_pgup_reveals_scrolled_off_line() -> None:
             message = f"cooked-emit key should collapse scrollback; got:\n{live_again}"
             raise AssertionError(message)
     print("PASS: test_shift_pgup_reveals_scrolled_off_line")
-
-
-def main() -> int:
-    """Build the OS image and run the scrollback smoke test."""
-    subprocess.run(
-        ["./make_os.sh"],
-        check=True,
-        cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    test_shift_pgup_reveals_scrolled_off_line()
-    print("1 passed, 0 failed")
-    return 0
 
 
 if __name__ == "__main__":
