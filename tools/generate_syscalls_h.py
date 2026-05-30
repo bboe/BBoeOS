@@ -2,8 +2,9 @@
 """Generate user/libbboeos/include/syscalls.h from kernel/include/constants.asm.
 
 Single source of truth for kernel-userspace ABI numbers: the kernel reads
-constants.asm directly (NASM %assign), and clang-compiled userland
-(user/libbboeos, ports/doom) reads the generated C header.  Eliminates the
+constants.asm directly (NASM %assign), and C userland reads the generated C
+header — both the cc.py-compiled in-tree sources (user/libbboeos, user/programs)
+and the out-of-tree clang ports/doom build.  Eliminates the
 class of bugs where renumbering the asm side leaves hardcoded hex
 literals on the C side pointing at the wrong syscall — see the
 SYS_RTC_MILLIS regression that wedged Doom's main loop after PR #337
@@ -115,7 +116,8 @@ def _render_header(*, rows: list[tuple[str, str, str]]) -> str:
         " *",
         " * Mirrors the syscall-ABI %assign constants (numbers + error codes +",
         " * signals + fd types + ioctl commands + libbboeos offsets) into a C header",
-        " * so clang-compiled userland (user/libbboeos, ports/doom) can reference",
+        " * so C userland (cc.py-compiled user/libbboeos and user/programs, plus the",
+        " * out-of-tree clang ports/doom build) can reference",
         " * them by name instead of hardcoding numeric values that drift the",
         " * next time the asm side is renumbered. */",
         "",

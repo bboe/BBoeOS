@@ -2,7 +2,7 @@
 """Generate user/libbboeos/libbboeos_stubs.S from kernel/include/constants.asm.
 
 Emits a tiny `jmp [FUNCTION_<NAME>_PTR]` thunk per libbboeos C export.
-Clang-built userland programs (ports/doom, tests/test_libbboeos_qemu.py)
+Clang-built userland programs (the out-of-tree ports/doom build)
 link this object file BEFORE libbboeos.a so the archive's full bodies
 never get pulled in — every call dispatches through the shared
 libbboeos blob's pointer table instead of being statically duplicated

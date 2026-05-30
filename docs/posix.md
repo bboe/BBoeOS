@@ -21,15 +21,15 @@ one read.
 
 Two userland code paths exist today:
 
-- **cc.py-compiled programs** — everything currently shipped in `bin/`.  These
-  reach the OS through a small in-kernel libbboeos of `FUNCTION_*` helpers at
-  user-virt `0x10000` and through raw `INT 30h` syscall wrappers.  No POSIX libc
-  is linked in.
+- **cc.py-compiled programs** — everything shipped in `bin/`, plus the libbboeos
+  C library itself.  These reach the OS through the shared libbboeos page of
+  `FUNCTION_*` helpers and the C library surface (`<string.h>`, `<dirent.h>`,
+  `printf`, `malloc`, …) at user-virt `0x10000`, dispatched through the pointer
+  table, and through raw `INT 30h` syscall wrappers.
 - **clang-compiled programs linked against `user/libbboeos/`** — today only the
-  standalone `hello` test binary built by `tests/test_libbboeos_qemu.py`. This
-  is a parallel libc waiting to be wired up, originally cut for a Doom port. Its
-  functions are real (102 implemented, 8 stubs) but they cannot be called from a
-  shipped program until cc.py learns to emit ELF + link an archive.
+  out-of-tree Doom port (`ports/doom`), which links `libbboeos_stubs.o` ahead of
+  `libbboeos.a` so its calls resolve through the same shared libbboeos pointer
+  table.  This is the path a larger third-party C program would use.
 
 For deeper detail on individual subsystems, see:
 
@@ -143,9 +143,9 @@ extras](#bboeos-specific-extras)); everything else execs `bin/<name>`.
 
 ## System calls and C library
 
-Each row names a POSIX function, the BBoeOS syscall (or libbboeos helper) that backs
-it where one exists, and whether a cc.py-built program in `bin/` can call it
-today.
+Each row names a POSIX function, the BBoeOS syscall (or libbboeos helper) that
+backs it where one exists, and whether a cc.py-built program in `bin/` can call
+it today.
 
 ### Process control
 
@@ -238,7 +238,7 @@ are both single-level under root.
 | `glob` / `globfree` | — | ❌ | ❌ | No shell-side or library-side globbing. |
 | `mkdir` | `SYS_FS_MKDIR` (01h) | ⚠️ | ✅ | One level under root only; no `mode` arg; `user/libbboeos` wrapper is a stub returning `-1`. |
 | `nftw` | — | ❌ | ❌ | One-level FS; programs walk the root directory directly. |
-| `opendir` / `readdir` / `closedir` / `rewinddir` | `SYS_IO_GETDENTS` (14h) | ⚠️ | ❌ | Implemented in `user/libbboeos/dirent.c` for clang-built programs (e.g. `bin/hello`).  No `seekdir` / `telldir`; `struct dirent` exposes `d_ino`/`d_type`/`d_name` only.  cc.py-built shipped programs still call `SYS_IO_GETDENTS` directly. |
+| `opendir` / `readdir` / `closedir` / `rewinddir` | `SYS_IO_GETDENTS` (14h) | ⚠️ | ❌ | Implemented in `user/libbboeos/dirent.c` for clang-built programs (e.g. the out-of-tree Doom port).  No `seekdir` / `telldir`; `struct dirent` exposes `d_ino`/`d_type`/`d_name` only.  cc.py-built shipped programs still call `SYS_IO_GETDENTS` directly. |
 | `pathconf` / `fpathconf` | — | ❌ | ❌ | `MAX_PATH = 64`, names ≤26 bytes — fixed at compile time. |
 | `realpath` | — | ❌ | ❌ | No symlinks to resolve and no working directory; all paths are already root-relative. |
 | `rename` | `SYS_FS_RENAME` (02h) | ⚠️ | ✅ | Same-directory rename only — cannot move across directories.  `user/libbboeos` `rename()` is a stub. |
@@ -332,8 +332,10 @@ line discipline from userland.
 ### String, ctype, stdlib
 
 All of the rows below are implemented in `user/libbboeos/` (string.c, ctype.c,
-stdlib.c) and exercised by `tests/test_libbboeos_qemu.py`'s `hello` binary — but
-they are not reachable from cc.py-built shipped programs.
+stdlib.c).  Reachability from cc.py-built shipped programs is tracked per-row in
+the "In shipped programs?" column — the `<string.h>` surface dispatches through
+the libbboeos pointer table, while the rest are available only to clang programs
+that statically link `libbboeos.a`.
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
@@ -380,7 +382,8 @@ they are not reachable from cc.py-built shipped programs.
 ### Threading
 
 Single-threaded only.  Within a "program" there is no concurrency primitive
-beyond signal handlers (which run on the same stack via the libbboeos trampoline).
+beyond signal handlers (which run on the same stack via the libbboeos
+trampoline).
 
 | POSIX function | Backing | Status | In shipped programs? | Notes |
 |----------------|---------|:------:|:------:|-------|
