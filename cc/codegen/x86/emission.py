@@ -23,6 +23,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import fields
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from cc import ir
 from cc.ast_nodes import (
@@ -362,7 +366,7 @@ class EmissionMixin:
             ):
                 function.regparm_count = min(3, len(function.params))
 
-    def _classify_switch_arms(self, statement: Switch, /) -> tuple[SwitchCase | None, list[SwitchCase]]:
+    def _classify_switch_arms(self, statement: Switch, /, *, cases_override: list | None = None) -> tuple:
         """Split a switch's cases into ``(default_case, case_arms)`` and check enum exhaustiveness.
 
         Raises :class:`CompileError` when the discriminant has an
@@ -370,10 +374,17 @@ class EmissionMixin:
         more declared variants are missing from the case labels.  Arbitrary
         integer discriminants (calls returning int, arithmetic, etc.) are
         treated as plain int and skip the check.
+
+        ``cases_override`` lets the IR-lowering path supply
+        :class:`ir.SwitchCase` instances (which share the ``.value`` /
+        ``.body`` shape with :class:`ast_nodes.SwitchCase`) in place of
+        ``statement.cases`` — the IR builder rewrites case bodies into
+        IR instruction lists, so the codegen needs the IR view here.
         """
-        default_case: SwitchCase | None = None
-        case_arms: list[SwitchCase] = []
-        for case in statement.cases:
+        source_cases = cases_override if cases_override is not None else statement.cases
+        default_case = None
+        case_arms: list = []
+        for case in source_cases:
             if case.value is None:
                 default_case = case
             else:
@@ -778,10 +789,11 @@ class EmissionMixin:
         self,
         *,
         case_label_node: type[Char | Int],
-        default_case: SwitchCase | None,
+        default_case: SwitchCase | ir.SwitchCase | None,
         discriminant: Node,
         discriminant_line: int,
-        groups: list[list[SwitchCase]],
+        emit_body: Callable[[list[Node]], None],
+        groups: list[list],
         label_index: int,
     ) -> None:
         """Emit interleaved-dispatch switch bodies (cmp/jne/body per group)."""
@@ -811,29 +823,30 @@ class EmissionMixin:
             if len(group) > 1:
                 self.emit(f"{body_label}:")
             self.ax_clear()
-            self.generate_body(terminal.body, scoped=True)
+            emit_body(terminal.body)
             self.emit(f"{next_label}:")
         if default_case is not None:
             self.ax_clear()
-            self.generate_body(default_case.body, scoped=True)
+            emit_body(default_case.body)
 
     def _emit_switch_separated_arms(
         self,
         *,
-        case_arms: list[SwitchCase],
+        case_arms: list,
         case_labels: list[str],
-        default_case: SwitchCase | None,
+        default_case: SwitchCase | ir.SwitchCase | None,
         default_label: str,
+        emit_body: Callable[[list[Node]], None],
     ) -> None:
         """Emit separated-dispatch switch bodies (each arm at its label)."""
         for case, arm_label in zip(case_arms, case_labels, strict=True):
             self.emit(f"{arm_label}:")
             self.ax_clear()
-            self.generate_body(case.body, scoped=True)
+            emit_body(case.body)
         if default_case is not None:
             self.emit(f"{default_label}:")
             self.ax_clear()
-            self.generate_body(default_case.body, scoped=True)
+            emit_body(default_case.body)
 
     def _generate_assign_expr(self, expression: AssignExpr, /) -> None:
         """Lower an :class:'AssignExpr' (parenthesised assignment as an rvalue).
@@ -1419,6 +1432,30 @@ class EmissionMixin:
         # for the index, not the result.
         self.ax_clear()
 
+    def _generate_ir_switch(self, instruction: ir.Switch, /) -> None:
+        """Lower an :class:`ir.Switch` instruction.
+
+        Delegates to :meth:`generate_switch` with overrides for the
+        case list (IR :class:`ir.SwitchCase` instances carrying lowered
+        IR bodies), the body emitter (so each arm is lowered via
+        :meth:`lower_ir_body`), and the end label (so the ``break``
+        jumps the IR builder already emitted resolve to the correct
+        target).  All optimizations (enum exhaustiveness, interleaved
+        dispatch, discriminant hoisting, char-typed labels) carry
+        over unchanged.
+        """
+        # ``generate_switch`` calls ``ax_clear()`` itself, but the
+        # AST-path call site in ``generate_statement`` also clears AX
+        # before invoking it.  Mirror that here so peephole / tracking
+        # state is identical between the two paths.
+        self.ax_clear()
+        self.generate_switch(
+            instruction.original_ast,
+            cases_override=instruction.cases,
+            emit_body=self.lower_ir_body,
+            end_label_override=instruction.end_label,
+        )
+
     def _generate_logical_value(self, expression: Node, /) -> None:
         """Materialize a ``LogicalAnd`` / ``LogicalOr`` into the accumulator as 0 or 1.
 
@@ -1666,6 +1703,8 @@ class EmissionMixin:
                     if continue_label is not None:
                         self.loop_continue_labels.pop()
                     self.loop_end_labels.pop()
+            case ir.Switch():
+                self._generate_ir_switch(instruction)
             case ir.Block(node=node):
                 self.generate_statement(node)
 
@@ -4076,7 +4115,15 @@ class EmissionMixin:
             message = f"unknown statement: {type(statement).__name__}"
             raise CompileError(message, line=statement.line)
 
-    def generate_switch(self, statement: Switch, /) -> None:
+    def generate_switch(
+        self,
+        statement: Switch,
+        /,
+        *,
+        cases_override: list | None = None,
+        emit_body: Callable[[list[Node]], None] | None = None,
+        end_label_override: str | None = None,
+    ) -> None:
         """Generate assembly for a ``switch`` statement (compare/jump chain).
 
         Lowering is intentionally minimal — no jump table.  The
@@ -4100,8 +4147,20 @@ class EmissionMixin:
         error.  Adding a new enum variant later then flags every
         switch site that forgot it, at compile time, which is the
         whole motivation for fusing the two features.
+
+        ``emit_body`` lets the IR-lowering path substitute a custom
+        function for emitting each arm's body (lowering IR
+        instructions instead of AST nodes).  The default is
+        ``self.generate_body(arm_body, scoped=True)``.
+
+        ``end_label_override`` lets the IR-lowering path supply the
+        label that ``break``-derived jumps inside arms already target
+        (the IR builder picks it before lowering so each
+        :class:`ir.Jump` in the case bodies can reference it).
         """
-        default_case, case_arms = self._classify_switch_arms(statement)
+        if emit_body is None:
+            emit_body = lambda arm_body: self.generate_body(arm_body, scoped=True)  # noqa: E731
+        default_case, case_arms = self._classify_switch_arms(statement, cases_override=cases_override)
         # Build the compare/jump chain via the existing condition
         # machinery: each ``case CONST:`` is lowered as a synthetic
         # ``discriminant == CONST`` true-jump.  Going through
@@ -4111,7 +4170,7 @@ class EmissionMixin:
         # compare so the per-arm load isn't elided by a peephole pass
         # that assumes the accumulator is dead after the first ``je``.
         label_index = self.new_label()
-        end_label = f".switch_{label_index}_end"
+        end_label = end_label_override if end_label_override is not None else f".switch_{label_index}_end"
         case_labels = [f".switch_{label_index}_case_{index}" for index, _ in enumerate(case_arms)]
         default_label = f".switch_{label_index}_default" if default_case is not None else end_label
         discriminant_line = statement.discriminant.line
@@ -4162,8 +4221,8 @@ class EmissionMixin:
             # zero-or-more empty-body labels followed by one body-carrying
             # case.  ``_switch_can_interleave`` guarantees the last case has a
             # non-empty body, so every group terminates.
-            groups: list[list[SwitchCase]] = []
-            current: list[SwitchCase] = []
+            groups: list[list] = []
+            current: list = []
             for case in case_arms:
                 current.append(case)
                 if case.body:
@@ -4176,6 +4235,7 @@ class EmissionMixin:
                     default_case=default_case,
                     discriminant=discriminant,
                     discriminant_line=discriminant_line,
+                    emit_body=emit_body,
                     groups=groups,
                     label_index=label_index,
                 )
@@ -4206,6 +4266,7 @@ class EmissionMixin:
                 case_labels=case_labels,
                 default_case=default_case,
                 default_label=default_label,
+                emit_body=emit_body,
             )
         finally:
             self.loop_end_labels.pop()

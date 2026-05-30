@@ -662,19 +662,36 @@ class Optimizer:
         the preceding ``Jump`` as redundant if its target was the label
         immediately following the now-deleted one.
 
-        References come from two sources: IR-level ``Jump`` / ``BranchFalse``
-        / ``CarryBranch`` targets, AND AST ``Goto`` nodes buried inside
-        ``Block`` subtrees (where ``Switch`` / ``IndexedCall`` etc. lower
-        to opaque AST handlers).  Both must be considered or a user
-        label whose only references are inside a Block-wrapped subtree
-        would be incorrectly pruned.
+        References come from three sources: IR-level ``Jump`` /
+        ``BranchFalse`` / ``CarryBranch`` targets, AST ``Goto`` nodes
+        buried inside ``Block`` subtrees (where ``IndexedCall`` etc.
+        lower to opaque AST handlers), and IR instructions nested
+        inside ``ir.Switch`` case bodies (which the optimizer doesn't
+        currently recurse into but whose targets still need to keep
+        outer labels live).  All three must be considered or a user
+        label referenced only from inside a switch arm would be
+        incorrectly pruned.
         """
-        referenced = self._collect_ast_goto_targets(body)
+        referenced = self._collect_all_label_references(body)
+        return [instruction for instruction in body if not (isinstance(instruction, ir.Label) and instruction.name not in referenced)]
+
+    @classmethod
+    def _collect_all_label_references(cls, body: list[ir.Instruction]) -> set[str]:
+        """Return every label name referenced anywhere reachable from *body*.
+
+        Recurses into ``ir.Switch.cases[].body`` so the optimizer's
+        dead-label pass sees branches emitted inside switch arms,
+        even though those arms aren't otherwise walked.
+        """
+        referenced = cls._collect_ast_goto_targets(body)
         for instruction in body:
             target = _branch_target(instruction)
             if target is not None:
                 referenced.add(target)
-        return [instruction for instruction in body if not (isinstance(instruction, ir.Label) and instruction.name not in referenced)]
+            if isinstance(instruction, ir.Switch):
+                for case in instruction.cases:
+                    referenced.update(cls._collect_all_label_references(case.body))
+        return referenced
 
     @staticmethod
     def _collect_ast_goto_targets(body: list[ir.Instruction]) -> set[str]:

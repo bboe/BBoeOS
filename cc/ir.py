@@ -191,6 +191,41 @@ class LoopBoundary:
     push: bool
 
 
+@dataclass(kw_only=True, slots=True)
+class SwitchCase:
+    """A single arm of an :class:`Switch` instruction.
+
+    ``value`` is the resolved integer constant for a ``case`` arm, or
+    ``None`` for the ``default`` arm.  ``body`` is the lowered IR
+    instruction list for the arm — labels and gotos inside the body are
+    visible to IR-level passes.  Mutable so optimizer passes can rewrite
+    the body in place.
+    """
+
+    body: list[Instruction]
+    value: int | None
+
+
+@dataclass(kw_only=True, slots=True)
+class Switch:
+    """``switch (discriminant) { case ...: ... default: ... }`` statement.
+
+    The discriminant is kept as an AST node so the codegen's
+    type-dependent paths (char-typed labels, enum-typed exhaustiveness,
+    pinned-register / memory-scalar hoist) work unchanged.
+    ``original_ast`` preserves the source :class:`ast_nodes.Switch` so
+    enum exhaustiveness can be checked against the right variant set.
+    Each :class:`SwitchCase` body is a list of IR instructions; a
+    ``break`` inside an arm lowers to :class:`Jump` to ``end_label``,
+    which the codegen emits once at the end of the lowered switch.
+    """
+
+    cases: list[SwitchCase]
+    discriminant: ast_nodes.Node
+    end_label: str
+    original_ast: ast_nodes.Switch
+
+
 Instruction = (
     BinaryOperation
     | Copy
@@ -206,6 +241,7 @@ Instruction = (
     | InlineAsm
     | Block
     | LoopBoundary
+    | Switch
 )
 
 
@@ -419,6 +455,25 @@ class Builder:
                 # break the fast-path test.
                 if self._var_types.get(name) == "unsigned long" or self._is_long_pointee_index(expr) or self._is_guarded_update(name, expr):
                     out.append(Block(node=stmt))
+                elif self._is_multi_binop_constant_chain(expr):
+                    # Constant-foldable shapes (``a | b | c`` of named
+                    # constants / enum values) lose their fold when broken
+                    # into per-binop IR temps — the codegen's
+                    # ``_constant_expression`` walks the AST RHS once and
+                    # emits a single ``mov reg, (A|B|C)``; the per-temp
+                    # IR form forces a runtime push/pop chain.  Delegate
+                    # multi-binop chains (single binops still benefit from
+                    # the IR path's pinned-register fast paths) to the
+                    # AST codegen to preserve the fold.
+                    out.append(Block(node=stmt))
+                elif self._is_inplace_self_modify(name, expr):
+                    # ``x = x op K`` — the AST ``emit_store_local``
+                    # recognises this self-mod pattern and emits ``inc
+                    # reg`` / ``add reg, imm`` / ``or reg, imm`` etc.
+                    # The IR-temp lowering would round-trip through
+                    # ``tmp = x op K; x = tmp`` (3 instructions instead
+                    # of 1), so delegate to the AST codegen.
+                    out.append(Block(node=stmt))
                 else:
                     source = self._build_expr(expr, out, strings=strings)
                     out.append(Copy(destination=name, source=source))
@@ -471,6 +526,15 @@ class Builder:
                 out.append(Block(node=stmt))
             case ast_nodes.InlineAsm(content=content):
                 out.append(InlineAsm(content=content))
+            case ast_nodes.Switch(cases=cases, discriminant=discriminant):
+                self._build_switch(
+                    cases=cases,
+                    cont_tgt=cont_tgt,
+                    discriminant=discriminant,
+                    original_ast=stmt,
+                    out=out,
+                    strings=strings,
+                )
             case _:
                 out.append(Block(node=stmt))
 
@@ -498,6 +562,29 @@ class Builder:
             self._build_cond_false(cond, end_lbl, out, strings=strings)
             self._build_stmts(body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
             out.append(Label(name=end_lbl))
+
+    def _build_switch(
+        self,
+        *,
+        cases: list[ast_nodes.SwitchCase],
+        cont_tgt: str | None,
+        discriminant: ast_nodes.Node,
+        original_ast: ast_nodes.Switch,
+        out: list[Instruction],
+        strings: list[tuple[str, str]],
+    ) -> None:
+        # ``break`` inside a case body exits the switch via this label,
+        # mirroring AST codegen's loop_end_labels push.  ``continue``
+        # inherits the enclosing loop's continue label (or remains None
+        # outside a loop) — the AST path does the same by not pushing
+        # to loop_continue_labels in generate_switch.
+        end_lbl = self._lbl("swend")
+        ir_cases: list[SwitchCase] = []
+        for case in cases:
+            case_body: list[Instruction] = []
+            self._build_stmts(case.body, case_body, break_tgt=end_lbl, cont_tgt=cont_tgt, strings=strings)
+            ir_cases.append(SwitchCase(body=case_body, value=case.value))
+        out.append(Switch(cases=ir_cases, discriminant=discriminant, end_label=end_lbl, original_ast=original_ast))
 
     def _build_while(
         self,
@@ -756,6 +843,26 @@ class Builder:
         else_is_self = isinstance(expression.else_expr, ast_nodes.Var) and expression.else_expr.name == name
         return then_is_self or else_is_self
 
+    @staticmethod
+    def _is_inplace_self_modify(name: str, expression: ast_nodes.Node) -> bool:
+        """Return True if *expression* is ``Var(name) op X`` for an in-place-eligible op.
+
+        Recognises the ``x = x op K`` self-modification shape that the
+        AST ``emit_store_local`` / ``_generate_binary_operation_expression``
+        lower to ``inc reg`` / ``add reg, imm`` / ``or reg, imm`` etc.
+        Going through the IR's per-binop temp lowering rebuilds the
+        same value via ``tmp = x op K; x = tmp``, which expands to 3
+        instructions instead of 1.  The check is intentionally
+        limited to ``Var(name)`` on the left and any operand on the
+        right — the fast paths fire whenever the destination operand
+        appears once on the RHS.
+        """
+        if not isinstance(expression, ast_nodes.BinaryOperation):
+            return False
+        if expression.operation not in ("+", "-", "&", "|", "^", "<<", ">>", "*"):
+            return False
+        return isinstance(expression.left, ast_nodes.Var) and expression.left.name == name
+
     def _is_long_pointee_index(self, expression: ast_nodes.Node) -> bool:
         """Return True if *expression* is ``base[i]`` whose pointee is a 4-byte unsigned int.
 
@@ -772,3 +879,51 @@ class Builder:
             return False
         base_type = self._var_types.get(expression.array.name)
         return base_type == "unsigned long*"
+
+    @staticmethod
+    def _is_multi_binop_constant_chain(expression: ast_nodes.Node) -> bool:
+        """Return True for a multi-binop chain of named-constant leaves.
+
+        Restricted to chains whose leaves are ``Var`` (potentially a
+        ``NAMED_CONSTANT`` / enum value resolvable by the codegen's
+        :meth:`_constant_expression`) and at least one of which is
+        a ``BinaryOperation`` — i.e. ``A | B | C`` of capital-letter
+        identifiers.  Chains involving ``Int`` literals or local
+        variables are excluded so the IR's per-temp lowering can keep
+        the pinned-register fast paths firing where the AST path
+        would lose the fold and emit a push/pop scratch sequence.
+        """
+        if not isinstance(expression, ast_nodes.BinaryOperation):
+            return False
+        if expression.operation not in ("+", "-", "*", "&", "|", "^"):
+            return False
+        if not Builder._is_named_constant_chain(expression.left):
+            return False
+        if not Builder._is_named_constant_chain(expression.right):
+            return False
+        # Require at least one branch to be itself a BinaryOperation so the
+        # chain has 2+ operators; a bare ``Var op Var`` doesn't qualify
+        # (the IR path's fast paths beat the AST path's frame round-trip).
+        return isinstance(expression.left, ast_nodes.BinaryOperation) or isinstance(expression.right, ast_nodes.BinaryOperation)
+
+    @staticmethod
+    def _is_named_constant_chain(expression: ast_nodes.Node) -> bool:
+        """Return True if *expression* is a chain of likely-NAMED_CONSTANT leaves.
+
+        The codegen's :meth:`_constant_expression` only resolves
+        ``Var`` nodes when they refer to ``NAMED_CONSTANTS`` /
+        ``enum_constants`` / ``constant_aliases``; a chain that mixes
+        in non-constant ``Var`` names is rejected by the folder and
+        falls back to a verbose push/pop scratch sequence on the AST
+        path.  Restricting ``Var`` leaves to ALL_CAPS identifiers (the
+        convention for those tables) keeps the Block-delegation
+        conservative — local-variable ``Var`` chains stay on the IR
+        path where their pinned-register fast paths still fire.
+        """
+        if isinstance(expression, ast_nodes.Int):
+            return True
+        if isinstance(expression, ast_nodes.Var):
+            return expression.name == expression.name.upper()
+        if isinstance(expression, ast_nodes.BinaryOperation) and expression.operation in ("+", "-", "*", "&", "|", "^"):
+            return Builder._is_named_constant_chain(expression.left) and Builder._is_named_constant_chain(expression.right)
+        return False
