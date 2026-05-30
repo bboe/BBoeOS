@@ -65,7 +65,7 @@ def _build_blocks(body: list[ir.Instruction], /, *, bb_starts: list[tuple[int, s
     return blocks
 
 
-def _identify_block_starts(body: list[ir.Instruction]) -> list[tuple[int, str]]:
+def _identify_block_starts(body: list[ir.Instruction], /) -> list[tuple[int, str]]:
     """Return ``[(index, label), ...]`` for every BB boundary in *body*, in order.
 
     The function entry is always boundary 0.  Every :class:`cc.ir.Label`
@@ -120,7 +120,7 @@ def _intersect_dominators(
     return finger_a
 
 
-def _postorder_index(postorder: list[BasicBlock]) -> dict[BasicBlock, int]:
+def _postorder_index(postorder: list[BasicBlock], /) -> dict[BasicBlock, int]:
     """Return ``{block: index_in_postorder}``.
 
     Postorder visits a block after all its descendants in the DFS tree,
@@ -133,7 +133,7 @@ def _postorder_index(postorder: list[BasicBlock]) -> dict[BasicBlock, int]:
     return {block: index for index, block in enumerate(reversed(postorder))}
 
 
-def _reverse_postorder(cfg: ControlFlowGraph) -> list[BasicBlock]:
+def _reverse_postorder(cfg: ControlFlowGraph, /) -> list[BasicBlock]:
     """Return blocks in reverse postorder from the entry — the order CHK needs.
 
     Iterative DFS to avoid recursion limits on long linear bodies.
@@ -159,7 +159,7 @@ def _reverse_postorder(cfg: ControlFlowGraph) -> list[BasicBlock]:
     return postorder
 
 
-def _wire_predecessors(blocks: list[BasicBlock]) -> None:
+def _wire_predecessors(blocks: list[BasicBlock], /) -> None:
     """Populate ``predecessors`` on each block by reversing ``successors`` edges."""
     for block in blocks:
         for successor in block.successors:
@@ -241,7 +241,7 @@ class ControlFlowGraph:
     label_to_block: dict[str, BasicBlock]
 
 
-def build_cfg(body: list[ir.Instruction]) -> ControlFlowGraph:
+def build_cfg(body: list[ir.Instruction], /) -> ControlFlowGraph:
     """Split *body* into basic blocks and wire successor / predecessor edges.
 
     ``body`` is the flat IR for one :class:`cc.ir.Function`.  A new BB
@@ -284,7 +284,7 @@ def compute_dominance_frontiers(idom: dict[BasicBlock, BasicBlock], /) -> dict[B
     return frontiers
 
 
-def compute_dominators(cfg: ControlFlowGraph) -> dict[BasicBlock, BasicBlock]:
+def compute_dominators(cfg: ControlFlowGraph, /) -> dict[BasicBlock, BasicBlock]:
     """Return ``{block: immediate_dominator}`` for every reachable block.
 
     Uses the Cooper-Harvey-Kennedy iterative algorithm.  The entry

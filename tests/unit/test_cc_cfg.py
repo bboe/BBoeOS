@@ -9,7 +9,7 @@ from __future__ import annotations
 from cc import ast_nodes, cfg, ir
 
 
-def _function(body: list[ir.Instruction]) -> ir.Function:
+def _function(body: list[ir.Instruction], /) -> ir.Function:
     """Wrap *body* in a minimal :class:`ir.Function` for CFG construction."""
     ast = ast_nodes.Function(
         body=[],
