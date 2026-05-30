@@ -26,7 +26,7 @@ from cc.tokens import COMPARISON_OPERATIONS, INVERT_COMPARISON
 Value = int | str | ast_nodes.AddressOf
 
 
-def _is_constant_true(condition: ast_nodes.Node) -> bool:
+def _is_constant_true(condition: ast_nodes.Node, /) -> bool:
     """Return True if *condition* is statically nonzero.
 
     Recognises both the bare ``Int(value=N)`` form (not wrapped by the
@@ -289,7 +289,7 @@ class Builder:
         self._str_counter = 0
         self._carry_return_functions = carry_return_functions
 
-    def build_program(self, program: ast_nodes.Program) -> Program:
+    def build_program(self, program: ast_nodes.Program, /) -> Program:
         """Lower every function in *program* to IR."""
         # Build a table of struct_name → frozenset of bitfield field names so
         # _lower_assign_expr can reject bitfield assignment-as-expression.
@@ -303,10 +303,10 @@ class Builder:
                 )
                 if bitfield_names:
                     self._struct_bitfield_names[node.name] = bitfield_names
-        return Program(functions=[self._build_function(f) for f in program.functions], globals=program.globals)
+        return Program(functions=[self._build_function(function) for function in program.functions], globals=program.globals)
 
     @staticmethod
-    def _assign_rhs_field_name(node: ast_nodes.Node) -> str:
+    def _assign_rhs_field_name(node: ast_nodes.Node, /) -> str:
         """Return the attribute name that holds the RHS expression for any *Assign node.
 
         Every ``*Assign`` dataclass in ``cc/ast_nodes.py`` exposes the RHS
@@ -319,21 +319,21 @@ class Builder:
 
     def _build_cond_false(
         self,
-        cond: ast_nodes.Node,
-        target: str,
-        out: list[Instruction],
         *,
+        cond: ast_nodes.Node,
+        out: list[Instruction],
         strings: list[tuple[str, str]],
+        target: str,
     ) -> None:
         """Emit IR that jumps to *target* when *cond* evaluates to false."""
         match cond:
             case ast_nodes.LogicalAnd(left=left, right=right):
-                self._build_cond_false(left, target, out, strings=strings)
-                self._build_cond_false(right, target, out, strings=strings)
+                self._build_cond_false(cond=left, out=out, strings=strings, target=target)
+                self._build_cond_false(cond=right, out=out, strings=strings, target=target)
             case ast_nodes.LogicalOr(left=left, right=right):
-                skip_lbl = self._lbl("lor")
-                self._build_cond_true(left, skip_lbl, out, strings=strings)
-                self._build_cond_false(right, target, out, strings=strings)
+                skip_lbl = self._label("lor")
+                self._build_cond_true(cond=left, out=out, strings=strings, target=skip_lbl)
+                self._build_cond_false(cond=right, out=out, strings=strings, target=target)
                 out.append(Label(name=skip_lbl))
             case ast_nodes.BinaryOperation(operation=operation, left=left, right=right) if (
                 operation in ("!=", "==") and self._is_carry_return_call(left) and right == ast_nodes.Int(value=0)
@@ -345,31 +345,31 @@ class Builder:
                 when = "set" if operation == "!=" else "clear"
                 out.append(CarryBranch(call_ast=left, target=target, when=when))
             case ast_nodes.BinaryOperation(operation=operation, left=left, right=right) if operation in COMPARISON_OPERATIONS:
-                left_value = self._build_expr(left, out, strings=strings)
-                right_value = self._build_expr(right, out, strings=strings)
+                left_value = self._build_expr(expr=left, out=out, strings=strings)
+                right_value = self._build_expr(expr=right, out=out, strings=strings)
                 out.append(BranchFalse(left=left_value, operation=operation, right=right_value, target=target))
             case _:
                 # General case: evaluate to a temp, test non-zero.
-                value = self._build_expr(cond, out, strings=strings)
+                value = self._build_expr(expr=cond, out=out, strings=strings)
                 out.append(BranchFalse(left=value, operation="!=", right=0, target=target))
 
     def _build_cond_true(
         self,
-        cond: ast_nodes.Node,
-        target: str,
-        out: list[Instruction],
         *,
+        cond: ast_nodes.Node,
+        out: list[Instruction],
         strings: list[tuple[str, str]],
+        target: str,
     ) -> None:
         """Emit IR that jumps to *target* when *cond* evaluates to true."""
         match cond:
             case ast_nodes.LogicalOr(left=left, right=right):
-                self._build_cond_true(left, target, out, strings=strings)
-                self._build_cond_true(right, target, out, strings=strings)
+                self._build_cond_true(cond=left, out=out, strings=strings, target=target)
+                self._build_cond_true(cond=right, out=out, strings=strings, target=target)
             case ast_nodes.LogicalAnd(left=left, right=right):
-                skip_lbl = self._lbl("land")
-                self._build_cond_false(left, skip_lbl, out, strings=strings)
-                self._build_cond_true(right, target, out, strings=strings)
+                skip_lbl = self._label("land")
+                self._build_cond_false(cond=left, out=out, strings=strings, target=skip_lbl)
+                self._build_cond_true(cond=right, out=out, strings=strings, target=target)
                 out.append(Label(name=skip_lbl))
             case ast_nodes.BinaryOperation(operation=operation, left=left, right=right) if (
                 operation in ("!=", "==") and self._is_carry_return_call(left) and right == ast_nodes.Int(value=0)
@@ -380,43 +380,43 @@ class Builder:
                 when = "clear" if operation == "!=" else "set"
                 out.append(CarryBranch(call_ast=left, target=target, when=when))
             case ast_nodes.BinaryOperation(operation=operation, left=left, right=right) if operation in COMPARISON_OPERATIONS:
-                left_value = self._build_expr(left, out, strings=strings)
-                right_value = self._build_expr(right, out, strings=strings)
+                left_value = self._build_expr(expr=left, out=out, strings=strings)
+                right_value = self._build_expr(expr=right, out=out, strings=strings)
                 # Invert the condition: true-jump means false-branch doesn't fire.
                 inverted = INVERT_COMPARISON[operation]
                 out.append(BranchFalse(left=left_value, operation=inverted, right=right_value, target=target))
             case _:
-                value = self._build_expr(cond, out, strings=strings)
+                value = self._build_expr(expr=cond, out=out, strings=strings)
                 out.append(BranchFalse(left=value, operation="==", right=0, target=target))
 
     def _build_do_while(
         self,
-        cond: ast_nodes.Node,
-        body: list[ast_nodes.Node],
-        out: list[Instruction],
         *,
+        body: list[ast_nodes.Node],
+        cond: ast_nodes.Node,
+        out: list[Instruction],
         strings: list[tuple[str, str]],
     ) -> None:
-        loop_lbl = self._lbl("dloop")
-        cond_lbl = self._lbl("dcond")
-        end_lbl = self._lbl("dend")
+        loop_lbl = self._label("dloop")
+        cond_lbl = self._label("dcond")
+        end_lbl = self._label("dend")
         out.extend([
             Label(name=loop_lbl),
             LoopBoundary(continue_label=cond_lbl, end_label=end_lbl, push=True),
         ])
-        self._build_stmts(body, out, break_tgt=end_lbl, cont_tgt=cond_lbl, strings=strings)
+        self._build_stmts(stmts=body, out=out, break_tgt=end_lbl, cont_tgt=cond_lbl, strings=strings)
         out.extend([
             LoopBoundary(continue_label=cond_lbl, end_label=end_lbl, push=False),
             Label(name=cond_lbl),
         ])
-        self._build_cond_true(cond, loop_lbl, out, strings=strings)
+        self._build_cond_true(cond=cond, out=out, strings=strings, target=loop_lbl)
         out.append(Label(name=end_lbl))
 
     def _build_expr(
         self,
+        *,
         expr: ast_nodes.Node,
         out: list[Instruction],
-        *,
         strings: list[tuple[str, str]],
     ) -> Value:
         match expr:
@@ -430,8 +430,8 @@ class Builder:
                 strings.append((label, content))
                 return label
             case ast_nodes.BinaryOperation(operation=operation, left=left, right=right):
-                left_value = self._build_expr(left, out, strings=strings)
-                right_value = self._build_expr(right, out, strings=strings)
+                left_value = self._build_expr(expr=left, out=out, strings=strings)
+                right_value = self._build_expr(expr=right, out=out, strings=strings)
                 temp = self._tmp()
                 out.append(BinaryOperation(destination=temp, left=left_value, operation=operation, right=right_value))
                 return temp
@@ -445,21 +445,21 @@ class Builder:
                 out.append(Block(node=ast_nodes.Assign(expr=expr, name=temp)))
                 return temp
             case ast_nodes.Call(name=name, args=args):
-                arg_values = tuple(self._build_expr(a, out, strings=strings) for a in args)
+                arg_values = tuple(self._build_expr(expr=a, out=out, strings=strings) for a in args)
                 temp = self._tmp()
                 out.append(Call(args=arg_values, destination=temp, name=name))
                 return temp
             case ast_nodes.Index(array=ast_nodes.Var(name=base), index=index_node):
-                index_value = self._build_expr(index_node, out, strings=strings)
+                index_value = self._build_expr(expr=index_node, out=out, strings=strings)
                 temp = self._tmp()
                 out.append(Index(base=base, destination=temp, index=index_value))
                 return temp
             case ast_nodes.LogicalOr() | ast_nodes.LogicalAnd():
                 # Short-circuit boolean: lower to conditional set (0 or 1).
                 temp = self._tmp()
-                true_lbl = self._lbl("btrue")
-                end_lbl = self._lbl("bend")
-                self._build_cond_true(expr, true_lbl, out, strings=strings)
+                true_lbl = self._label("btrue")
+                end_lbl = self._label("bend")
+                self._build_cond_true(cond=expr, out=out, strings=strings, target=true_lbl)
                 out.extend([
                     Copy(destination=temp, source=0),
                     Jump(target=end_lbl),
@@ -473,7 +473,7 @@ class Builder:
                 # arguments (&var) without the node being replaced by a temp.
                 return expr
             case ast_nodes.AssignExpr(inner=inner):
-                return self._lower_assign_expr(inner, out, strings=strings)
+                return self._lower_assign_expr(inner=inner, out=out, strings=strings)
             case _:
                 # Complex: use a temp + Block to let AST codegen handle it.
                 temp = self._tmp()
@@ -482,32 +482,32 @@ class Builder:
 
     def _build_for(
         self,
-        init: list[ast_nodes.Node],
-        cond: ast_nodes.Node | None,
-        step: list[ast_nodes.Node],
-        body: list[ast_nodes.Node],
-        out: list[Instruction],
         *,
+        body: list[ast_nodes.Node],
+        cond: ast_nodes.Node | None,
+        init: list[ast_nodes.Node],
+        out: list[Instruction],
+        step: list[ast_nodes.Node],
         strings: list[tuple[str, str]],
     ) -> None:
-        self._build_stmts(init, out, break_tgt=None, cont_tgt=None, strings=strings)
-        loop_lbl = self._lbl("floop")
-        step_lbl = self._lbl("fstep")
-        end_lbl = self._lbl("fend")
+        self._build_stmts(stmts=init, out=out, break_tgt=None, cont_tgt=None, strings=strings)
+        loop_lbl = self._label("floop")
+        step_lbl = self._label("fstep")
+        end_lbl = self._label("fend")
         out.append(Label(name=loop_lbl))
         if cond is not None and not _is_constant_true(cond):
-            self._build_cond_false(cond, end_lbl, out, strings=strings)
+            self._build_cond_false(cond=cond, out=out, strings=strings, target=end_lbl)
         out.append(LoopBoundary(continue_label=step_lbl, end_label=end_lbl, push=True))
-        self._build_stmts(body, out, break_tgt=end_lbl, cont_tgt=step_lbl, strings=strings)
+        self._build_stmts(stmts=body, out=out, break_tgt=end_lbl, cont_tgt=step_lbl, strings=strings)
         out.extend([
             LoopBoundary(continue_label=step_lbl, end_label=end_lbl, push=False),
             Label(name=step_lbl),
         ])
         for step_expr in step:
-            self._build_expr(step_expr, out, strings=strings)
+            self._build_expr(expr=step_expr, out=out, strings=strings)
         out.extend([Jump(target=loop_lbl), Label(name=end_lbl)])
 
-    def _build_function(self, func: ast_nodes.Function) -> Function:
+    def _build_function(self, function: ast_nodes.Function, /) -> Function:
         out: list[Instruction] = []
         strings: list[tuple[str, str]] = []
         # Pre-scan parameter and VarDecl types so the IR builder can
@@ -519,55 +519,55 @@ class Builder:
         # an int-typed slot — the long-store path then rejects ``Var
         # temp`` with ``expected 'unsigned long' expression, got 'int'``.
         self._var_types: dict[str, str] = {}
-        for parameter in func.params:
+        for parameter in function.params:
             self._var_types[parameter.name] = parameter.type
-        self._collect_local_types(func.body)
+        self._collect_local_types(function.body)
         # Per-function user-label bookkeeping: definitions collected as
         # ``Label`` nodes are lowered; references collected as ``Goto``
         # nodes are lowered.  Validated after the body completes so
         # forward references resolve naturally.
         self._user_labels_defined: dict[str, int] = {}
         self._user_labels_referenced: dict[str, int] = {}
-        self._build_stmts(func.body, out, break_tgt=None, cont_tgt=None, strings=strings)
+        self._build_stmts(break_tgt=None, cont_tgt=None, out=out, stmts=function.body, strings=strings)
         for name, line in self._user_labels_referenced.items():
             if name not in self._user_labels_defined:
-                message = f"goto target '{name}' has no matching label in function '{func.name}'"
+                message = f"goto target '{name}' has no matching label in function '{function.name}'"
                 raise CompileError(message, line=line)
-        return Function(ast_node=func, body=out, strings=strings)
+        return Function(ast_node=function, body=out, strings=strings)
 
     def _build_if(
         self,
-        cond: ast_nodes.Node,
+        *,
         body: list[ast_nodes.Node],
+        break_tgt: str | None,
+        cond: ast_nodes.Node,
+        cont_tgt: str | None,
         else_body: list[ast_nodes.Node] | None,
         out: list[Instruction],
-        *,
         strings: list[tuple[str, str]],
-        break_tgt: str | None,
-        cont_tgt: str | None,
     ) -> None:
         if else_body is not None:
-            else_lbl = self._lbl("else")
-            end_lbl = self._lbl("endif")
-            self._build_cond_false(cond, else_lbl, out, strings=strings)
-            self._build_stmts(body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+            else_lbl = self._label("else")
+            end_lbl = self._label("endif")
+            self._build_cond_false(cond=cond, out=out, strings=strings, target=else_lbl)
+            self._build_stmts(stmts=body, out=out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
             out.extend([Jump(target=end_lbl), Label(name=else_lbl)])
-            self._build_stmts(else_body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+            self._build_stmts(stmts=else_body, out=out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
             out.append(Label(name=end_lbl))
         else:
-            end_lbl = self._lbl("endif")
-            self._build_cond_false(cond, end_lbl, out, strings=strings)
-            self._build_stmts(body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+            end_lbl = self._label("endif")
+            self._build_cond_false(cond=cond, out=out, strings=strings, target=end_lbl)
+            self._build_stmts(stmts=body, out=out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
             out.append(Label(name=end_lbl))
 
     def _build_stmt(
         self,
-        stmt: ast_nodes.Node,
-        out: list[Instruction],
         *,
-        strings: list[tuple[str, str]],
         break_tgt: str | None,
         cont_tgt: str | None,
+        out: list[Instruction],
+        stmt: ast_nodes.Node,
+        strings: list[tuple[str, str]],
     ) -> None:
         match stmt:
             case ast_nodes.VarDecl():
@@ -589,7 +589,11 @@ class Builder:
                 # tight ``cmp / Jcc / mov dest, other`` lowering fires;
                 # the IR-temp path would round-trip through AX and
                 # break the fast-path test.
-                if self._var_types.get(name) == "unsigned long" or self._is_long_pointee_index(expr) or self._is_guarded_update(name, expr):
+                if (
+                    self._var_types.get(name) == "unsigned long"
+                    or self._is_long_pointee_index(expr)
+                    or self._is_guarded_update(expression=expr, name=name)
+                ):
                     out.append(Block(node=stmt))
                 elif self._is_multi_binop_constant_chain(expr):
                     # Constant-foldable shapes (``a | b | c`` of named
@@ -602,7 +606,7 @@ class Builder:
                     # the IR path's pinned-register fast paths) to the
                     # AST codegen to preserve the fold.
                     out.append(Block(node=stmt))
-                elif self._is_inplace_self_modify(name, expr):
+                elif self._is_inplace_self_modify(expression=expr, name=name):
                     # ``x = x op K`` — the AST ``emit_store_local``
                     # recognises this self-mod pattern and emits ``inc
                     # reg`` / ``add reg, imm`` / ``or reg, imm`` etc.
@@ -611,31 +615,31 @@ class Builder:
                     # of 1), so delegate to the AST codegen.
                     out.append(Block(node=stmt))
                 else:
-                    source = self._build_expr(expr, out, strings=strings)
+                    source = self._build_expr(expr=expr, out=out, strings=strings)
                     out.append(Copy(destination=name, source=source))
             case ast_nodes.IndexAssign(array=ast_nodes.Var(name=base), index=index_node, expr=expr):
-                index_value = self._build_expr(index_node, out, strings=strings)
-                source = self._build_expr(expr, out, strings=strings)
+                index_value = self._build_expr(expr=index_node, out=out, strings=strings)
+                source = self._build_expr(expr=expr, out=out, strings=strings)
                 out.append(IndexAssign(base=base, index=index_value, source=source))
             case ast_nodes.Call(name="asm"):
                 # asm() requires raw String args; pass through as-is.
                 out.append(Block(node=stmt))
             case ast_nodes.Call() as call:
-                args = tuple(self._build_expr(a, out, strings=strings) for a in call.args)
+                args = tuple(self._build_expr(expr=a, out=out, strings=strings) for a in call.args)
                 out.append(Call(args=args, destination=None, name=call.name))
             case ast_nodes.If(cond=cond, body=body, else_body=else_body):
-                self._build_if(cond, body, else_body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+                self._build_if(body=body, break_tgt=break_tgt, cond=cond, cont_tgt=cont_tgt, else_body=else_body, out=out, strings=strings)
             case ast_nodes.While(cond=cond, body=body):
-                self._build_while(cond, body, out, strings=strings)
+                self._build_while(body=body, cond=cond, out=out, strings=strings)
             case ast_nodes.DoWhile(cond=cond, body=body):
-                self._build_do_while(cond, body, out, strings=strings)
+                self._build_do_while(body=body, cond=cond, out=out, strings=strings)
             case ast_nodes.For(init=init, cond=cond, step=step, body=body):
-                self._build_for(init, cond, step, body, out, strings=strings)
+                self._build_for(body=body, cond=cond, init=init, out=out, step=step, strings=strings)
             case ast_nodes.Break():
                 assert break_tgt is not None, "break outside loop"
                 out.append(Jump(target=break_tgt))
             case ast_nodes.Compound(body=body):
-                self._build_stmts(body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+                self._build_stmts(stmts=body, out=out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
             case ast_nodes.Continue():
                 assert cont_tgt is not None, "continue outside loop"
                 out.append(Jump(target=cont_tgt))
@@ -656,7 +660,7 @@ class Builder:
                 if value is not None and self._is_long_pointee_index(value):
                     out.append(Block(node=stmt))
                 else:
-                    v = self._build_expr(value, out, strings=strings) if value is not None else None
+                    v = self._build_expr(expr=value, out=out, strings=strings) if value is not None else None
                     out.append(Return(value=v))
             case ast_nodes.IndexedCall():
                 out.append(Block(node=stmt))
@@ -676,15 +680,15 @@ class Builder:
 
     def _build_stmts(
         self,
-        stmts: list[ast_nodes.Node],
-        out: list[Instruction],
         *,
-        strings: list[tuple[str, str]],
         break_tgt: str | None,
         cont_tgt: str | None,
+        out: list[Instruction],
+        stmts: list[ast_nodes.Node],
+        strings: list[tuple[str, str]],
     ) -> None:
         for s in stmts:
-            self._build_stmt(s, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+            self._build_stmt(break_tgt=break_tgt, cont_tgt=cont_tgt, out=out, stmt=s, strings=strings)
 
     def _build_switch(
         self,
@@ -701,37 +705,37 @@ class Builder:
         # inherits the enclosing loop's continue label (or remains None
         # outside a loop) — the AST path does the same by not pushing
         # to loop_continue_labels in generate_switch.
-        end_lbl = self._lbl("swend")
+        end_lbl = self._label("swend")
         ir_cases: list[SwitchCase] = []
         for case in cases:
             case_body: list[Instruction] = []
-            self._build_stmts(case.body, case_body, break_tgt=end_lbl, cont_tgt=cont_tgt, strings=strings)
+            self._build_stmts(stmts=case.body, out=case_body, break_tgt=end_lbl, cont_tgt=cont_tgt, strings=strings)
             ir_cases.append(SwitchCase(body=case_body, value=case.value))
         out.append(Switch(cases=ir_cases, discriminant=discriminant, end_label=end_lbl, original_ast=original_ast))
 
     def _build_while(
         self,
-        cond: ast_nodes.Node,
-        body: list[ast_nodes.Node],
-        out: list[Instruction],
         *,
+        body: list[ast_nodes.Node],
+        cond: ast_nodes.Node,
+        out: list[Instruction],
         strings: list[tuple[str, str]],
     ) -> None:
-        loop_lbl = self._lbl("wloop")
-        end_lbl = self._lbl("wend")
+        loop_lbl = self._label("wloop")
+        end_lbl = self._label("wend")
         out.append(Label(name=loop_lbl))
         # ``while (1)`` (and other statically-nonzero conditions) skip
         # the condition check entirely.  ``parse_condition`` wraps the
         # bare ``1`` as ``BinaryOperation("!=", Int(1), Int(0))``, so
         # both shapes have to be recognised.
         if not _is_constant_true(cond):
-            self._build_cond_false(cond, end_lbl, out, strings=strings)
+            self._build_cond_false(cond=cond, out=out, strings=strings, target=end_lbl)
         out.append(LoopBoundary(continue_label=loop_lbl, end_label=end_lbl, push=True))
-        self._build_stmts(body, out, break_tgt=end_lbl, cont_tgt=loop_lbl, strings=strings)
+        self._build_stmts(stmts=body, out=out, break_tgt=end_lbl, cont_tgt=loop_lbl, strings=strings)
         out.append(LoopBoundary(continue_label=loop_lbl, end_label=end_lbl, push=False))
         out.extend([Jump(target=loop_lbl), Label(name=end_lbl)])
 
-    def _collect_local_types(self, stmts: list[ast_nodes.Node]) -> None:
+    def _collect_local_types(self, stmts: list[ast_nodes.Node], /) -> None:
         """Walk *stmts* and record every ``VarDecl`` name → type binding.
 
         Nested blocks (``if`` / ``while`` / ``do``-``while``) are
@@ -752,12 +756,12 @@ class Builder:
                 for case in statement.cases:
                     self._collect_local_types(case.body)
 
-    def _is_carry_return_call(self, node: ast_nodes.Node) -> bool:
+    def _is_carry_return_call(self, node: ast_nodes.Node, /) -> bool:
         """Return True if *node* is a :class:`ast_nodes.Call` to a carry_return function."""
         return isinstance(node, ast_nodes.Call) and node.name in self._carry_return_functions
 
     @staticmethod
-    def _is_guarded_update(name: str, expression: ast_nodes.Node) -> bool:
+    def _is_guarded_update(*, expression: ast_nodes.Node, name: str) -> bool:
         """Return True if *expression* is ``cond ? <name> : other`` or ``cond ? other : <name>``.
 
         That's the shape ``MIN(name, other)`` / ``MAX(name, other)`` produce —
@@ -773,7 +777,7 @@ class Builder:
         return then_is_self or else_is_self
 
     @staticmethod
-    def _is_inplace_self_modify(name: str, expression: ast_nodes.Node) -> bool:
+    def _is_inplace_self_modify(*, expression: ast_nodes.Node, name: str) -> bool:
         """Return True if *expression* is ``Var(name) op X`` for an in-place-eligible op.
 
         Recognises the ``x = x op K`` self-modification shape that the
@@ -792,7 +796,7 @@ class Builder:
             return False
         return isinstance(expression.left, ast_nodes.Var) and expression.left.name == name
 
-    def _is_long_pointee_index(self, expression: ast_nodes.Node) -> bool:
+    def _is_long_pointee_index(self, expression: ast_nodes.Node, /) -> bool:
         """Return True if *expression* is ``base[i]`` whose pointee is a 4-byte unsigned int.
 
         Used by ``_build_stmt`` / ``_build_expr`` to short-circuit the
@@ -810,7 +814,7 @@ class Builder:
         return base_type == "unsigned long*"
 
     @staticmethod
-    def _is_multi_binop_constant_chain(expression: ast_nodes.Node) -> bool:
+    def _is_multi_binop_constant_chain(expression: ast_nodes.Node, /) -> bool:
         """Return True for a multi-binop chain of named-constant leaves.
 
         Restricted to chains whose leaves are ``Var`` (potentially a
@@ -836,7 +840,7 @@ class Builder:
         return isinstance(expression.left, ast_nodes.BinaryOperation) or isinstance(expression.right, ast_nodes.BinaryOperation)
 
     @staticmethod
-    def _is_named_constant_chain(expression: ast_nodes.Node) -> bool:
+    def _is_named_constant_chain(expression: ast_nodes.Node, /) -> bool:
         """Return True if *expression* is a chain of likely-NAMED_CONSTANT leaves.
 
         The codegen's :meth:`_constant_expression` only resolves
@@ -857,16 +861,16 @@ class Builder:
             return Builder._is_named_constant_chain(expression.left) and Builder._is_named_constant_chain(expression.right)
         return False
 
-    def _lbl(self, tag: str = "l") -> str:
+    def _label(self, tag: str = "l", /) -> str:
         name = f"._ir_{tag}{self._counter}"
         self._counter += 1
         return name
 
     def _lower_assign_expr(
         self,
+        *,
         inner: ast_nodes.Node,
         out: list[Instruction],
-        *,
         strings: list[tuple[str, str]],
     ) -> str:
         """Lower a parenthesized assignment to IR; return the temp holding its value.
@@ -896,11 +900,11 @@ class Builder:
             if inner.member_name in bitfield_fields:
                 message = "assignment-as-expression to bitfield fields is not supported"
                 raise CompileError(message, line=line)
-        rhs_value = self._build_expr(original_rhs, out, strings=strings)
+        rhs_value = self._build_expr(expr=original_rhs, out=out, strings=strings)
         temp = self._tmp()
         out.append(Copy(destination=temp, source=rhs_value))
         rebound = dataclasses.replace(inner, **{rhs_field: ast_nodes.Var(line=line, name=temp)})
-        self._build_stmt(rebound, out, break_tgt=None, cont_tgt=None, strings=strings)
+        self._build_stmt(break_tgt=None, cont_tgt=None, out=out, stmt=rebound, strings=strings)
         return temp
 
     def _tmp(self) -> str:
