@@ -83,10 +83,15 @@ def _apply_relocations(
                 symbol_addresses=symbol_addresses,
                 symbol_name=relocation["symbol"],
             )
+            # ``addend`` is the constant a source operand baked into the
+            # displacement (e.g. ``buf[i - 1]`` → ``[buf-1+esi]``); it
+            # defaults to 0 for plain symbol references.  Dropping it
+            # would silently turn ``buf[i - 1]`` into ``buf[i]``.
+            addend = relocation.get("addend", 0)
             packed = (
-                struct.pack("<i", symbol_address - (patch_address + 4))
+                struct.pack("<i", symbol_address + addend - (patch_address + 4))
                 if relocation["type"] == "rel32"
-                else struct.pack("<I", symbol_address)
+                else struct.pack("<I", (symbol_address + addend) & 0xFFFFFFFF)
             )
             image[patch_offset_in_image : patch_offset_in_image + 4] = packed
 
@@ -379,6 +384,8 @@ def _validate_relocation_entry(*, index: int, path: Path, relocation: dict, sect
     # rel32 / abs32 patches are 4 bytes; the whole patch site must fit in the section.
     if offset + 4 > section_sizes[section_name]:
         sys.exit(f"ccld: {path}: relocation #{index}: offset {offset}+4 exceeds section .{section_name} size {section_sizes[section_name]}")
+    if "addend" in relocation and not isinstance(relocation["addend"], int):
+        sys.exit(f"ccld: {path}: relocation #{index}: `addend` must be an int when present")
     symbol = relocation.get("symbol")
     if not isinstance(symbol, str) or not symbol:
         sys.exit(f"ccld: {path}: relocation #{index}: `symbol` must be a non-empty string")

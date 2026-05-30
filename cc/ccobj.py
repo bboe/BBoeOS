@@ -373,11 +373,24 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
                     )
                     raise ValueError(message)
                 symbol = pending_reloc_symbols.pop(0)
+                # The 4-byte placeholder NASM emitted holds the symbol's
+                # section-relative value plus any constant the source
+                # baked into the displacement (e.g. ``edit_buffer[i - 1]``
+                # compiles to ``[edit_buffer-1+esi]``, so the placeholder
+                # is ``offset(edit_buffer) - 1``).  Stash it so the
+                # post-pass can recover the addend once every symbol's
+                # offset is known (the target may be a forward reference).
+                placeholder_value = int.from_bytes(
+                    bytes_column[reloc_opcode_length : reloc_opcode_length + 4],
+                    "little",
+                    signed=True,
+                )
                 relocations.append({
                     "section": current_section,
                     "offset": offset + reloc_opcode_length,
                     "symbol": symbol,
                     "type": "abs32",
+                    "_placeholder": placeholder_value,
                 })
             _accumulate_bytes(
                 bytes_column=bytes_column,
@@ -392,6 +405,24 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
     # unresolved cross-object extern.  Drop those names from
     # ``extern_set`` so ccld only sees true externs.
     extern_set = [name for name in extern_set if name not in symbols]
+
+    # Resolve each bracket placeholder into a relocation addend now that
+    # every symbol's section-relative offset is known.  NASM emits the
+    # placeholder as ``offset(symbol) + addend``; the linker patches the
+    # slot with ``address(symbol) + addend``, so the addend is exactly
+    # ``placeholder - offset(symbol)``.  A nonzero addend is the constant
+    # a source operand baked into the displacement (e.g. ``buf[i - 1]``).
+    # Cross-object externs never carry a bracket placeholder (NASM can't
+    # resolve them in ``-f bin``), so this only touches in-object targets.
+    for relocation in relocations:
+        placeholder_value = relocation.pop("_placeholder", None)
+        if placeholder_value is None:
+            continue
+        symbol_info = symbols.get(relocation["symbol"])
+        if symbol_info is None:
+            continue
+        if (addend := placeholder_value - symbol_info["offset"]) != 0:
+            relocation["addend"] = addend
 
     sections: dict[str, dict] = {}
     for name in KNOWN_SECTIONS:

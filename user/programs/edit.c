@@ -347,8 +347,10 @@ int main(int argc, char *argv[]) {
                original column as the target line allows. */
             {
                 int target_col = cursor_column;
+                int moved = 0;
                 int found_nl = 0;
                 while (gap_end < EDIT_BUFFER_SIZE) {
+                    moved += 1;
                     if (gap_move_right() == '\n') {
                         found_nl = 1;
                         break;
@@ -365,6 +367,15 @@ int main(int argc, char *argv[]) {
                         gap_move_right();
                         cursor_column += 1;
                         target_col -= 1;
+                    }
+                } else {
+                    /* On the last line there is no following newline; the
+                       scan above walked the gap to end-of-buffer.  Undo it
+                       so the gap (real insertion point) stays put and keeps
+                       matching the drawn cursor_line / cursor_column. */
+                    while (moved > 0) {
+                        gap_move_left();
+                        moved -= 1;
                     }
                 }
             }

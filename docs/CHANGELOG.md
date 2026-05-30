@@ -9,6 +9,25 @@ All notable changes to BBoeOS are documented in this file. Dates reflect when
 changes landed, grouped under the version that was (or will be) current at the
 time.
 
+## Unreleased
+
+### Fixed
+
+- **Linker dropped relocation addends (`ccld.py` / `pack-ccobj`).** An object-
+  pipeline program that referenced a global at a constant displacement — `buf[i
+  - 1]` compiles to `[buf-1+esi]` — was relinked as `buf[i]`: the linker
+  overwrote the displacement with the bare symbol address and discarded the `-1`
+  NASM baked into the placeholder.  `pack-ccobj` now records the addend
+  (`placeholder − symbol_offset`) for each bracket relocation and `ccld.py`
+  applies it (`address + addend`).  This silently mis-compiled any object-built
+  program using such an access; `edit`'s Ctrl+A (move to start of line) read the
+  wrong byte and so stopped immediately whenever the cursor sat at end of line.
+
+- **`edit`: down-arrow on the last line desynced the cursor.** Ctrl+N / down on
+  a line with no following newline walked the gap to end-of-buffer without
+  updating `cursor_line` / `cursor_column`, so the drawn cursor and the real
+  insertion point diverged.  The scan now rewinds when no next line exists.
+
 ## [0.12.0](https://github.com/bboe/BBoeOS/compare/0.11.0...0.12.0) (2026-05-30)
 
 The self-hosting release: the entire in-tree OS — kernel, every userland
