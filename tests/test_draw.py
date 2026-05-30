@@ -48,15 +48,6 @@ LS_TIMEOUT = 5.0
 MIN_NONZERO_PIXEL_BYTES = 500
 
 
-def _count_nonzero_pixel_bytes(*, screenshot_path: Path) -> int:
-    """Return the number of non-zero RGB bytes in a P6 PPM file."""
-    data = screenshot_path.read_bytes()
-    end = 0
-    for _ in range(3):  # P6 magic, dimensions, max-value
-        end = data.index(b"\n", end) + 1
-    return sum(1 for byte in data[end:] if byte)
-
-
 def _build_os(*, image_path: Path) -> None:
     """Run make_os.sh into image_path; abort the test if the build fails."""
     result = subprocess.run(
@@ -69,6 +60,15 @@ def _build_os(*, image_path: Path) -> None:
         sys.stderr.write(result.stderr)
         message = "make_os.sh failed"
         raise RuntimeError(message)
+
+
+def _count_nonzero_pixel_bytes(*, screenshot_path: Path) -> int:
+    """Return the number of non-zero RGB bytes in a P6 PPM file."""
+    data = screenshot_path.read_bytes()
+    end = 0
+    for _ in range(3):  # P6 magic, dimensions, max-value
+        end = data.index(b"\n", end) + 1
+    return sum(1 for byte in data[end:] if byte)
 
 
 def _run_draw_session(

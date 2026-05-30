@@ -28,6 +28,17 @@ def _run(*, command: str) -> bytes:
         return full[crlf + 2 :] if crlf >= 0 else full
 
 
+def main() -> int:
+    """Build the OS image and run all dup smoke tests."""
+    subprocess.run(["./make_os.sh"], check=True, cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    test_dup2_closes_target_first()
+    test_dup2_self_is_noop()
+    test_dup_console_writes()
+    test_dup_refuses_vga()
+    print("4 passed, 0 failed")
+    return 0
+
+
 def test_dup2_closes_target_first() -> None:
     """dup2 over an existing fd closes the old contents and reuses the slot."""
     out = _run(command="fd_helpers dup2_close_target")
@@ -54,17 +65,6 @@ def test_dup_refuses_vga() -> None:
     out = _run(command="fd_helpers dup_vga")
     assert b"dup_vga_refused" in out, f"got {out!r}"
     print("PASS: test_dup_refuses_vga")
-
-
-def main() -> int:
-    """Build the OS image and run all dup smoke tests."""
-    subprocess.run(["./make_os.sh"], check=True, cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    test_dup2_closes_target_first()
-    test_dup2_self_is_noop()
-    test_dup_console_writes()
-    test_dup_refuses_vga()
-    print("4 passed, 0 failed")
-    return 0
 
 
 if __name__ == "__main__":

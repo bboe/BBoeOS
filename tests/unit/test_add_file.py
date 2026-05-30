@@ -34,6 +34,21 @@ from add_file import (  # noqa: E402
 )
 
 
+def _bin_start_sector(*, image: Path) -> int:
+    """Return the start sector of bin/ in the given image."""
+    directory_sector = compute_directory_sector(image_path=str(image))
+    directory_sectors = read_assign("DIRECTORY_SECTORS")
+    image_data = bytearray(image.read_bytes())
+    bin_offset = find_subdirectory_entry(
+        directory_sector=directory_sector,
+        directory_sectors=directory_sectors,
+        image=image_data,
+        name="bin",
+    )
+    assert bin_offset is not None, "bin/ subdirectory not found in image"
+    return int.from_bytes(image_data[bin_offset + 26 : bin_offset + 28], "little")
+
+
 @pytest.fixture(scope="session")
 def base_image() -> Iterator[Path]:
     """Build drive.img once per pytest session.
@@ -83,46 +98,33 @@ def ext2_image(tmp_path: Path) -> Path:
     return image
 
 
-def _bin_start_sector(*, image: Path) -> int:
-    """Return the start sector of bin/ in the given image."""
-    directory_sector = compute_directory_sector(image_path=str(image))
-    directory_sectors = read_assign("DIRECTORY_SECTORS")
-    image_data = bytearray(image.read_bytes())
-    bin_offset = find_subdirectory_entry(
-        directory_sector=directory_sector,
-        directory_sectors=directory_sectors,
-        image=image_data,
-        name="bin",
-    )
-    assert bin_offset is not None, "bin/ subdirectory not found in image"
-    return int.from_bytes(image_data[bin_offset + 26 : bin_offset + 28], "little")
-
-
-def test_three_fillers_one_save(bbfs_image: Path, tmp_path: Path) -> None:
-    """Three empty files added in one add_files() call all appear in bin/."""
+def test_batch_files_appear(ext2_image: Path, tmp_path: Path) -> None:
+    """Files added via add_files() are visible in the ext2 partition."""
     files = []
     for name in ("zalpha", "zbeta", "zgamma"):
         path = tmp_path / name
-        path.touch()
+        path.write_text("hi\n")
         files.append(str(path))
     add_files(
-        allow_empty=True,
-        executable=False,
+        executable=True,
         file_paths=files,
-        image_path=str(bbfs_image),
+        image_path=str(ext2_image),
         subdirectory="bin",
     )
-    bin_start = _bin_start_sector(image=bbfs_image)
-    directory_sectors = read_assign("DIRECTORY_SECTORS")
-    image_data = bytearray(bbfs_image.read_bytes())
+    ext2_start_sector = compute_directory_sector(image_path=str(ext2_image))
+    partition = tmp_path / "partition.ext2"
+    subprocess.run(
+        ["dd", f"if={ext2_image}", f"of={partition}", "bs=512", f"skip={ext2_start_sector}", "status=none"],
+        check=True,
+    )
+    listing = subprocess.run(
+        ["debugfs", "-R", "ls /bin", str(partition)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
     for name in ("zalpha", "zbeta", "zgamma"):
-        entry = find_entry(
-            directory_sectors=directory_sectors,
-            directory_start_sector=bin_start,
-            image=image_data,
-            name=name,
-        )
-        assert entry is not None, f"{name!r} not found in bin/"
+        assert name in listing, f"{name!r} not found in ext2 /bin listing"
 
 
 def test_batch_runs_single_debugfs_session(
@@ -163,35 +165,6 @@ def test_batch_runs_single_debugfs_session(
     assert len(debugfs_calls) == 1, f"expected 1 debugfs invocation, got {len(debugfs_calls)}: {debugfs_calls}"
 
 
-def test_batch_files_appear(ext2_image: Path, tmp_path: Path) -> None:
-    """Files added via add_files() are visible in the ext2 partition."""
-    files = []
-    for name in ("zalpha", "zbeta", "zgamma"):
-        path = tmp_path / name
-        path.write_text("hi\n")
-        files.append(str(path))
-    add_files(
-        executable=True,
-        file_paths=files,
-        image_path=str(ext2_image),
-        subdirectory="bin",
-    )
-    ext2_start_sector = compute_directory_sector(image_path=str(ext2_image))
-    partition = tmp_path / "partition.ext2"
-    subprocess.run(
-        ["dd", f"if={ext2_image}", f"of={partition}", "bs=512", f"skip={ext2_start_sector}", "status=none"],
-        check=True,
-    )
-    listing = subprocess.run(
-        ["debugfs", "-R", "ls /bin", str(partition)],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    for name in ("zalpha", "zbeta", "zgamma"):
-        assert name in listing, f"{name!r} not found in ext2 /bin listing"
-
-
 def test_cli_accepts_multiple_files(bbfs_image: Path, tmp_path: Path) -> None:
     """CLI invoked with multiple positional file args adds all of them."""
     paths = []
@@ -219,3 +192,30 @@ def test_cli_accepts_multiple_files(bbfs_image: Path, tmp_path: Path) -> None:
             name=name,
         )
         assert entry is not None, f"{name!r} not in image after CLI batch add"
+
+
+def test_three_fillers_one_save(bbfs_image: Path, tmp_path: Path) -> None:
+    """Three empty files added in one add_files() call all appear in bin/."""
+    files = []
+    for name in ("zalpha", "zbeta", "zgamma"):
+        path = tmp_path / name
+        path.touch()
+        files.append(str(path))
+    add_files(
+        allow_empty=True,
+        executable=False,
+        file_paths=files,
+        image_path=str(bbfs_image),
+        subdirectory="bin",
+    )
+    bin_start = _bin_start_sector(image=bbfs_image)
+    directory_sectors = read_assign("DIRECTORY_SECTORS")
+    image_data = bytearray(bbfs_image.read_bytes())
+    for name in ("zalpha", "zbeta", "zgamma"):
+        entry = find_entry(
+            directory_sectors=directory_sectors,
+            directory_start_sector=bin_start,
+            image=image_data,
+            name=name,
+        )
+        assert entry is not None, f"{name!r} not found in bin/"

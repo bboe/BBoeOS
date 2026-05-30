@@ -55,52 +55,10 @@ class BinaryOperation:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class Copy:
-    """destination = source — scalar assignment."""
+class Block:
+    """Escape hatch: lower this AST node via the existing statement codegen."""
 
-    destination: str
-    source: Value
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class Call:
-    """destination = name(args) — call expression; destination is None to discard return."""
-
-    args: tuple[Value, ...]
-    destination: str | None
-    name: str
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class Index:
-    """destination = base[index] — array / pointer read."""
-
-    base: str
-    destination: str
-    index: Value
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class IndexAssign:
-    """base[index] = source — array / pointer write."""
-
-    base: str
-    index: Value
-    source: Value
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class Label:
-    """A branch target label."""
-
-    name: str
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class Jump:
-    """Unconditional jump."""
-
-    target: str
+    node: ast_nodes.Node
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -111,6 +69,15 @@ class BranchFalse:
     operation: str
     right: Value
     target: str
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Call:
+    """destination = name(args) — call expression; destination is None to discard return."""
+
+    args: tuple[Value, ...]
+    destination: str | None
+    name: str
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -136,26 +103,29 @@ class CarryBranch:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class Return:
-    """Function return, optionally with a value."""
+class Copy:
+    """destination = source — scalar assignment."""
 
-    value: Value | None
+    destination: str
+    source: Value
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class TailCall:
-    """name(args) in tail position — codegen lowers to ``jmp name`` (no ``ret``).
+class Index:
+    """destination = base[index] — array / pointer read."""
 
-    Produced by :func:`cc.ir_optimize.optimize` when a :class:`Call`
-    whose result is consumed only by an immediately-following
-    :class:`Return` is rewritten as a single control-flow terminator.
-    The codegen falls back to a normal call / return sequence when the
-    call site fails the runtime eligibility check (e.g. stack args,
-    pinned saves required, callee is a builtin).
-    """
+    base: str
+    destination: str
+    index: Value
 
-    args: tuple[Value, ...]
-    name: str
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IndexAssign:
+    """base[index] = source — array / pointer write."""
+
+    base: str
+    index: Value
+    source: Value
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -166,10 +136,17 @@ class InlineAsm:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class Block:
-    """Escape hatch: lower this AST node via the existing statement codegen."""
+class Jump:
+    """Unconditional jump."""
 
-    node: ast_nodes.Node
+    target: str
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Label:
+    """A branch target label."""
+
+    name: str
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -191,19 +168,11 @@ class LoopBoundary:
     push: bool
 
 
-@dataclass(kw_only=True, slots=True)
-class SwitchCase:
-    """A single arm of an :class:`Switch` instruction.
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Return:
+    """Function return, optionally with a value."""
 
-    ``value`` is the resolved integer constant for a ``case`` arm, or
-    ``None`` for the ``default`` arm.  ``body`` is the lowered IR
-    instruction list for the arm — labels and gotos inside the body are
-    visible to IR-level passes.  Mutable so optimizer passes can rewrite
-    the body in place.
-    """
-
-    body: list[Instruction]
-    value: int | None
+    value: Value | None
 
 
 @dataclass(kw_only=True, slots=True)
@@ -226,22 +195,53 @@ class Switch:
     original_ast: ast_nodes.Switch
 
 
+@dataclass(kw_only=True, slots=True)
+class SwitchCase:
+    """A single arm of an :class:`Switch` instruction.
+
+    ``value`` is the resolved integer constant for a ``case`` arm, or
+    ``None`` for the ``default`` arm.  ``body`` is the lowered IR
+    instruction list for the arm — labels and gotos inside the body are
+    visible to IR-level passes.  Mutable so optimizer passes can rewrite
+    the body in place.
+    """
+
+    body: list[Instruction]
+    value: int | None
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class TailCall:
+    """name(args) in tail position — codegen lowers to ``jmp name`` (no ``ret``).
+
+    Produced by :func:`cc.ir_optimize.optimize` when a :class:`Call`
+    whose result is consumed only by an immediately-following
+    :class:`Return` is rewritten as a single control-flow terminator.
+    The codegen falls back to a normal call / return sequence when the
+    call site fails the runtime eligibility check (e.g. stack args,
+    pinned saves required, callee is a builtin).
+    """
+
+    args: tuple[Value, ...]
+    name: str
+
+
 Instruction = (
     BinaryOperation
-    | Copy
+    | Block
+    | BranchFalse
     | Call
+    | CarryBranch
+    | Copy
     | Index
     | IndexAssign
-    | Label
-    | Jump
-    | BranchFalse
-    | CarryBranch
-    | Return
-    | TailCall
     | InlineAsm
-    | Block
+    | Jump
+    | Label
     | LoopBoundary
+    | Return
     | Switch
+    | TailCall
 )
 
 
@@ -289,10 +289,6 @@ class Builder:
         self._str_counter = 0
         self._carry_return_functions = carry_return_functions
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def build_program(self, program: ast_nodes.Program) -> Program:
         """Lower every function in *program* to IR."""
         # Build a table of struct_name → frozenset of bitfield field names so
@@ -309,10 +305,6 @@ class Builder:
                     self._struct_bitfield_names[node.name] = bitfield_names
         return Program(functions=[self._build_function(f) for f in program.functions], globals=program.globals)
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _assign_rhs_field_name(node: ast_nodes.Node) -> str:
         """Return the attribute name that holds the RHS expression for any *Assign node.
@@ -325,64 +317,195 @@ class Builder:
             return "value"
         return "expr"
 
-    def _is_carry_return_call(self, node: ast_nodes.Node) -> bool:
-        """Return True if *node* is a :class:`ast_nodes.Call` to a carry_return function."""
-        return isinstance(node, ast_nodes.Call) and node.name in self._carry_return_functions
-
-    def _lbl(self, tag: str = "l") -> str:
-        name = f"._ir_{tag}{self._counter}"
-        self._counter += 1
-        return name
-
-    def _lower_assign_expr(
+    def _build_cond_false(
         self,
-        inner: ast_nodes.Node,
+        cond: ast_nodes.Node,
+        target: str,
         out: list[Instruction],
         *,
         strings: list[tuple[str, str]],
-    ) -> str:
-        """Lower a parenthesized assignment to IR; return the temp holding its value.
+    ) -> None:
+        """Emit IR that jumps to *target* when *cond* evaluates to false."""
+        match cond:
+            case ast_nodes.LogicalAnd(left=left, right=right):
+                self._build_cond_false(left, target, out, strings=strings)
+                self._build_cond_false(right, target, out, strings=strings)
+            case ast_nodes.LogicalOr(left=left, right=right):
+                skip_lbl = self._lbl("lor")
+                self._build_cond_true(left, skip_lbl, out, strings=strings)
+                self._build_cond_false(right, target, out, strings=strings)
+                out.append(Label(name=skip_lbl))
+            case ast_nodes.BinaryOperation(operation=operation, left=left, right=right) if (
+                operation in ("!=", "==") and self._is_carry_return_call(left) and right == ast_nodes.Int(value=0)
+            ):
+                # ``if (carry_return_call() != 0)`` / ``... == 0`` — jump to
+                # *target* when the condition is false, i.e. jump on CF set
+                # for ``!=`` (false means the call returned 0) and on CF
+                # clear for ``==``.
+                when = "set" if operation == "!=" else "clear"
+                out.append(CarryBranch(call_ast=left, target=target, when=when))
+            case ast_nodes.BinaryOperation(operation=operation, left=left, right=right) if operation in COMPARISON_OPERATIONS:
+                left_value = self._build_expr(left, out, strings=strings)
+                right_value = self._build_expr(right, out, strings=strings)
+                out.append(BranchFalse(left=left_value, operation=operation, right=right_value, target=target))
+            case _:
+                # General case: evaluate to a temp, test non-zero.
+                value = self._build_expr(cond, out, strings=strings)
+                out.append(BranchFalse(left=value, operation="!=", right=0, target=target))
 
-        Strategy: evaluate the RHS into a temp, rewrite the wrapped
-        ``*Assign`` so its RHS is ``Var(temp)``, emit the rewritten
-        ``*Assign`` as a statement (reusing the existing per-lvalue store
-        paths), and return the temp as the expression value.  This
-        guarantees the original RHS expression is evaluated exactly once.
-        """
-        line = inner.line
-        rhs_field = self._assign_rhs_field_name(inner)
-        original_rhs = getattr(inner, rhs_field)
-        # ``unsigned long`` lvalues don't round-trip cleanly through
-        # int-typed temps.  Out-of-scope per the spec.
-        if isinstance(inner, ast_nodes.Assign) and self._var_types.get(inner.name) == "unsigned long":
-            message = "assignment-as-expression to 'unsigned long' is not supported"
-            raise CompileError(message, line=line)
-        # Bitfield member assignments clobber AX during the read-modify-write
-        # sequence, breaking the "AX = assigned value" contract.  Reject at
-        # compile time rather than silently miscompile.
-        if isinstance(inner, ast_nodes.MemberAssign) and inner.base_expr is None:
-            struct_type = self._var_types.get(inner.object_name, "")
-            # Dot form: "struct TAG"; arrow form: "struct TAG*" — strip the "*".
-            tag = struct_type[7:].rstrip("*") if struct_type.startswith("struct ") else ""
-            bitfield_fields = self._struct_bitfield_names.get(tag, frozenset())
-            if inner.member_name in bitfield_fields:
-                message = "assignment-as-expression to bitfield fields is not supported"
-                raise CompileError(message, line=line)
-        rhs_value = self._build_expr(original_rhs, out, strings=strings)
-        temp = self._tmp()
-        out.append(Copy(destination=temp, source=rhs_value))
-        rebound = dataclasses.replace(inner, **{rhs_field: ast_nodes.Var(line=line, name=temp)})
-        self._build_stmt(rebound, out, break_tgt=None, cont_tgt=None, strings=strings)
-        return temp
+    def _build_cond_true(
+        self,
+        cond: ast_nodes.Node,
+        target: str,
+        out: list[Instruction],
+        *,
+        strings: list[tuple[str, str]],
+    ) -> None:
+        """Emit IR that jumps to *target* when *cond* evaluates to true."""
+        match cond:
+            case ast_nodes.LogicalOr(left=left, right=right):
+                self._build_cond_true(left, target, out, strings=strings)
+                self._build_cond_true(right, target, out, strings=strings)
+            case ast_nodes.LogicalAnd(left=left, right=right):
+                skip_lbl = self._lbl("land")
+                self._build_cond_false(left, skip_lbl, out, strings=strings)
+                self._build_cond_true(right, target, out, strings=strings)
+                out.append(Label(name=skip_lbl))
+            case ast_nodes.BinaryOperation(operation=operation, left=left, right=right) if (
+                operation in ("!=", "==") and self._is_carry_return_call(left) and right == ast_nodes.Int(value=0)
+            ):
+                # Dual of the false-jump shortcut in ``_build_cond_false``:
+                # jump on CF clear for ``!=`` (true means the call returned 1),
+                # on CF set for ``==``.
+                when = "clear" if operation == "!=" else "set"
+                out.append(CarryBranch(call_ast=left, target=target, when=when))
+            case ast_nodes.BinaryOperation(operation=operation, left=left, right=right) if operation in COMPARISON_OPERATIONS:
+                left_value = self._build_expr(left, out, strings=strings)
+                right_value = self._build_expr(right, out, strings=strings)
+                # Invert the condition: true-jump means false-branch doesn't fire.
+                inverted = INVERT_COMPARISON[operation]
+                out.append(BranchFalse(left=left_value, operation=inverted, right=right_value, target=target))
+            case _:
+                value = self._build_expr(cond, out, strings=strings)
+                out.append(BranchFalse(left=value, operation="==", right=0, target=target))
 
-    def _tmp(self) -> str:
-        name = f"_ir_{self._counter}"
-        self._counter += 1
-        return name
+    def _build_do_while(
+        self,
+        cond: ast_nodes.Node,
+        body: list[ast_nodes.Node],
+        out: list[Instruction],
+        *,
+        strings: list[tuple[str, str]],
+    ) -> None:
+        loop_lbl = self._lbl("dloop")
+        cond_lbl = self._lbl("dcond")
+        end_lbl = self._lbl("dend")
+        out.extend([
+            Label(name=loop_lbl),
+            LoopBoundary(continue_label=cond_lbl, end_label=end_lbl, push=True),
+        ])
+        self._build_stmts(body, out, break_tgt=end_lbl, cont_tgt=cond_lbl, strings=strings)
+        out.extend([
+            LoopBoundary(continue_label=cond_lbl, end_label=end_lbl, push=False),
+            Label(name=cond_lbl),
+        ])
+        self._build_cond_true(cond, loop_lbl, out, strings=strings)
+        out.append(Label(name=end_lbl))
 
-    # ------------------------------------------------------------------
-    # Function / statement building
-    # ------------------------------------------------------------------
+    def _build_expr(
+        self,
+        expr: ast_nodes.Node,
+        out: list[Instruction],
+        *,
+        strings: list[tuple[str, str]],
+    ) -> Value:
+        match expr:
+            case ast_nodes.Int(value=integer_value):
+                return integer_value
+            case ast_nodes.Var(name=variable_name):
+                return variable_name
+            case ast_nodes.String(content=content):
+                label = f"_ir_s{self._str_counter}"
+                self._str_counter += 1
+                strings.append((label, content))
+                return label
+            case ast_nodes.BinaryOperation(operation=operation, left=left, right=right):
+                left_value = self._build_expr(left, out, strings=strings)
+                right_value = self._build_expr(right, out, strings=strings)
+                temp = self._tmp()
+                out.append(BinaryOperation(destination=temp, left=left_value, operation=operation, right=right_value))
+                return temp
+            case ast_nodes.Call(name=name) if name in self._carry_return_functions:
+                # ``carry_return`` callees report their result via CF,
+                # not AX.  The IR flow would store (garbage) AX to a
+                # temp; delegate to the AST codegen (which knows how
+                # to synthesise ``0``/``1`` from CF when the call's
+                # return value is actually needed).
+                temp = self._tmp()
+                out.append(Block(node=ast_nodes.Assign(expr=expr, name=temp)))
+                return temp
+            case ast_nodes.Call(name=name, args=args):
+                arg_values = tuple(self._build_expr(a, out, strings=strings) for a in args)
+                temp = self._tmp()
+                out.append(Call(args=arg_values, destination=temp, name=name))
+                return temp
+            case ast_nodes.Index(array=ast_nodes.Var(name=base), index=index_node):
+                index_value = self._build_expr(index_node, out, strings=strings)
+                temp = self._tmp()
+                out.append(Index(base=base, destination=temp, index=index_value))
+                return temp
+            case ast_nodes.LogicalOr() | ast_nodes.LogicalAnd():
+                # Short-circuit boolean: lower to conditional set (0 or 1).
+                temp = self._tmp()
+                true_lbl = self._lbl("btrue")
+                end_lbl = self._lbl("bend")
+                self._build_cond_true(expr, true_lbl, out, strings=strings)
+                out.extend([
+                    Copy(destination=temp, source=0),
+                    Jump(target=end_lbl),
+                    Label(name=true_lbl),
+                    Copy(destination=temp, source=1),
+                    Label(name=end_lbl),
+                ])
+                return temp
+            case ast_nodes.AddressOf():
+                # Pass through as-is so generate_call can detect out_register
+                # arguments (&var) without the node being replaced by a temp.
+                return expr
+            case ast_nodes.AssignExpr(inner=inner):
+                return self._lower_assign_expr(inner, out, strings=strings)
+            case _:
+                # Complex: use a temp + Block to let AST codegen handle it.
+                temp = self._tmp()
+                out.append(Block(node=ast_nodes.Assign(expr=expr, name=temp)))
+                return temp
+
+    def _build_for(
+        self,
+        init: list[ast_nodes.Node],
+        cond: ast_nodes.Node | None,
+        step: list[ast_nodes.Node],
+        body: list[ast_nodes.Node],
+        out: list[Instruction],
+        *,
+        strings: list[tuple[str, str]],
+    ) -> None:
+        self._build_stmts(init, out, break_tgt=None, cont_tgt=None, strings=strings)
+        loop_lbl = self._lbl("floop")
+        step_lbl = self._lbl("fstep")
+        end_lbl = self._lbl("fend")
+        out.append(Label(name=loop_lbl))
+        if cond is not None and not _is_constant_true(cond):
+            self._build_cond_false(cond, end_lbl, out, strings=strings)
+        out.append(LoopBoundary(continue_label=step_lbl, end_label=end_lbl, push=True))
+        self._build_stmts(body, out, break_tgt=end_lbl, cont_tgt=step_lbl, strings=strings)
+        out.extend([
+            LoopBoundary(continue_label=step_lbl, end_label=end_lbl, push=False),
+            Label(name=step_lbl),
+        ])
+        for step_expr in step:
+            self._build_expr(step_expr, out, strings=strings)
+        out.extend([Jump(target=loop_lbl), Label(name=end_lbl)])
 
     def _build_function(self, func: ast_nodes.Function) -> Function:
         out: list[Instruction] = []
@@ -412,17 +535,30 @@ class Builder:
                 raise CompileError(message, line=line)
         return Function(ast_node=func, body=out, strings=strings)
 
-    def _build_stmts(
+    def _build_if(
         self,
-        stmts: list[ast_nodes.Node],
+        cond: ast_nodes.Node,
+        body: list[ast_nodes.Node],
+        else_body: list[ast_nodes.Node] | None,
         out: list[Instruction],
         *,
         strings: list[tuple[str, str]],
         break_tgt: str | None,
         cont_tgt: str | None,
     ) -> None:
-        for s in stmts:
-            self._build_stmt(s, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+        if else_body is not None:
+            else_lbl = self._lbl("else")
+            end_lbl = self._lbl("endif")
+            self._build_cond_false(cond, else_lbl, out, strings=strings)
+            self._build_stmts(body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+            out.extend([Jump(target=end_lbl), Label(name=else_lbl)])
+            self._build_stmts(else_body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+            out.append(Label(name=end_lbl))
+        else:
+            end_lbl = self._lbl("endif")
+            self._build_cond_false(cond, end_lbl, out, strings=strings)
+            self._build_stmts(body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
+            out.append(Label(name=end_lbl))
 
     def _build_stmt(
         self,
@@ -538,30 +674,17 @@ class Builder:
             case _:
                 out.append(Block(node=stmt))
 
-    def _build_if(
+    def _build_stmts(
         self,
-        cond: ast_nodes.Node,
-        body: list[ast_nodes.Node],
-        else_body: list[ast_nodes.Node] | None,
+        stmts: list[ast_nodes.Node],
         out: list[Instruction],
         *,
         strings: list[tuple[str, str]],
         break_tgt: str | None,
         cont_tgt: str | None,
     ) -> None:
-        if else_body is not None:
-            else_lbl = self._lbl("else")
-            end_lbl = self._lbl("endif")
-            self._build_cond_false(cond, else_lbl, out, strings=strings)
-            self._build_stmts(body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
-            out.extend([Jump(target=end_lbl), Label(name=else_lbl)])
-            self._build_stmts(else_body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
-            out.append(Label(name=end_lbl))
-        else:
-            end_lbl = self._lbl("endif")
-            self._build_cond_false(cond, end_lbl, out, strings=strings)
-            self._build_stmts(body, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
-            out.append(Label(name=end_lbl))
+        for s in stmts:
+            self._build_stmt(s, out, break_tgt=break_tgt, cont_tgt=cont_tgt, strings=strings)
 
     def _build_switch(
         self,
@@ -608,204 +731,6 @@ class Builder:
         out.append(LoopBoundary(continue_label=loop_lbl, end_label=end_lbl, push=False))
         out.extend([Jump(target=loop_lbl), Label(name=end_lbl)])
 
-    def _build_do_while(
-        self,
-        cond: ast_nodes.Node,
-        body: list[ast_nodes.Node],
-        out: list[Instruction],
-        *,
-        strings: list[tuple[str, str]],
-    ) -> None:
-        loop_lbl = self._lbl("dloop")
-        cond_lbl = self._lbl("dcond")
-        end_lbl = self._lbl("dend")
-        out.extend([
-            Label(name=loop_lbl),
-            LoopBoundary(continue_label=cond_lbl, end_label=end_lbl, push=True),
-        ])
-        self._build_stmts(body, out, break_tgt=end_lbl, cont_tgt=cond_lbl, strings=strings)
-        out.extend([
-            LoopBoundary(continue_label=cond_lbl, end_label=end_lbl, push=False),
-            Label(name=cond_lbl),
-        ])
-        self._build_cond_true(cond, loop_lbl, out, strings=strings)
-        out.append(Label(name=end_lbl))
-
-    def _build_for(
-        self,
-        init: list[ast_nodes.Node],
-        cond: ast_nodes.Node | None,
-        step: list[ast_nodes.Node],
-        body: list[ast_nodes.Node],
-        out: list[Instruction],
-        *,
-        strings: list[tuple[str, str]],
-    ) -> None:
-        self._build_stmts(init, out, break_tgt=None, cont_tgt=None, strings=strings)
-        loop_lbl = self._lbl("floop")
-        step_lbl = self._lbl("fstep")
-        end_lbl = self._lbl("fend")
-        out.append(Label(name=loop_lbl))
-        if cond is not None and not _is_constant_true(cond):
-            self._build_cond_false(cond, end_lbl, out, strings=strings)
-        out.append(LoopBoundary(continue_label=step_lbl, end_label=end_lbl, push=True))
-        self._build_stmts(body, out, break_tgt=end_lbl, cont_tgt=step_lbl, strings=strings)
-        out.extend([
-            LoopBoundary(continue_label=step_lbl, end_label=end_lbl, push=False),
-            Label(name=step_lbl),
-        ])
-        for step_expr in step:
-            self._build_expr(step_expr, out, strings=strings)
-        out.extend([Jump(target=loop_lbl), Label(name=end_lbl)])
-
-    # ------------------------------------------------------------------
-    # Condition helpers (emit branch-when-false / branch-when-true)
-    # ------------------------------------------------------------------
-
-    def _build_cond_false(
-        self,
-        cond: ast_nodes.Node,
-        target: str,
-        out: list[Instruction],
-        *,
-        strings: list[tuple[str, str]],
-    ) -> None:
-        """Emit IR that jumps to *target* when *cond* evaluates to false."""
-        match cond:
-            case ast_nodes.LogicalAnd(left=left, right=right):
-                self._build_cond_false(left, target, out, strings=strings)
-                self._build_cond_false(right, target, out, strings=strings)
-            case ast_nodes.LogicalOr(left=left, right=right):
-                skip_lbl = self._lbl("lor")
-                self._build_cond_true(left, skip_lbl, out, strings=strings)
-                self._build_cond_false(right, target, out, strings=strings)
-                out.append(Label(name=skip_lbl))
-            case ast_nodes.BinaryOperation(operation=operation, left=left, right=right) if (
-                operation in ("!=", "==") and self._is_carry_return_call(left) and right == ast_nodes.Int(value=0)
-            ):
-                # ``if (carry_return_call() != 0)`` / ``... == 0`` — jump to
-                # *target* when the condition is false, i.e. jump on CF set
-                # for ``!=`` (false means the call returned 0) and on CF
-                # clear for ``==``.
-                when = "set" if operation == "!=" else "clear"
-                out.append(CarryBranch(call_ast=left, target=target, when=when))
-            case ast_nodes.BinaryOperation(operation=operation, left=left, right=right) if operation in COMPARISON_OPERATIONS:
-                left_value = self._build_expr(left, out, strings=strings)
-                right_value = self._build_expr(right, out, strings=strings)
-                out.append(BranchFalse(left=left_value, operation=operation, right=right_value, target=target))
-            case _:
-                # General case: evaluate to a temp, test non-zero.
-                value = self._build_expr(cond, out, strings=strings)
-                out.append(BranchFalse(left=value, operation="!=", right=0, target=target))
-
-    def _build_cond_true(
-        self,
-        cond: ast_nodes.Node,
-        target: str,
-        out: list[Instruction],
-        *,
-        strings: list[tuple[str, str]],
-    ) -> None:
-        """Emit IR that jumps to *target* when *cond* evaluates to true."""
-        match cond:
-            case ast_nodes.LogicalOr(left=left, right=right):
-                self._build_cond_true(left, target, out, strings=strings)
-                self._build_cond_true(right, target, out, strings=strings)
-            case ast_nodes.LogicalAnd(left=left, right=right):
-                skip_lbl = self._lbl("land")
-                self._build_cond_false(left, skip_lbl, out, strings=strings)
-                self._build_cond_true(right, target, out, strings=strings)
-                out.append(Label(name=skip_lbl))
-            case ast_nodes.BinaryOperation(operation=operation, left=left, right=right) if (
-                operation in ("!=", "==") and self._is_carry_return_call(left) and right == ast_nodes.Int(value=0)
-            ):
-                # Dual of the false-jump shortcut in ``_build_cond_false``:
-                # jump on CF clear for ``!=`` (true means the call returned 1),
-                # on CF set for ``==``.
-                when = "clear" if operation == "!=" else "set"
-                out.append(CarryBranch(call_ast=left, target=target, when=when))
-            case ast_nodes.BinaryOperation(operation=operation, left=left, right=right) if operation in COMPARISON_OPERATIONS:
-                left_value = self._build_expr(left, out, strings=strings)
-                right_value = self._build_expr(right, out, strings=strings)
-                # Invert the condition: true-jump means false-branch doesn't fire.
-                inverted = INVERT_COMPARISON[operation]
-                out.append(BranchFalse(left=left_value, operation=inverted, right=right_value, target=target))
-            case _:
-                value = self._build_expr(cond, out, strings=strings)
-                out.append(BranchFalse(left=value, operation="==", right=0, target=target))
-
-    # ------------------------------------------------------------------
-    # Expression building (returns a Value for the result)
-    # ------------------------------------------------------------------
-
-    def _build_expr(
-        self,
-        expr: ast_nodes.Node,
-        out: list[Instruction],
-        *,
-        strings: list[tuple[str, str]],
-    ) -> Value:
-        match expr:
-            case ast_nodes.Int(value=integer_value):
-                return integer_value
-            case ast_nodes.Var(name=variable_name):
-                return variable_name
-            case ast_nodes.String(content=content):
-                label = f"_ir_s{self._str_counter}"
-                self._str_counter += 1
-                strings.append((label, content))
-                return label
-            case ast_nodes.BinaryOperation(operation=operation, left=left, right=right):
-                left_value = self._build_expr(left, out, strings=strings)
-                right_value = self._build_expr(right, out, strings=strings)
-                temp = self._tmp()
-                out.append(BinaryOperation(destination=temp, left=left_value, operation=operation, right=right_value))
-                return temp
-            case ast_nodes.Call(name=name) if name in self._carry_return_functions:
-                # ``carry_return`` callees report their result via CF,
-                # not AX.  The IR flow would store (garbage) AX to a
-                # temp; delegate to the AST codegen (which knows how
-                # to synthesise ``0``/``1`` from CF when the call's
-                # return value is actually needed).
-                temp = self._tmp()
-                out.append(Block(node=ast_nodes.Assign(expr=expr, name=temp)))
-                return temp
-            case ast_nodes.Call(name=name, args=args):
-                arg_values = tuple(self._build_expr(a, out, strings=strings) for a in args)
-                temp = self._tmp()
-                out.append(Call(args=arg_values, destination=temp, name=name))
-                return temp
-            case ast_nodes.Index(array=ast_nodes.Var(name=base), index=index_node):
-                index_value = self._build_expr(index_node, out, strings=strings)
-                temp = self._tmp()
-                out.append(Index(base=base, destination=temp, index=index_value))
-                return temp
-            case ast_nodes.LogicalOr() | ast_nodes.LogicalAnd():
-                # Short-circuit boolean: lower to conditional set (0 or 1).
-                temp = self._tmp()
-                true_lbl = self._lbl("btrue")
-                end_lbl = self._lbl("bend")
-                self._build_cond_true(expr, true_lbl, out, strings=strings)
-                out.extend([
-                    Copy(destination=temp, source=0),
-                    Jump(target=end_lbl),
-                    Label(name=true_lbl),
-                    Copy(destination=temp, source=1),
-                    Label(name=end_lbl),
-                ])
-                return temp
-            case ast_nodes.AddressOf():
-                # Pass through as-is so generate_call can detect out_register
-                # arguments (&var) without the node being replaced by a temp.
-                return expr
-            case ast_nodes.AssignExpr(inner=inner):
-                return self._lower_assign_expr(inner, out, strings=strings)
-            case _:
-                # Complex: use a temp + Block to let AST codegen handle it.
-                temp = self._tmp()
-                out.append(Block(node=ast_nodes.Assign(expr=expr, name=temp)))
-                return temp
-
     def _collect_local_types(self, stmts: list[ast_nodes.Node]) -> None:
         """Walk *stmts* and record every ``VarDecl`` name → type binding.
 
@@ -826,6 +751,10 @@ class Builder:
             elif isinstance(statement, ast_nodes.Switch):
                 for case in statement.cases:
                     self._collect_local_types(case.body)
+
+    def _is_carry_return_call(self, node: ast_nodes.Node) -> bool:
+        """Return True if *node* is a :class:`ast_nodes.Call` to a carry_return function."""
+        return isinstance(node, ast_nodes.Call) and node.name in self._carry_return_functions
 
     @staticmethod
     def _is_guarded_update(name: str, expression: ast_nodes.Node) -> bool:
@@ -927,3 +856,54 @@ class Builder:
         if isinstance(expression, ast_nodes.BinaryOperation) and expression.operation in ("+", "-", "*", "&", "|", "^"):
             return Builder._is_named_constant_chain(expression.left) and Builder._is_named_constant_chain(expression.right)
         return False
+
+    def _lbl(self, tag: str = "l") -> str:
+        name = f"._ir_{tag}{self._counter}"
+        self._counter += 1
+        return name
+
+    def _lower_assign_expr(
+        self,
+        inner: ast_nodes.Node,
+        out: list[Instruction],
+        *,
+        strings: list[tuple[str, str]],
+    ) -> str:
+        """Lower a parenthesized assignment to IR; return the temp holding its value.
+
+        Strategy: evaluate the RHS into a temp, rewrite the wrapped
+        ``*Assign`` so its RHS is ``Var(temp)``, emit the rewritten
+        ``*Assign`` as a statement (reusing the existing per-lvalue store
+        paths), and return the temp as the expression value.  This
+        guarantees the original RHS expression is evaluated exactly once.
+        """
+        line = inner.line
+        rhs_field = self._assign_rhs_field_name(inner)
+        original_rhs = getattr(inner, rhs_field)
+        # ``unsigned long`` lvalues don't round-trip cleanly through
+        # int-typed temps.  Out-of-scope per the spec.
+        if isinstance(inner, ast_nodes.Assign) and self._var_types.get(inner.name) == "unsigned long":
+            message = "assignment-as-expression to 'unsigned long' is not supported"
+            raise CompileError(message, line=line)
+        # Bitfield member assignments clobber AX during the read-modify-write
+        # sequence, breaking the "AX = assigned value" contract.  Reject at
+        # compile time rather than silently miscompile.
+        if isinstance(inner, ast_nodes.MemberAssign) and inner.base_expr is None:
+            struct_type = self._var_types.get(inner.object_name, "")
+            # Dot form: "struct TAG"; arrow form: "struct TAG*" — strip the "*".
+            tag = struct_type[7:].rstrip("*") if struct_type.startswith("struct ") else ""
+            bitfield_fields = self._struct_bitfield_names.get(tag, frozenset())
+            if inner.member_name in bitfield_fields:
+                message = "assignment-as-expression to bitfield fields is not supported"
+                raise CompileError(message, line=line)
+        rhs_value = self._build_expr(original_rhs, out, strings=strings)
+        temp = self._tmp()
+        out.append(Copy(destination=temp, source=rhs_value))
+        rebound = dataclasses.replace(inner, **{rhs_field: ast_nodes.Var(line=line, name=temp)})
+        self._build_stmt(rebound, out, break_tgt=None, cont_tgt=None, strings=strings)
+        return temp
+
+    def _tmp(self) -> str:
+        name = f"_ir_{self._counter}"
+        self._counter += 1
+        return name

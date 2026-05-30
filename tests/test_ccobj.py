@@ -52,27 +52,6 @@ def test_flat_mode_extern_call_keeps_bare_call(tmp_path: Path) -> None:
     assert "CCREL_CALL" not in body
 
 
-def test_flat_mode_unchanged_by_object_plumbing(tmp_path: Path) -> None:
-    """Flat mode is unchanged by object-mode plumbing.
-
-    The default (flat) mode keeps emitting ``org`` + ``_program_end`` +
-    ``_bss_end`` after the ``--object`` plumbing lands.  Regression guard.
-    """
-    src = tmp_path / "hello.c"
-    src.write_text("int main() { return 0; }\n")
-    asm = tmp_path / "hello.asm"
-    subprocess.run(
-        [sys.executable, str(CC), "--bits", "32", str(src), str(asm)],
-        check=True,
-    )
-
-    body = asm.read_text()
-    assert "org 08048000h" in body
-    assert "_program_end:" in body
-    assert "_bss_end equ" in body
-    assert '%include "ccobj_markers.inc"' not in body
-
-
 def test_flat_mode_libbboeos_calls_stay_direct(tmp_path: Path) -> None:
     """Flat-mode user code keeps the direct ``jmp FUNCTION_*`` form.
 
@@ -95,6 +74,27 @@ def test_flat_mode_libbboeos_calls_stay_direct(tmp_path: Path) -> None:
     assert "jmp FUNCTION_EXIT\n" in body, body
     assert "[FUNCTION_EXIT_PTR]" not in body
     assert "[FUNCTION_PRINT_CHARACTER_PTR]" not in body
+
+
+def test_flat_mode_unchanged_by_object_plumbing(tmp_path: Path) -> None:
+    """Flat mode is unchanged by object-mode plumbing.
+
+    The default (flat) mode keeps emitting ``org`` + ``_program_end`` +
+    ``_bss_end`` after the ``--object`` plumbing lands.  Regression guard.
+    """
+    src = tmp_path / "hello.c"
+    src.write_text("int main() { return 0; }\n")
+    asm = tmp_path / "hello.asm"
+    subprocess.run(
+        [sys.executable, str(CC), "--bits", "32", str(src), str(asm)],
+        check=True,
+    )
+
+    body = asm.read_text()
+    assert "org 08048000h" in body
+    assert "_program_end:" in body
+    assert "_bss_end equ" in body
+    assert '%include "ccobj_markers.inc"' not in body
 
 
 def test_object_mode_emits_data_rodata_bss_sections(tmp_path: Path) -> None:
