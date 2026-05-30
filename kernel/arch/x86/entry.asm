@@ -1890,6 +1890,6 @@ current_program_state   dd program_state_a  ; pointer to the running program's P
 
 shell_path      db "bin/shell", 0
 
-welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.11.0 (2026/05/10)", 13, 10, 0
+welcome_msg     db "Welcome to BBoeOS!", 13, 10, "Version 0.12.0 (2026/05/30)", 13, 10, 0
 
 ;;; -----------------------------------------------------------------------

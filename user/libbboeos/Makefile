@@ -1,8 +1,9 @@
 # user/libbboeos/Makefile — builds libbboeos.a (full freestanding shim,
 # used to populate the shared libbboeos blob) and libbboeos_stubs.o
-# (per-export cdecl-to-regparm shim; linked into clang programs BEFORE
+# (per-export cdecl-to-regparm shim; linked into a consumer BEFORE
 # libbboeos.a so the full bodies stay in the blob instead of being
-# duplicated into every binary).
+# duplicated into every binary — used by the out-of-tree ports/doom
+# clang build).
 #
 # All C sources are pre-compiled by cc.py in make_os.sh before this
 # Makefile runs — the .o files are already up to date.  This Makefile

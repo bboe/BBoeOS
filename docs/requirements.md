@@ -59,24 +59,15 @@ the pinned wheel automatically, so no separate install is required for the hook.
 To run clang-format outside of pre-commit, `pip install clang-format` gets the
 same binary the hook uses.
 
-The libbboeos tests need **`clang`**:
+The libbboeos unit tests need **`clang`**:
 
 - `tests/unit/test_libbboeos.py` runs clang in its host-native default mode to
-  compile each unit test's tiny C program.
-- `tests/test_libbboeos_qemu.py` (the libbboeos on-OS smoke test) compiles a
-  test program with clang (`--target=i386-pc-none-elf -m32 -ffreestanding
-  -nostdinc -nostdlib`) and links it against `libbboeos.a`.  Build-system tools:
-
-  - **`make`** — invoked as `make -C user/libbboeos`; assembles the `.asm` files
-    and archives the objects.
-  - **`ld`** (GNU BFD ld from `binutils`) — links the test binary against
-    `libbboeos.a` and the `user/libbboeos/program.ld` linker script.
-  - **`ar`** (GNU `ar`, also from `binutils`) — packs the libbboeos objects into
-    `libbboeos.a`.
+  compile each unit test's tiny C program and compare its behaviour against the
+  system libc.
 
 Note: the libbboeos C sources themselves are compiled by `cc.py` + `nasm` (no
-clang needed).  Clang is only required for the test harness programs and the
-Doom port.
+clang needed).  Clang is only required for the unit-test harness programs and
+the Doom port.
 
 ## Doom port (`ports/doom/build.py`)
 
@@ -99,7 +90,7 @@ Ubuntu / Debian:
 
 ```sh
 sudo apt-get install -y e2fsprogs nasm qemu-system-x86
-# Plus, for the libbboeos on-OS smoke test:
+# Plus, for the libbboeos unit test (clang) and the Doom port (binutils + make):
 sudo apt-get install -y binutils clang make
 # Plus, for the Doom port (lld is one option; binutils above also works):
 sudo apt-get install -y lld llvm
@@ -109,7 +100,7 @@ macOS (Homebrew):
 
 ```sh
 brew install e2fsprogs nasm qemu
-# Plus, for the libbboeos on-OS smoke test (clang + make ship with Xcode CLT):
+# Plus, for the libbboeos unit test and Doom port (clang + make ship with Xcode CLT):
 xcode-select --install
 # Plus, for the Doom port — pick one of:
 brew install x86_64-elf-binutils    # GNU cross-binutils, simplest
