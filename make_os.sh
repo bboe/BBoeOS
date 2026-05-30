@@ -1,15 +1,15 @@
 #!/bin/sh
 
-FS_TYPE=bbfs
-IMAGE=drive.img
 EXT2_BLOCK_SIZE=1024
 EXT2_INODE_COUNT=
+FS_TYPE=bbfs
+IMAGE=drive.img
 SECTORS=2880        # default = 1.44 MB floppy size; override for larger images
 WITH_TEST_PROGRAMS=0
 for arg in "$@"; do
     case "$arg" in
-        --ext2) FS_TYPE=ext2 ;;
         --bbfs) FS_TYPE=bbfs ;;
+        --ext2) FS_TYPE=ext2 ;;
         --ext2-block-size=*) EXT2_BLOCK_SIZE="${arg#*=}" ;;
         --ext2-inode-count=*) EXT2_INODE_COUNT="${arg#*=}" ;;
         --sectors=*) SECTORS="${arg#*=}" ;;
@@ -34,10 +34,11 @@ esac
 
 KBUILD=build/kernel-c
 rm -rf "$KBUILD" && mkdir -p "$KBUILD"
-find kernel -name '*.c' | while read -r source; do
-    rel="${source#kernel/}"; out="$KBUILD/${rel%.c}.kasm"
-    mkdir -p "$(dirname "$out")"
-    python3 cc.py --bits 32 --target kernel "$source" "$out" || exit 1
+find kernel -name '*.c' | while read -r source_path; do
+    prefix="${source_path#kernel/}"
+    destination_path="$KBUILD/${prefix%.c}.kasm"
+    mkdir -p "$(dirname "$destination_path")"
+    python3 cc.py --bits 32 --target kernel "$source_path" "$destination_path" || exit 1
 done
 
 # Build the libbboeos blob (FUNCTION_TABLE + shared_* helpers).  Lives at
@@ -50,7 +51,6 @@ done
 # script (user/libbboeos/libbboeos.ld) places each section at its
 # anchor; objcopy -O binary flattens the linked ELF into the on-disk
 # blob.
-mkdir -p build
 # cc.py compiles every libbboeos C source into an ELF .o (via nasm -f
 # elf32) before make runs.  The Makefile only assembles the .asm files
 # and archives everything into libbboeos.a.
@@ -191,14 +191,13 @@ exclude_helpers() {
     echo "$result"
 }
 
-USER_PROGRAMS_RAW=$(find user/programs -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')
-TEST_PROGRAMS_RAW=$(find tests/programs -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')
-USER_PROGRAMS=$(exclude_helpers "$USER_PROGRAMS_RAW")
-TEST_PROGRAMS=$(exclude_helpers "$TEST_PROGRAMS_RAW")
+USER_PROGRAMS=$(exclude_helpers "$(find user/programs -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')")
 if [ "$WITH_TEST_PROGRAMS" -eq 1 ]; then
+    TEST_PROGRAMS=$(exclude_helpers "$(find tests/programs -maxdepth 1 -name '*.c' | sed 's|.*/||; s/\.c$//' | sort | tr '\n' ' ')")
     PROGRAMS="$USER_PROGRAMS $TEST_PROGRAMS"
 else
-    PROGRAMS="$USER_PROGRAMS"
+    PROGRAMS=$USER_PROGRAMS
+    TEST_PROGRAMS=""
 fi
 
 PBUILD=build/c
@@ -207,13 +206,22 @@ rm -rf "$PBUILD" && mkdir -p "$PBUILD"
 # cc.py user programs route through the object-file + linker pipeline
 #     cc.py --object → nasm -f bin -l → cc.py pack-ccobj → ccld.py
 # by default.  Programs whose names appear in FLAT_PROGRAMS stay on
-# the legacy single-TU flat path (cc.py → nasm -f bin) — reserved for
-# escape hatches if some future emit pattern hits a pipeline bug
-# before the matching ccobj/ccld fix lands.  Currently empty: every
-# program in user/programs/ + tests/programs/ builds cleanly through the
-# linker.  Either path produces a flat binary loadable by
-# program_enter (same PROGRAM_BASE, same BSS trailer), so the shell
-# and runtime ABI don't change with the toolchain choice.
+# the legacy single-TU flat path (cc.py → nasm -f bin).  Either path
+# produces a flat binary loadable by program_enter (same PROGRAM_BASE,
+# same BSS trailer), so the shell and runtime ABI don't change with the
+# toolchain choice.  The programs listed here require the flat path —
+# each either fails to assemble through ccld or misbehaves at runtime:
+#   arp, dns — build through the object pipeline but fail at runtime
+#           (produce no output / never print the expected result).
+#   asm   — file-scope asm_register globals + inline-asm `times` blocks
+#           the object pipeline can't relocate (NASM errors with
+#           `_g_error_word not defined` / `label changed during code
+#           generation` through ccld).
+#   shell — compiles and boots through the linker but command dispatch
+#           breaks at runtime (every command, builtin or external,
+#           returns "unknown command").
+#   trailer_cross_page — its `asm("times ...")` padding only survives
+#           flat assembly; that padding is the whole point of the test.
 FLAT_PROGRAMS="arp asm dns shell trailer_cross_page"
 
 compile_program_flat() {
@@ -264,18 +272,16 @@ for name in $USER_PROGRAMS; do
         compile_program_object "$name" "user/programs/$name.c" || exit 1
     fi
 done
-if [ "$WITH_TEST_PROGRAMS" -eq 1 ]; then
-    for name in $TEST_PROGRAMS; do
-        if is_flat_program "$name"; then
-            compile_program_flat "$name" "tests/programs/$name.c" || exit 1
-        else
-            compile_program_object "$name" "tests/programs/$name.c" || exit 1
-        fi
-    done
-fi
+for name in $TEST_PROGRAMS; do
+    if is_flat_program "$name"; then
+        compile_program_flat "$name" "tests/programs/$name.c" || exit 1
+    else
+        compile_program_object "$name" "tests/programs/$name.c" || exit 1
+    fi
+done
 
-dd bs=512 count="$SECTORS" if=/dev/zero of="$IMAGE"
-dd conv=notrunc if=os.bin of="$IMAGE"
+dd bs=512 count="$SECTORS" if=/dev/zero of="$IMAGE" 2>/dev/null
+dd conv=notrunc if=os.bin of="$IMAGE" 2>/dev/null
 
 if [ "$FS_TYPE" = "ext2" ]; then
     EXT2_START=$(python3 -c "from add_file import compute_directory_sector; print(compute_directory_sector(image_path='$IMAGE'))") || exit 1

@@ -27,7 +27,8 @@ import sys
 from pathlib import Path
 
 # `%assign NAME VALUE [; comment]` with optional leading whitespace.
-ASSIGN = re.compile(r"^\s*%assign\s+(?P<name>\w+)\s+(?P<value>\S+)\s*(?:;(?P<comment>.*))?$")
+RE_ASSIGN = re.compile(r"^\s*%assign\s+(?P<name>\w+)\s+(?P<value>\S+)\s*(?:;(?P<comment>.*))?$")
+RE_NUMBER = re.compile(r"(0x[0-9a-f]+|[0-9a-f]+h|\d+)")
 
 # GROUPS order is load-bearing in two ways:
 # 1. Section order in the generated header — entries print top-to-bottom in
@@ -46,7 +47,7 @@ GROUPS = [
     ("Error codes (AL when CF set)", re.compile(r"^ERROR_")),
     ("Signal numbers", re.compile(r"^SIG[A-Z]")),
     ("File-descriptor types", re.compile(r"^FD_TYPE_")),
-    ("ioctl commands", re.compile(r"^(MIDI|CONSOLE|AUDIO|VGA)_IOCTL_")),
+    ("ioctl commands", re.compile(r"^(AUDIO|CONSOLE|MIDI|VGA)_IOCTL_")),
     ("libbboeos offsets", re.compile(r"^LIBBBOEOS_")),
 ]
 
@@ -57,7 +58,7 @@ DESTINATION = REPO / "user" / "libbboeos" / "include" / "syscalls.h"
 SOURCE = REPO / "kernel" / "include" / "constants.asm"
 
 
-def _format_value(*, raw: str) -> str:
+def _format_value(value: str, /) -> str:
     """Convert a NASM literal to a C literal.
 
     NASM accepts ``01h`` / ``0F0h`` (hex with trailing h, leading zero
@@ -66,12 +67,12 @@ def _format_value(*, raw: str) -> str:
     style the kernel asm uses and stays readable when grepping for a
     syscall number.
     """
-    if raw.endswith(("h", "H")):
-        digits = raw[:-1].lstrip("0") or "0"
+    if value.endswith("h"):
+        digits = value[:-1].lstrip("0") or "0"
         return f"0x{digits.upper()}"
-    if raw.startswith(("0x", "0X")):
-        return f"0x{raw[2:].upper()}"
-    return raw
+    if value.startswith("0x"):
+        return f"0x{value[2:].upper()}"
+    return value
 
 
 def _parse_assignments(*, source: Path) -> list[tuple[str, str, str]]:
@@ -83,14 +84,14 @@ def _parse_assignments(*, source: Path) -> list[tuple[str, str, str]]:
     """
     rows: list[tuple[str, str, str]] = []
     for line in source.read_text(encoding="utf-8").splitlines():
-        match = ASSIGN.match(line)
+        match = RE_ASSIGN.match(line)
         if match is None:
             continue
-        raw = match["value"]
+        value = match["value"].lower()
         # Plain integer literal only: digits + optional h suffix, or 0x prefix.
-        if not re.fullmatch(r"(0x[0-9A-Fa-f]+|[0-9A-Fa-f]+h|\d+)", raw):
+        if not RE_NUMBER.fullmatch(value):
             continue
-        rows.append((match["name"], _format_value(raw=raw), (match["comment"] or "").strip()))
+        rows.append((match["name"], _format_value(value), (match["comment"] or "").strip()))
     return rows
 
 
@@ -109,7 +110,7 @@ def _render_header(*, rows: list[tuple[str, str, str]]) -> str:
             if pattern.match(name):
                 by_group[index].append((name, value, comment))
                 break
-    width = max((len(name) for name, _, _ in rows if any(p.match(name) for _, p in GROUPS)), default=0)
+    width = max((len(name) for name, _, _ in rows if any(pattern.match(name) for _, pattern in GROUPS)), default=0)
     lines: list[str] = [
         "/* AUTO-GENERATED from kernel/include/constants.asm by tools/generate_syscalls_h.py.",
         " * DO NOT EDIT MANUALLY — re-run the generator to refresh.",
@@ -153,8 +154,7 @@ def main() -> int:
     if not SOURCE.is_file():
         print(f"generate_syscalls_h: missing {SOURCE}", file=sys.stderr)
         return 1
-    rows = _parse_assignments(source=SOURCE)
-    rendered = _render_header(rows=rows)
+    rendered = _render_header(rows=_parse_assignments(source=SOURCE))
     DESTINATION.parent.mkdir(parents=True, exist_ok=True)
     if DESTINATION.is_file() and DESTINATION.read_text(encoding="utf-8") == rendered:
         return 0
