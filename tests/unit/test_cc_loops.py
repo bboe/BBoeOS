@@ -43,6 +43,35 @@ def test_hoist_invariant_binary_operation_moves_to_preheader() -> None:
     assert binary_indices == [loop_index - 1] or all(index < loop_index for index in binary_indices)
 
 
+def test_hoist_invariant_load_moves_to_preheader() -> None:
+    """An ``ir.Index`` whose base and index are loop-invariant hoists when no memory writer is in the loop.
+
+    The load reads ``arr[0]`` — base is a loop-external name, index is
+    a literal, no ``IndexAssign`` or ``Call`` writes through any
+    pointer in the loop, and the load lives in the header block so it
+    dominates every exit (the BranchFalse following the load is the
+    sole exit edge).  All four safety conditions hold, so the
+    instruction moves to the preheader.
+    """
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".loop"),
+        ir.Index(destination="_ir_t", base="arr", index=0),
+        ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    result = loops.hoist_loop_invariants(body)
+    load_index = next(index for index, instruction in enumerate(result) if isinstance(instruction, ir.Index))
+    loop_label_index = next(
+        index for index, instruction in enumerate(result) if isinstance(instruction, ir.Label) and instruction.name == ".loop"
+    )
+    assert load_index < loop_label_index
+
+
 def test_hoist_is_deterministic_across_runs() -> None:
     """Identical input bodies produce identical output across runs (no set-iteration leak)."""
     body = [
@@ -117,6 +146,111 @@ def test_hoist_skips_function_with_inline_asm() -> None:
         ir.Return(value=None),
     ]
     assert loops.hoist_loop_invariants(body) is body
+
+
+def test_hoist_skips_load_when_base_pointer_is_loop_defined() -> None:
+    """A load whose base pointer is itself written inside the loop cannot be hoisted.
+
+    ``base`` is the ``ir.Index`` field that names the pointer; the
+    ``_operands_invariant`` check only walks ``VALUE_FIELDS`` (which is
+    just ``index`` for ``Index``), so the load-specific safety check
+    has to re-examine ``base`` directly.
+    """
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Copy(destination="arr", source=100),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".loop"),
+        ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
+        ir.Copy(destination="arr", source=200),
+        ir.Index(destination="_ir_t", base="arr", index=0),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    assert loops.hoist_loop_invariants(body) is body
+
+
+def test_hoist_skips_load_when_block_does_not_dominate_every_exit() -> None:
+    """A load on a conditional path cannot be lifted past a guard the body would have evaluated.
+
+    The load sits in a block reachable only when ``other != 0``.  The
+    loop's other exit edge (``BranchFalse i < 10``) leaves the loop
+    without ever passing through the load's block, so speculatively
+    executing the load in the preheader would introduce a fault on a
+    path the original program never took.
+    """
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Copy(destination="other", source=1),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".loop"),
+        ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
+        ir.BranchFalse(left="other", operation="!=", right=0, target=".skip"),
+        ir.Index(destination="_ir_t", base="arr", index=0),
+        ir.Label(name=".skip"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    assert loops.hoist_loop_invariants(body) is body
+
+
+def test_hoist_skips_load_when_loop_contains_call() -> None:
+    """A ``Call`` in the loop body may write through any pointer; ``ir.Index`` stays in the body.
+
+    Alias analysis is out of scope, so any call is treated as a
+    possible writer of every memory location the load could see.
+    """
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".loop"),
+        ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
+        ir.Index(destination="_ir_t", base="arr", index=0),
+        ir.Call(args=(), destination=None, name="side_effect"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    result = loops.hoist_loop_invariants(body)
+    # The Index stays in the loop body — no preheader-stage Index appears
+    # before the .loop label.
+    label_index = next(
+        index for index, instruction in enumerate(result) if isinstance(instruction, ir.Label) and instruction.name == ".loop"
+    )
+    indices_before_loop = [index for index, instruction in enumerate(result) if isinstance(instruction, ir.Index) and index < label_index]
+    assert indices_before_loop == []
+
+
+def test_hoist_skips_load_when_loop_contains_index_assign() -> None:
+    """An ``IndexAssign`` in the loop body could alias the load through any pointer; the load stays.
+
+    Even when the assign writes through a different base name, the
+    conservative analysis treats every ``IndexAssign`` as a possible
+    writer of the location the load reads.
+    """
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".loop"),
+        ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
+        ir.Index(destination="_ir_t", base="arr", index=0),
+        ir.IndexAssign(base="other", index=0, source=5),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    result = loops.hoist_loop_invariants(body)
+    label_index = next(
+        index for index, instruction in enumerate(result) if isinstance(instruction, ir.Label) and instruction.name == ".loop"
+    )
+    indices_before_loop = [index for index, instruction in enumerate(result) if isinstance(instruction, ir.Index) and index < label_index]
+    assert indices_before_loop == []
 
 
 def test_hoist_treats_block_defined_local_as_loop_defined() -> None:
