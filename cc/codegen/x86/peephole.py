@@ -546,6 +546,13 @@ class Peepholer:
             parts = a.split()
             if len(parts) == 2 and parts[0] in JUMP_INVERT and b.startswith("jmp ") and c == f"{parts[1]}:":
                 target = b.split()[1]
+                # A memory-indirect ``jmp [mem]`` (e.g. an object-mode
+                # ``jmp [FUNCTION_DIE_PTR]``) has no conditional-jump
+                # counterpart — ``jCC [mem]`` is not a valid x86 encoding —
+                # so the collapse can't apply; leave the trampoline intact.
+                if target.startswith("["):
+                    i += 1
+                    continue
                 label = parts[1]
                 self.lines[i] = f"        {JUMP_INVERT[parts[0]]} {target}"
                 label_referenced_elsewhere = any(
@@ -983,6 +990,22 @@ class Peepholer:
             if old_label == new_target:
                 i += 1
                 continue
+            # A memory-indirect trampoline (``jmp [mem]``) can only be
+            # forwarded into other unconditional jumps — ``jCC [mem]`` is
+            # not a valid encoding — so leave the trampoline in place when
+            # any conditional jump still targets the label.
+            if new_target.startswith("["):
+                conditional_referrer = False
+                for j, line in enumerate(self.lines):
+                    if j in (i, i + 1):
+                        continue
+                    tokens = line.split()
+                    if len(tokens) == 2 and tokens[0] in jumps and tokens[0] != "jmp" and tokens[1] == old_label:
+                        conditional_referrer = True
+                        break
+                if conditional_referrer:
+                    i += 1
+                    continue
             for j in range(len(self.lines)):
                 if j == i or j == i + 1:
                     continue
