@@ -13,15 +13,30 @@ time.
 
 ### Changed
 
-- **`shell`, `arp`, and `dns` now build through the object-file pipeline.** All
-  three came off `make_os.sh`'s `FLAT_PROGRAMS` as their object-pipeline
-  failures were fixed (see below): `shell` returned "unknown command" for every
-  command (the dropped-addend linker bug), and `arp` / `dns` page-faulted
-  (`EXC0E`) on a direct `jne FUNCTION_DIE` in main's argc-check. Only `asm` and
-  `trailer_cross_page` remain flat, for inline-asm reasons the object pipeline
-  genuinely can't handle.
+- **Every user program now builds through the object-file pipeline; the flat
+  path is gone.** `shell`, `arp`, and `dns` came off `make_os.sh`'s
+  `FLAT_PROGRAMS` as their object-pipeline failures were fixed (see below):
+  `shell` returned "unknown command" for every command (the dropped-addend
+  linker bug), and `arp` / `dns` page-faulted (`EXC0E`) on a direct `jne
+  FUNCTION_DIE` in main's argc-check. `asm` followed once object mode learned to
+  alias its globals (see below), and `trailer_cross_page` — the last holdout —
+  was reworked to pad itself in `.rodata` instead of with `asm("times nop")` in
+  the code path. With nothing left on it, `FLAT_PROGRAMS`,
+  `compile_program_flat`, and `is_flat_program` were deleted from `make_os.sh`.
+  (cc.py's flat output mode itself stays — the kernel is built with it via
+  `--target kernel`.)
 
 ### Fixed
+
+- **Object mode left inline-asm `_g_<name>` global references undefined.** The
+  self-hosted assembler (`asm`) reaches its file-scope globals from inline asm
+  under the legacy `_g_<name>` spelling, but object mode emitted only the bare
+  C-conformant name, so those references failed to assemble (`_g_error_word not
+  defined`, then a cascade of "label changed during code generation"). cc.py now
+  emits a `_g_<name>:` alias label beside every object-mode global — the mirror
+  of flat mode's `<name> equ _g_<name>`, as a real label (not an `equ`) so the
+  ccobj relocation scanner records its address. This is what let `asm` come off
+  `FLAT_PROGRAMS`.
 
 - **Object-mode argc-check fused a direct jump to the absolute `die` entry.**
   `main`'s `if (argc != N) die(...)` startup fusion emitted a literal `jne
