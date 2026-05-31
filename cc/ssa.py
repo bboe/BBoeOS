@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from cc import ast_nodes, ir
-from cc.cfg import BasicBlock, ControlFlowGraph, build_cfg, compute_dominance_frontiers, compute_dominators
+from cc.cfg import BasicBlock, ControlFlowGraph, build_cfg, compute_dominance_frontiers, compute_dominators, flatten_cfg
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -206,26 +206,6 @@ def _find_trivial_phi(ssa: SSAForm, /) -> tuple[BasicBlock, Phi, ir.Value] | Non
             if not ambiguous and unique is not None:
                 return block, phi, unique
     return None
-
-
-def _flatten_cfg(cfg: ControlFlowGraph, /) -> list[ir.Instruction]:
-    """Round-trip a CFG back to a flat :class:`cc.ir.Instruction` list.
-
-    Walks blocks in CFG source order, emitting each block's leading
-    :class:`cc.ir.Label` (real labels only — synthetic ``<entry>`` /
-    ``<fallthrough_N>`` names are dropped; split blocks use a real
-    ``.ssa_split_N`` label that survives), then its instructions, then
-    its terminator (if any).  The resulting list is suitable for direct
-    use by the existing codegen.
-    """
-    output: list[ir.Instruction] = []
-    for block in cfg.blocks:
-        if not block.label.startswith("<"):
-            output.append(ir.Label(name=block.label))
-        output.extend(block.instructions)
-        if block.terminator is not None:
-            output.append(block.terminator)
-    return output
 
 
 def _instruction_destination(instruction: ir.Instruction, /) -> str | None:
@@ -710,12 +690,11 @@ def convert_to_ssa(body: list[ir.Instruction], /, *, excluded_names: frozenset[s
 def flatten_ssa_form(ssa: SSAForm, /) -> list[ir.Instruction]:
     """Destruct *ssa* and return the resulting CFG flattened to a flat IR list.
 
-    Convenience wrapper around :func:`convert_from_ssa` + the internal
-    :func:`_flatten_cfg` helper.  The output is suitable for direct use
+    Convenience wrapper around :func:`convert_from_ssa` +
+    :func:`cc.cfg.flatten_cfg`.  The output is suitable for direct use
     by the existing codegen path.
     """
-    cfg = convert_from_ssa(ssa)
-    return _flatten_cfg(cfg)
+    return flatten_cfg(convert_from_ssa(ssa))
 
 
 def optimize_ssa(body: list[ir.Instruction], /, *, excluded_names: frozenset[str] = frozenset()) -> list[ir.Instruction]:
@@ -740,11 +719,10 @@ def optimize_ssa(body: list[ir.Instruction], /, *, excluded_names: frozenset[str
     ssa = convert_to_ssa(body, excluded_names=excluded_names)
     if not ssa.ssa_safe_names:
         return body
-    while True:
+    propagated = collapsed = True
+    while propagated or collapsed:
         propagated = _propagate_ssa_copies(ssa)
         collapsed = _eliminate_trivial_phis(ssa)
-        if not propagated and not collapsed:
-            break
     _eliminate_dead_phis(ssa)
     _deversion_ssa_form(ssa)
     return _drop_redundant_copies(flatten_ssa_form(ssa))

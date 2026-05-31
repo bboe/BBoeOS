@@ -50,6 +50,7 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 from cc import ast_nodes, ir
+from cc.loops import hoist_loop_invariants
 from cc.ssa import optimize_ssa
 from cc.tokens import INVERT_COMPARISON
 
@@ -769,45 +770,43 @@ class Optimizer:
         carry_return: bool = False,
         excluded_ssa_names: frozenset[str] = frozenset(),
     ) -> list[ir.Instruction]:
-        """Run propagation + folding + CFG simplification + DCE to fixed point.
+        """Drive the IR-level optimization pipeline to fixed point.
 
-        Ordering matters: propagation feeds folding feeds branch-condition
-        folding feeds CFG simplification (newly-constant branches expose
-        dead code).  DCE runs last so it sees the smallest live set.  The
-        outer loop iterates because, e.g., dropping a dead label can
-        expose a redundant ``Jump`` whose target collapsed.  After the
-        scalar pipeline converges, the body round-trips through SSA so
-        the Phase 3 phi / copy-propagation passes can collapse joins the
-        linear pipeline can't see; one more sweep of the scalar passes
-        cleans up the resulting copies.  Tail-call elimination runs once
-        after fixed-point because it produces a terminator (``ir.TailCall``)
-        that the unreachable-code pass inside ``_simplify_control_flow``
-        then uses to drop any stranded instructions before the next
-        ``Label``.  Skipped for ``carry_return`` callers — their CF-based
-        return shape cannot survive a tail ``jmp``.
+        :meth:`_scalar_fixed_point` runs propagation + folding + CFG
+        simplification + DCE in dependency order until the body stops
+        changing.  Ordering matters: propagation feeds folding feeds
+        branch-condition folding feeds CFG simplification (newly-constant
+        branches expose dead code); DCE runs last so it sees the smallest
+        live set; the outer iteration keeps composing them because, e.g.,
+        dropping a dead label can expose a redundant ``Jump`` whose
+        target collapsed.
+
+        After the scalar pipeline converges, the body round-trips through
+        SSA so the Phase 3 phi / copy-propagation passes can collapse
+        joins the linear pipeline can't see; another scalar fixed-point
+        cleans up the resulting copies.  Then
+        :func:`cc.loops.hoist_loop_invariants` runs once, and the scalar
+        pipeline runs one more time to clean up the rewritten loops
+        (collapsing empty Jump-only preheaders that no instruction
+        populated, propagating through newly-exposed dominance).
+
+        Tail-call elimination runs once after fixed-point because it
+        produces a terminator (``ir.TailCall``) that the unreachable-code
+        pass inside ``_simplify_control_flow`` then uses to drop any
+        stranded instructions before the next ``Label``.  Skipped for
+        ``carry_return`` callers — their CF-based return shape cannot
+        survive a tail ``jmp``.
 
         ``excluded_ssa_names`` is forwarded to :func:`cc.ssa.optimize_ssa`
-        so the renamer can skip names the caller knows are
-        call-clobbered — typically program globals from
-        :func:`_collect_global_names`.
+        and :func:`cc.loops.hoist_loop_invariants` so neither renames
+        nor hoists across names the caller knows are call-clobbered —
+        typically program globals from :func:`_collect_global_names`.
         """
-        current = list(body)
-        while True:
-            after_propagation = self._propagate(current)
-            after_control_flow = self._simplify_control_flow(after_propagation)
-            after_dead_code = self._dead_code_elimination(after_control_flow)
-            if after_dead_code == current:
-                break
-            current = after_dead_code
+        current = self._scalar_fixed_point(list(body))
         if (after_ssa := optimize_ssa(current, excluded_names=excluded_ssa_names)) != current:
-            current = after_ssa
-            while True:
-                after_propagation = self._propagate(current)
-                after_control_flow = self._simplify_control_flow(after_propagation)
-                after_dead_code = self._dead_code_elimination(after_control_flow)
-                if after_dead_code == current:
-                    break
-                current = after_dead_code
+            current = self._scalar_fixed_point(after_ssa)
+        if (after_licm := hoist_loop_invariants(current, excluded_names=excluded_ssa_names)) != current:
+            current = self._scalar_fixed_point(after_licm)
         if not carry_return:
             current = self._eliminate_tail_calls(current)
             current = self._eliminate_unreachable_code(current)
@@ -853,6 +852,25 @@ class Optimizer:
                 if folded is not None:
                     result[index] = folded
         return result
+
+    def _scalar_fixed_point(self, body: list[ir.Instruction], /) -> list[ir.Instruction]:
+        """Run propagation + control-flow simplification + DCE until *body* stops changing.
+
+        Single pre-SSA, post-SSA, and post-LICM driver for the scalar
+        pipeline.  Each pass converges quickly in practice but each can
+        re-expose work for the next (dropping a dead label exposes a
+        redundant ``Jump`` whose target collapsed, etc.), so the outer
+        iteration keeps composing the three passes until no rewrite
+        fires.  ``previous = None`` guarantees the first iteration runs
+        even when *body* is already at a fixed point under separate
+        invocations.
+        """
+        current = body
+        previous: list[ir.Instruction] | None = None
+        while current != previous:
+            previous = current
+            current = self._dead_code_elimination(self._simplify_control_flow(self._propagate(current)))
+        return current
 
     def _simplify_control_flow(self, body: list[ir.Instruction], /) -> list[ir.Instruction]:
         """Apply the IR-level CFG passes in dependency order.
