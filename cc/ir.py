@@ -18,12 +18,28 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from cc import ast_nodes
 from cc.errors import CompileError
 from cc.tokens import COMPARISON_OPERATIONS, INVERT_COMPARISON
 
 Value = int | str | ast_nodes.AddressOf
+
+
+class _NoValueFields:
+    """Mixin for instruction classes that read no :data:`Value` operands.
+
+    Centralizes the empty :attr:`VALUE_FIELDS` declaration so opaque /
+    control-only instructions (Block, Jump, Label, LoopBoundary, Switch,
+    etc.) inherit the contract instead of redeclaring ``= ()``.  The
+    empty :attr:`__slots__` keeps the mixin compatible with
+    ``@dataclass(slots=True)`` subclasses — without it, subclass
+    instances would still get a ``__dict__``.
+    """
+
+    __slots__ = ()
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ()
 
 
 def _is_constant_true(condition: ast_nodes.Node, /) -> bool:
@@ -48,6 +64,8 @@ def _is_constant_true(condition: ast_nodes.Node, /) -> bool:
 class BinaryOperation:
     """destination = left operation right — arithmetic or bitwise binary operation."""
 
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("left", "right")
+
     destination: str
     left: Value
     operation: str
@@ -55,7 +73,7 @@ class BinaryOperation:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class Block:
+class Block(_NoValueFields):
     """Escape hatch: lower this AST node via the existing statement codegen."""
 
     node: ast_nodes.Node
@@ -64,6 +82,8 @@ class Block:
 @dataclass(frozen=True, kw_only=True, slots=True)
 class BranchFalse:
     """Jump to *target* when the condition ``left operation right`` is FALSE."""
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("left", "right")
 
     left: Value
     operation: str
@@ -75,13 +95,15 @@ class BranchFalse:
 class Call:
     """destination = name(args) — call expression; destination is None to discard return."""
 
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("args",)
+
     args: tuple[Value, ...]
     destination: str | None
     name: str
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class CarryBranch:
+class CarryBranch(_NoValueFields):
     """Call a ``carry_return`` function, then branch on the carry flag.
 
     ``__attribute__((carry_return))`` functions report their boolean
@@ -106,6 +128,8 @@ class CarryBranch:
 class Copy:
     """destination = source — scalar assignment."""
 
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("source",)
+
     destination: str
     source: Value
 
@@ -113,6 +137,8 @@ class Copy:
 @dataclass(frozen=True, kw_only=True, slots=True)
 class Index:
     """destination = base[index] — array / pointer read."""
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("index",)
 
     base: str
     destination: str
@@ -123,34 +149,36 @@ class Index:
 class IndexAssign:
     """base[index] = source — array / pointer write."""
 
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("index", "source")
+
     base: str
     index: Value
     source: Value
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class InlineAsm:
+class InlineAsm(_NoValueFields):
     """Pass-through inline-asm block."""
 
     content: str
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class Jump:
+class Jump(_NoValueFields):
     """Unconditional jump."""
 
     target: str
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class Label:
+class Label(_NoValueFields):
     """A branch target label."""
 
     name: str
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class LoopBoundary:
+class LoopBoundary(_NoValueFields):
     """Push or pop loop label context for the emission layer.
 
     Emitted around loop bodies so that ``Continue`` / ``Break`` nodes
@@ -172,11 +200,13 @@ class LoopBoundary:
 class Return:
     """Function return, optionally with a value."""
 
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("value",)
+
     value: Value | None
 
 
 @dataclass(kw_only=True, slots=True)
-class Switch:
+class Switch(_NoValueFields):
     """``switch (discriminant) { case ...: ... default: ... }`` statement.
 
     The discriminant is kept as an AST node so the codegen's
@@ -221,6 +251,8 @@ class TailCall:
     call site fails the runtime eligibility check (e.g. stack args,
     pinned saves required, callee is a builtin).
     """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("args",)
 
     args: tuple[Value, ...]
     name: str
