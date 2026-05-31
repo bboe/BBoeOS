@@ -1346,6 +1346,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         non-reserved alias whose expansion carries the raw token
         through the ``global`` directive parser.
 
+        Object mode additionally emits a ``_g_<name>:`` label on the
+        line just before the storage so inline-asm callers that use the
+        legacy ``_g_<name>`` spelling (e.g. the self-hosted assembler in
+        ``user/programs/asm.c``) resolve to the same address as the
+        C-conformant ``<name>``.  This is the mirror of the flat-mode
+        alias below — and it must be a real label, not an ``equ``: the
+        ccobj relocation scanner records addresses only for labels with
+        an emit offset, so an ``_g_<name> equ <name>`` alias would be
+        seen as a defined label (and picked as a relocation target) yet
+        carry no address, and ccld would reject it as an unknown symbol.
+
         Flat-binary / kernel mode emits ``<name> equ _g_<name>`` so
         inline-asm callers that reference the C-conformant name resolve
         to the same address as cc.py-internal references via
@@ -1360,6 +1371,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.emit(f"global {alias}")
             else:
                 self.emit(f"global {name}")
+            self.emit(f"_g_{name}:")
         else:
             self.emit(f"{name} equ _g_{name}")
 
