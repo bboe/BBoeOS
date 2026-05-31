@@ -177,6 +177,106 @@ def _eliminate_dead_phis(ssa: SSAForm, /) -> bool:
         changed = True
 
 
+def _eliminate_redundant_expressions(ssa: SSAForm, /, *, idom: dict[BasicBlock, BasicBlock]) -> bool:
+    """Replace each redundant ``BinaryOperation`` with a ``Copy`` of the earlier SSA destination that produced the same value.
+
+    Dominator-tree-only GVN: walk the dominator tree in DFS order, and
+    for each block maintain a map from a value-key
+    ``(operation, canonicalized_operands)`` to the SSA-versioned
+    destination that first produced that value within the block's
+    dominance region.  When a later ``BinaryOperation`` matches an entry
+    already in scope, rewrite it to ``Copy(destination, prior)`` — the
+    prior destination strictly dominates the rewrite site, so the SSA
+    use-def edge stays valid.  Copy propagation in the same fixed-point
+    loop forwards the new copy to every later use, leaving the redundant
+    computation as a self-copy that subsequent cleanup drops.
+
+    Operands are canonicalized for commutative operations
+    (``+``, ``*``, ``&``, ``|``, ``^``, ``==``, ``!=``) by sorting the
+    operand-key pair so ``a + b`` and ``b + a`` collapse to one number.
+
+    Operand safety: constants and :class:`cc.ast_nodes.AddressOf` are
+    always safe.  String operands are safe when they are SSA-versioned
+    (single-def by construction) **or** when they are un-versioned names
+    that never appear as a destination anywhere in the body
+    (read-only — e.g. a function parameter whose address is never taken).
+    An un-versioned destination is unsafe because intervening writes
+    between two program points can change the value: writes to
+    address-taken locals or call-clobbered globals stay un-versioned for
+    soundness, and matching against them would silently miscompile.
+
+    Entries are only recorded when the producing instruction's
+    destination is SSA-versioned — otherwise the destination could be
+    overwritten before a later match site reads it, leaving the rewritten
+    Copy reading a stale value.
+    """
+    commutative_operations = frozenset({"+", "*", "&", "|", "^", "==", "!="})
+    unsafe_names: set[str] = set()
+    for block in ssa.cfg.blocks:
+        for instruction in block.instructions:
+            destination = _instruction_destination(instruction)
+            if isinstance(destination, str) and _SSA_VERSION_SEPARATOR not in destination:
+                unsafe_names.add(destination)
+
+    def _value_key(value: ir.Value, /) -> tuple[str, int | str]:
+        if isinstance(value, int):
+            return ("i", value)
+        if isinstance(value, str):
+            return ("s", value)
+        assert isinstance(value, ast_nodes.AddressOf)
+        return ("a", value.var.name)
+
+    def _is_safe(value: ir.Value, /) -> bool:
+        if isinstance(value, (int, ast_nodes.AddressOf)):
+            return True
+        if _SSA_VERSION_SEPARATOR in value:
+            return True
+        return value not in unsafe_names
+
+    def _expression_key(instruction: ir.BinaryOperation, /) -> tuple | None:
+        if not (_is_safe(instruction.left) and _is_safe(instruction.right)):
+            return None
+        left_key = _value_key(instruction.left)
+        right_key = _value_key(instruction.right)
+        if instruction.operation in commutative_operations:
+            left_key, right_key = sorted((left_key, right_key))
+        return (instruction.operation, left_key, right_key)
+
+    children: dict[BasicBlock, list[BasicBlock]] = defaultdict(list)
+    for block, parent in idom.items():
+        if block is not parent:
+            children[parent].append(block)
+    changed = False
+    available: dict[tuple, str] = {}
+    # Iterative dominator-tree DFS so deeply-nested CFGs don't blow the
+    # Python recursion limit.  Each stack entry is either ``(block, None)``
+    # — visit *block* — or ``(block, added_keys)`` — leaving the subtree
+    # rooted at *block*, pop the keys this block added to ``available``.
+    stack: list[tuple[BasicBlock, list[tuple] | None]] = [(ssa.cfg.entry, None)]
+    while stack:
+        block, exit_keys = stack.pop()
+        if exit_keys is not None:
+            for key in exit_keys:
+                del available[key]
+            continue
+        added: list[tuple] = []
+        new_instructions: list[ir.Instruction] = []
+        for instruction in block.instructions:
+            replacement: ir.Instruction | None = None
+            if isinstance(instruction, ir.BinaryOperation) and (key := _expression_key(instruction)) is not None:
+                if (prior := available.get(key)) is not None:
+                    replacement = ir.Copy(destination=instruction.destination, source=prior)
+                    changed = True
+                elif _SSA_VERSION_SEPARATOR in instruction.destination:
+                    available[key] = instruction.destination
+                    added.append(key)
+            new_instructions.append(replacement if replacement is not None else instruction)
+        block.instructions = new_instructions
+        stack.append((block, added))
+        stack.extend((child, None) for child in children.get(block, []))
+    return changed
+
+
 def _eliminate_trivial_phis(ssa: SSAForm, /) -> bool:
     changed = False
     while triviality := _find_trivial_phi(ssa):
@@ -719,10 +819,12 @@ def optimize_ssa(body: list[ir.Instruction], /, *, excluded_names: frozenset[str
     ssa = convert_to_ssa(body, excluded_names=excluded_names)
     if not ssa.ssa_safe_names:
         return body
-    propagated = collapsed = True
-    while propagated or collapsed:
+    idom = compute_dominators(ssa.cfg)
+    propagated = collapsed = numbered = True
+    while propagated or collapsed or numbered:
         propagated = _propagate_ssa_copies(ssa)
         collapsed = _eliminate_trivial_phis(ssa)
+        numbered = _eliminate_redundant_expressions(ssa, idom=idom)
     _eliminate_dead_phis(ssa)
     _deversion_ssa_form(ssa)
     return _drop_redundant_copies(flatten_ssa_form(ssa))

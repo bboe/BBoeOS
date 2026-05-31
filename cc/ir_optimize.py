@@ -50,7 +50,7 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 from cc import ast_nodes, ir
-from cc.loops import hoist_loop_invariants
+from cc.loops import hoist_loop_invariants, reduce_loop_strength
 from cc.ssa import optimize_ssa
 from cc.tokens import INVERT_COMPARISON
 
@@ -807,6 +807,8 @@ class Optimizer:
             current = self._scalar_fixed_point(after_ssa)
         if (after_licm := hoist_loop_invariants(current, excluded_names=excluded_ssa_names)) != current:
             current = self._scalar_fixed_point(after_licm)
+        if (after_lsr := reduce_loop_strength(current)) != current:
+            current = self._scalar_fixed_point(after_lsr)
         if not carry_return:
             current = self._eliminate_tail_calls(current)
             current = self._eliminate_unreachable_code(current)

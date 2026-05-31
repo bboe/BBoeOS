@@ -39,7 +39,7 @@ import dataclasses
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cc import ir
+from cc import ast_nodes, ir
 from cc.cfg import BasicBlock, ControlFlowGraph, build_cfg, compute_dominators, flatten_cfg
 
 if TYPE_CHECKING:
@@ -50,6 +50,36 @@ if TYPE_CHECKING:
 #: convention for branch targets so backend label resolution treats the
 #: preheader like any other compiler-generated label.
 _PREHEADER_LABEL_TEMPLATE = ".licm_preheader_{counter}"
+
+#: Local-name template for accumulators introduced by
+#: :func:`reduce_loop_strength`.  Each multiplicative reduction allocates
+#: a fresh accumulator whose name is guaranteed unique across the
+#: function by the per-invocation counter.  The ``_ir_`` prefix matches
+#: the convention :meth:`cc.codegen.base.CodegenBase._collect_ir_temps`
+#: scans for when allocating stack slots — without it the codegen would
+#: see the accumulator as an undeclared name and fail to emit a frame
+#: slot for it.
+_ACCUMULATOR_NAME_TEMPLATE = "_ir_lsr_acc_{counter}"
+
+
+def _assignment_destination(instruction: ir.Instruction, /) -> str | None:
+    """Return the name written by *instruction*, or None when it writes no scalar slot.
+
+    Recognises both IR-native instructions (``Copy``, ``BinaryOperation``,
+    ``Index``, ``Call``) via their ``destination`` field **and** the
+    AST-escape-hatch form ``Block(node=ast_nodes.Assign(name=…))`` that
+    the IR builder emits for ``x = x op K`` self-modifies — the
+    builder routes those to the AST codegen for tighter ``inc`` /
+    ``add [mem], imm`` emission, but the analysis here still needs to
+    see them as writes so an induction variable updated through that
+    path is recognised.
+    """
+    destination = getattr(instruction, "destination", None)
+    if isinstance(destination, str):
+        return destination
+    if isinstance(instruction, ir.Block) and isinstance(instruction.node, ast_nodes.Assign):
+        return instruction.node.name
+    return None
 
 
 def _back_edges(cfg: ControlFlowGraph, /, *, dominators_of: dict[BasicBlock, frozenset[BasicBlock]]) -> list[tuple[BasicBlock, BasicBlock]]:
@@ -84,6 +114,25 @@ def _count_destination_definitions(cfg: ControlFlowGraph, /) -> dict[str, int]:
     return counts
 
 
+def _count_loop_definitions(body_block_order: list[BasicBlock], /) -> dict[str, int]:
+    """Return ``{name: definition_count}`` restricted to instructions inside *body_block_order*.
+
+    Counterpart to :func:`_count_destination_definitions` (which counts
+    over the entire CFG): induction-variable detection wants a count
+    scoped to the loop body, since an IV always has a separate
+    initialization outside the loop and the in-loop increment is the one
+    we actually care about.  Globally counting both would make every
+    real IV look multi-def and reject every reduction candidate.
+    """
+    counts: dict[str, int] = {}
+    for block in body_block_order:
+        for instruction in block.instructions:
+            destination = _assignment_destination(instruction)
+            if destination is not None:
+                counts[destination] = counts.get(destination, 0) + 1
+    return counts
+
+
 def _dominator_sets(idom: dict[BasicBlock, BasicBlock], /) -> dict[BasicBlock, frozenset[BasicBlock]]:
     """Return ``{block: set_of_dominators_including_self}`` from immediate-dominator map *idom*.
 
@@ -101,6 +150,77 @@ def _dominator_sets(idom: dict[BasicBlock, BasicBlock], /) -> dict[BasicBlock, f
             runner = parent
         result[block] = frozenset(chain)
     return result
+
+
+def _find_induction_variables(body_block_order: list[BasicBlock], /, *, loop_definition_count: dict[str, int]) -> dict[str, int]:
+    """Return ``{iv_name: integer_step}`` for every simple additive induction variable in the loop body.
+
+    A *simple additive IV* is a name with exactly one definition in the
+    loop body of the form ``X = X + literal`` or ``X = X - literal``
+    where ``literal`` is an ``int``.  The single-definition requirement
+    means the IV value at any point in the loop body is the preheader
+    value plus ``iterations_so_far * step``; without it, an intervening
+    write would break the linear relationship that strength reduction
+    relies on.
+
+    Outside-the-loop definitions (typically the IV initialization)
+    don't count — this is why the caller passes a *loop-local*
+    definition count rather than the CFG-wide one.
+
+    Both the IR-native ``BinaryOperation`` form and the AST-escape-hatch
+    ``Block(node=Assign(...))`` form qualify — the IR builder routes
+    ``x = x op K`` to the latter for tighter codegen, and LSR would
+    miss every typical ``for (i = 0; ...; i = i + 1)`` loop without it.
+    """
+    candidates: dict[str, int] = {}
+    for block in body_block_order:
+        for instruction in block.instructions:
+            destination = _assignment_destination(instruction)
+            if destination is None:
+                continue
+            if loop_definition_count.get(destination, 0) != 1:
+                continue
+            step = _self_increment_step(instruction, name=destination)
+            if step is not None:
+                candidates[destination] = step
+    return candidates
+
+
+def _find_multiplicative_iv_uses(
+    body_block_order: list[BasicBlock],
+    /,
+    *,
+    definition_count: dict[str, int],
+    induction_variables: dict[str, int],
+) -> list[tuple[BasicBlock, int, ir.BinaryOperation, str, int]]:
+    """Return every ``T = IV * const`` (or ``T = const * IV``) candidate eligible for strength reduction.
+
+    Each entry is ``(block, instruction_index, instruction, iv_name, mul_constant)``.
+    The candidate's destination ``T`` must be defined exactly once in
+    the entire function — otherwise replacing the multiply with a copy
+    of an accumulator could disagree with another write to ``T`` reached
+    along a different control-flow path.
+    """
+    results: list[tuple[BasicBlock, int, ir.BinaryOperation, str, int]] = []
+    for block in body_block_order:
+        for index, instruction in enumerate(block.instructions):
+            if not isinstance(instruction, ir.BinaryOperation):
+                continue
+            if instruction.operation != "*":
+                continue
+            if definition_count.get(instruction.destination, 0) != 1:
+                continue
+            iv_name: str | None = None
+            mul_constant: int | None = None
+            if isinstance(instruction.left, str) and instruction.left in induction_variables and isinstance(instruction.right, int):
+                iv_name = instruction.left
+                mul_constant = instruction.right
+            elif isinstance(instruction.right, str) and instruction.right in induction_variables and isinstance(instruction.left, int):
+                iv_name = instruction.right
+                mul_constant = instruction.left
+            if iv_name is not None and mul_constant is not None:
+                results.append((block, index, instruction, iv_name, mul_constant))
+    return results
 
 
 def _hoist_invariants_into_preheader(
@@ -316,6 +436,96 @@ def _operands_invariant(instruction: ir.Instruction, /, *, invariant_destination
     return True
 
 
+def _reduce_strength_in_loop(
+    *,
+    accumulator_counter: int,
+    body_block_order: list[BasicBlock],
+    definition_count: dict[str, int],
+    preheader: BasicBlock,
+) -> int:
+    """Apply strength reduction to every IV-times-constant multiply in *body_block_order*.
+
+    Returns the updated *accumulator_counter* so a caller iterating
+    multiple loops can keep the synthesized accumulator names globally
+    unique across the function.
+
+    For each ``T = IV * k`` candidate, allocates a fresh accumulator
+    ``T_acc``, emits ``T_acc = IV * k`` into *preheader* (a single
+    multiply that runs once before the loop), rewrites the body's
+    multiply to ``Copy(T, T_acc)``, and inserts ``T_acc = T_acc + step*k``
+    immediately after the IV's in-loop update.  The transform preserves
+    the invariant ``T_acc == IV * k`` at every program point in the loop
+    body where the original multiply appeared, so every later read of
+    ``T`` observes the same value as before — with one fewer multiply
+    per iteration.
+    """
+    loop_definition_count = _count_loop_definitions(body_block_order)
+    induction_variables = _find_induction_variables(body_block_order, loop_definition_count=loop_definition_count)
+    if not induction_variables:
+        return accumulator_counter
+    candidates = _find_multiplicative_iv_uses(body_block_order, definition_count=definition_count, induction_variables=induction_variables)
+    if not candidates:
+        return accumulator_counter
+    for block, _mul_index, mul_instruction, iv_name, mul_constant in candidates:
+        step = induction_variables[iv_name]
+        accumulator = _ACCUMULATOR_NAME_TEMPLATE.format(counter=accumulator_counter)
+        accumulator_counter += 1
+        preheader.instructions.append(ir.BinaryOperation(destination=accumulator, left=iv_name, operation="*", right=mul_constant))
+        # Locate the multiply by object identity — the captured index
+        # from _find_multiplicative_iv_uses is stale if a prior candidate
+        # for the same loop inserted an accumulator update earlier in
+        # this block.
+        current_index = next(index for index, instruction in enumerate(block.instructions) if instruction is mul_instruction)
+        block.instructions[current_index] = ir.Copy(destination=mul_instruction.destination, source=accumulator)
+        increment = step * mul_constant
+        for body_block in body_block_order:
+            updated_instructions: list[ir.Instruction] = []
+            for instruction in body_block.instructions:
+                updated_instructions.append(instruction)
+                if _self_increment_step(instruction, name=iv_name) is not None:
+                    updated_instructions.append(
+                        ir.BinaryOperation(destination=accumulator, left=accumulator, operation="+", right=increment)
+                    )
+            body_block.instructions = updated_instructions
+    return accumulator_counter
+
+
+def _self_increment_step(instruction: ir.Instruction, /, *, name: str) -> int | None:
+    """Return the integer step when *instruction* is ``name = name + literal`` or ``name = name - literal``.
+
+    Recognises both the IR-native ``BinaryOperation`` form and the
+    AST-escape-hatch ``Block(node=Assign(name=name, expr=BinaryOperation(
+    left=Var(name), operation='+'/'-', right=Int)))`` form.  Returns the
+    signed step (negative for ``-``) so a downward IV like ``i = i - 1``
+    produces ``-1`` directly — strength reduction then knows to
+    decrement its accumulator by ``-step * k`` rather than adding.
+
+    Returns None for anything else (writes by other names, non-integer
+    step, non-self-modify shapes, calls, opaque ``Block`` content).
+    """
+    if (
+        isinstance(instruction, ir.BinaryOperation)
+        and instruction.destination == name
+        and instruction.left == name
+        and instruction.operation in ("+", "-")
+        and isinstance(instruction.right, int)
+    ):
+        return instruction.right if instruction.operation == "+" else -instruction.right
+    if (
+        isinstance(instruction, ir.Block)
+        and isinstance(instruction.node, ast_nodes.Assign)
+        and instruction.node.name == name
+        and isinstance(instruction.node.expr, ast_nodes.BinaryOperation)
+        and instruction.node.expr.operation in ("+", "-")
+        and isinstance(instruction.node.expr.left, ast_nodes.Var)
+        and instruction.node.expr.left.name == name
+        and isinstance(instruction.node.expr.right, ast_nodes.Int)
+    ):
+        value = instruction.node.expr.right.value
+        return value if instruction.node.expr.operation == "+" else -value
+    return None
+
+
 @dataclass(eq=False, frozen=True, kw_only=True, slots=True)
 class NaturalLoop:
     """One natural loop in a function's CFG.
@@ -464,3 +674,52 @@ def natural_loops(cfg: ControlFlowGraph, /) -> list[NaturalLoop]:
         body = _loop_body(header, latches=latches)
         loops.append(NaturalLoop(body=body, exits=_loop_exits(body), header=header, latches=latches))
     return loops
+
+
+def reduce_loop_strength(body: list[ir.Instruction], /) -> list[ir.Instruction]:
+    """Replace IV-times-constant multiplies in every natural loop with additive accumulators.
+
+    Pipeline mirrors :func:`hoist_loop_invariants`: build the CFG,
+    discover natural loops, insert preheaders, then transform each loop
+    independently.  Returns the rewritten flat IR.  Returns *body*
+    unchanged when no candidate reductions exist (no loops, no
+    preheaders, no IVs, or no IV-times-constant multiplies).
+
+    A *candidate* is a multiply ``T = IV * k`` (or ``T = k * IV``)
+    inside a natural loop body where ``IV`` is a single-def additive
+    induction variable (``IV = IV + literal``) and ``T`` has exactly
+    one definition in the entire function — so rewriting the multiply
+    site cannot change the value seen at any other write of ``T``.
+    Each candidate gets its own accumulator: the preheader initializes
+    ``T_acc = IV * k`` (a single multiply, run once before the loop),
+    the multiply becomes ``Copy(T, T_acc)``, and ``T_acc`` increments
+    by ``step * k`` after every ``IV`` update so the invariant
+    ``T_acc == IV * k`` holds at every program point in the body.
+
+    Functions containing :class:`cc.ir.InlineAsm` are skipped — the asm
+    text may reference loop locals in ways the analysis can't see.
+    Matches the bypass convention in :func:`hoist_loop_invariants`.
+    """
+    if any(isinstance(instruction, ir.InlineAsm) for instruction in body):
+        return body
+    cfg = build_cfg(body)
+    loops_in_function = natural_loops(cfg)
+    if not loops_in_function:
+        return body
+    preheaders = insert_preheaders(cfg, loops=loops_in_function)
+    if not preheaders:
+        return body
+    definition_count = _count_destination_definitions(cfg)
+    block_index = {block: index for index, block in enumerate(cfg.blocks)}
+    accumulator_counter = 0
+    for loop, preheader in preheaders.items():
+        body_block_order = sorted(loop.body, key=block_index.__getitem__)
+        accumulator_counter = _reduce_strength_in_loop(
+            accumulator_counter=accumulator_counter,
+            body_block_order=body_block_order,
+            definition_count=definition_count,
+            preheader=preheader,
+        )
+    if accumulator_counter == 0:
+        return body
+    return flatten_cfg(cfg)

@@ -268,6 +268,26 @@ def test_no_destinations_yields_empty_ssa_form() -> None:
     assert form.phis == {}
 
 
+def test_optimize_ssa_canonicalizes_commutative_operand_order_for_gvn() -> None:
+    """``a + b`` and ``b + a`` collapse to a single computation under value numbering.
+
+    GVN sorts operand keys for commutative operations (``+``, ``*``,
+    ``&``, ``|``, ``^``, ``==``, ``!=``) so the two expressions hash to
+    the same key.  The second add is rewritten to ``Copy(t2, t1)`` and
+    propagation forwards ``t1`` to every use of ``t2``.
+    """
+    body = [
+        ir.Copy(destination="a", source=3),
+        ir.Copy(destination="b", source=5),
+        ir.BinaryOperation(destination="t1", left="a", operation="+", right="b"),
+        ir.BinaryOperation(destination="t2", left="b", operation="+", right="a"),
+        ir.Return(value="t2"),
+    ]
+    result = ssa.optimize_ssa(body)
+    adds = [instruction for instruction in result if isinstance(instruction, ir.BinaryOperation) and instruction.operation == "+"]
+    assert len(adds) == 1
+
+
 def test_optimize_ssa_collapses_diamond_with_identical_arm_values() -> None:
     """Both arms writing the same literal lets propagation + trivial-phi forward the value into the Return."""
     body = [
@@ -282,42 +302,6 @@ def test_optimize_ssa_collapses_diamond_with_identical_arm_values() -> None:
     result = ssa.optimize_ssa(body)
     return_instruction = next(instruction for instruction in result if isinstance(instruction, ir.Return))
     assert return_instruction.value == 42
-
-
-def test_optimize_ssa_excluded_name_blocks_propagation_across_call() -> None:
-    """A name passed in ``excluded_names`` cannot be propagated across an opaque ``Call``.
-
-    Regression: the SSA renamer used to treat *every* destination as a
-    candidate for renaming.  For globals (call-clobbered), the renamer
-    would create a single SSA version for ``global = 0`` and then
-    propagate ``0`` through every later use — including reads taken
-    *after* a ``Call`` that the callee may have used to mutate the
-    underlying slot.  The fix wires ``excluded_names`` so the renamer
-    leaves such names un-versioned and propagation stops at the un-
-    rewritten read.
-
-    Shape:
-        global = 0
-        call mutate_global       # may write to global
-        if global == 0 break
-        ...
-
-    With ``global`` in ``excluded_names``, the ``BranchFalse``'s left
-    operand must remain the name ``global`` — not be folded to the
-    literal ``0`` — so the post-call read picks up whatever
-    ``mutate_global`` wrote.
-    """
-    body = [
-        ir.Copy(destination="global", source=0),
-        ir.Call(args=(), destination=None, name="mutate_global"),
-        ir.BranchFalse(left="global", operation="!=", right=0, target=".end"),
-        ir.Call(args=(), destination=None, name="follow_up"),
-        ir.Label(name=".end"),
-        ir.Return(value=None),
-    ]
-    result = ssa.optimize_ssa(body, excluded_names=frozenset({"global"}))
-    branch = next(instruction for instruction in result if isinstance(instruction, ir.BranchFalse))
-    assert branch.left == "global"
 
 
 def test_optimize_ssa_does_not_forward_versioned_source_across_intervening_write() -> None:
@@ -360,6 +344,103 @@ def test_optimize_ssa_does_not_forward_versioned_source_across_intervening_write
     assert len(edx_sources) == 1
 
 
+def test_optimize_ssa_dominator_scoped_gvn_does_not_leak_into_sibling_arm() -> None:
+    """An expression numbered in one branch arm must not match an identical one in a sibling arm.
+
+    The two arms of a diamond are dominated only by the predecessor;
+    neither dominates the other.  GVN walks the dominator tree, popping
+    each block's recorded entries before its sibling enters, so an
+    expression recorded in the ``then`` arm is invisible to the ``else``
+    arm — otherwise the rewrite would emit a Copy whose source did not
+    dominate the use site.
+    """
+    body = [
+        ir.Copy(destination="a", source=2),
+        ir.BranchFalse(left="a", operation="!=", right=0, target=".else"),
+        ir.BinaryOperation(destination="t1", left="a", operation="*", right=3),
+        ir.Jump(target=".end"),
+        ir.Label(name=".else"),
+        ir.BinaryOperation(destination="t2", left="a", operation="*", right=3),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    result = ssa.optimize_ssa(body)
+    muls = [instruction for instruction in result if isinstance(instruction, ir.BinaryOperation) and instruction.operation == "*"]
+    assert len(muls) == 2
+
+
+def test_optimize_ssa_eliminates_redundant_binary_op_within_block() -> None:
+    """A second ``a * b`` in the same block becomes a copy of the first SSA destination."""
+    body = [
+        ir.Copy(destination="a", source=4),
+        ir.Copy(destination="b", source=7),
+        ir.BinaryOperation(destination="t1", left="a", operation="*", right="b"),
+        ir.BinaryOperation(destination="t2", left="a", operation="*", right="b"),
+        ir.BinaryOperation(destination="result", left="t1", operation="+", right="t2"),
+        ir.Return(value="result"),
+    ]
+    result = ssa.optimize_ssa(body)
+    muls = [instruction for instruction in result if isinstance(instruction, ir.BinaryOperation) and instruction.operation == "*"]
+    assert len(muls) == 1
+
+
+def test_optimize_ssa_excluded_name_blocks_gvn_match_across_call() -> None:
+    """Two ``g + 1`` reads with a ``Call`` between them don't merge when ``g`` is excluded.
+
+    Excluded names (program globals, address-taken locals) stay
+    un-versioned because their writes cannot be enumerated.  An
+    intervening ``Call`` may mutate ``g`` through a pointer, so the two
+    reads are not equivalent.  GVN's safety check refuses to number
+    expressions whose operands include an un-versioned destination.
+    """
+    body = [
+        ir.Copy(destination="g", source=10),
+        ir.BinaryOperation(destination="t1", left="g", operation="+", right=1),
+        ir.Call(args=(), destination=None, name="mutate"),
+        ir.BinaryOperation(destination="t2", left="g", operation="+", right=1),
+        ir.Return(value=None),
+    ]
+    result = ssa.optimize_ssa(body, excluded_names=frozenset({"g"}))
+    adds = [instruction for instruction in result if isinstance(instruction, ir.BinaryOperation) and instruction.operation == "+"]
+    assert len(adds) == 2
+
+
+def test_optimize_ssa_excluded_name_blocks_propagation_across_call() -> None:
+    """A name passed in ``excluded_names`` cannot be propagated across an opaque ``Call``.
+
+    Regression: the SSA renamer used to treat *every* destination as a
+    candidate for renaming.  For globals (call-clobbered), the renamer
+    would create a single SSA version for ``global = 0`` and then
+    propagate ``0`` through every later use — including reads taken
+    *after* a ``Call`` that the callee may have used to mutate the
+    underlying slot.  The fix wires ``excluded_names`` so the renamer
+    leaves such names un-versioned and propagation stops at the un-
+    rewritten read.
+
+    Shape:
+        global = 0
+        call mutate_global       # may write to global
+        if global == 0 break
+        ...
+
+    With ``global`` in ``excluded_names``, the ``BranchFalse``'s left
+    operand must remain the name ``global`` — not be folded to the
+    literal ``0`` — so the post-call read picks up whatever
+    ``mutate_global`` wrote.
+    """
+    body = [
+        ir.Copy(destination="global", source=0),
+        ir.Call(args=(), destination=None, name="mutate_global"),
+        ir.BranchFalse(left="global", operation="!=", right=0, target=".end"),
+        ir.Call(args=(), destination=None, name="follow_up"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    result = ssa.optimize_ssa(body, excluded_names=frozenset({"global"}))
+    branch = next(instruction for instruction in result if isinstance(instruction, ir.BranchFalse))
+    assert branch.left == "global"
+
+
 def test_optimize_ssa_inline_asm_function_returns_body_unchanged() -> None:
     """A body with :class:`cc.ir.InlineAsm` bypasses SSA entirely; output is identical."""
     body = [
@@ -368,6 +449,20 @@ def test_optimize_ssa_inline_asm_function_returns_body_unchanged() -> None:
         ir.Return(value="x"),
     ]
     assert ssa.optimize_ssa(body) is body
+
+
+def test_optimize_ssa_preserves_non_commutative_operand_order_in_gvn() -> None:
+    """``a - b`` and ``b - a`` compute different values; GVN must keep both."""
+    body = [
+        ir.Copy(destination="a", source=10),
+        ir.Copy(destination="b", source=3),
+        ir.BinaryOperation(destination="t1", left="a", operation="-", right="b"),
+        ir.BinaryOperation(destination="t2", left="b", operation="-", right="a"),
+        ir.Return(value=None),
+    ]
+    result = ssa.optimize_ssa(body)
+    subs = [instruction for instruction in result if isinstance(instruction, ir.BinaryOperation) and instruction.operation == "-"]
+    assert len(subs) == 2
 
 
 def test_optimize_ssa_preserves_semantics_for_multi_def_temp() -> None:

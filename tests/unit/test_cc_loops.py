@@ -524,6 +524,196 @@ def test_loops_ordered_by_header_position_in_blocks() -> None:
     assert [loop.header.label for loop in result] == [".outer", ".inner"]
 
 
+def test_lsr_constant_times_iv_handles_commutative_form() -> None:
+    """An ``i * c`` candidate triggers strength reduction with the IV on either operand side."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".loop"),
+        ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
+        ir.BinaryOperation(destination="prod", left=5, operation="*", right="i"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    result = loops.reduce_loop_strength(body)
+    # The ``5 * i`` multiply is replaced by a ``Copy(prod, _ir_lsr_acc_*)``.
+    # No remaining ``BinaryOperation`` writes to ``prod``.
+    multiplies_to_prod = [
+        instruction for instruction in result if isinstance(instruction, ir.BinaryOperation) and instruction.destination == "prod"
+    ]
+    assert multiplies_to_prod == []
+    accumulator_copies = [
+        instruction
+        for instruction in result
+        if isinstance(instruction, ir.Copy)
+        and instruction.destination == "prod"
+        and isinstance(instruction.source, str)
+        and instruction.source.startswith("_ir_lsr_acc_")
+    ]
+    assert len(accumulator_copies) == 1
+
+
+def test_lsr_iv_times_constant_replaces_multiply_with_accumulator() -> None:
+    """A ``T = i * k`` inside a counted loop becomes a ``Copy(T, _lsr_acc)`` driven by an accumulator.
+
+    The preheader gets a single ``_lsr_acc = i * k`` multiply (run once
+    before the loop), and the body's per-iteration multiply collapses to
+    a copy.  The accumulator increments by ``step * k`` after every
+    update of the IV.
+    """
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".loop"),
+        ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
+        ir.BinaryOperation(destination="prod", left="i", operation="*", right=5),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    result = loops.reduce_loop_strength(body)
+    multiplies = [instruction for instruction in result if isinstance(instruction, ir.BinaryOperation) and instruction.operation == "*"]
+    # Exactly one multiply survives — the preheader initialization
+    # ``_lsr_acc = i * 5`` — and it writes to a fresh accumulator name
+    # rather than the original ``prod``.
+    assert len(multiplies) == 1
+    assert multiplies[0].destination.startswith("_ir_lsr_acc_")
+    assert multiplies[0].left == "i"
+    assert multiplies[0].right == 5
+    # The body's original multiply was replaced by a Copy of the accumulator.
+    prod_copies = [instruction for instruction in result if isinstance(instruction, ir.Copy) and instruction.destination == "prod"]
+    assert len(prod_copies) == 1
+    assert prod_copies[0].source == multiplies[0].destination
+    # The accumulator increments by step * k = 1 * 5 = 5 each iteration.
+    accumulator_increments = [
+        instruction
+        for instruction in result
+        if isinstance(instruction, ir.BinaryOperation)
+        and instruction.operation == "+"
+        and instruction.destination.startswith("_ir_lsr_acc_")
+        and instruction.right == 5
+    ]
+    assert len(accumulator_increments) == 1
+
+
+def test_lsr_iv_update_via_block_assign_qualifies_as_induction_variable() -> None:
+    """The IR builder routes ``i = i + 1`` through ``Block(node=Assign(...))`` for tighter codegen.
+
+    LSR must recognise that AST-escape-hatch form as a self-modify IV
+    update — otherwise every real for-loop misses out, since the
+    builder emits the Block form whenever the assignment's
+    right-hand side is ``i op K``.
+    """
+    iv_update = ir.Block(
+        node=ast_nodes.Assign(
+            expr=ast_nodes.BinaryOperation(
+                left=ast_nodes.Var(line=1, name="i"),
+                line=1,
+                operation="+",
+                right=ast_nodes.Int(line=1, value=1),
+            ),
+            line=1,
+            name="i",
+        )
+    )
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".loop"),
+        ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
+        ir.BinaryOperation(destination="prod", left="i", operation="*", right=5),
+        iv_update,
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    result = loops.reduce_loop_strength(body)
+    # The Block IV update is preserved verbatim; an accumulator increment
+    # is inserted *after* it.
+    block_index = next(index for index, instruction in enumerate(result) if instruction is iv_update)
+    next_instruction = result[block_index + 1]
+    assert isinstance(next_instruction, ir.BinaryOperation)
+    assert next_instruction.left == next_instruction.destination
+    assert next_instruction.destination.startswith("_ir_lsr_acc_")
+    assert next_instruction.right == 5
+
+
+def test_lsr_negative_step_iv_increments_accumulator_by_negative_product() -> None:
+    """A downward IV (``i = i - 1``) increments the accumulator by ``-step * k``."""
+    body = [
+        ir.Copy(destination="i", source=10),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".loop"),
+        ir.BranchFalse(left="i", operation=">", right=0, target=".end"),
+        ir.BinaryOperation(destination="prod", left="i", operation="*", right=4),
+        ir.BinaryOperation(destination="i", left="i", operation="-", right=1),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    result = loops.reduce_loop_strength(body)
+    accumulator_updates = [
+        instruction
+        for instruction in result
+        if isinstance(instruction, ir.BinaryOperation)
+        and instruction.operation == "+"
+        and instruction.destination.startswith("_ir_lsr_acc_")
+        and instruction.left == instruction.destination
+    ]
+    assert len(accumulator_updates) == 1
+    assert accumulator_updates[0].right == -4
+
+
+def test_lsr_no_loops_returns_body_unchanged() -> None:
+    """A straight-line function has nothing for LSR to do; the body is returned unchanged."""
+    body = [
+        ir.Copy(destination="x", source=5),
+        ir.Return(value=None),
+    ]
+    assert loops.reduce_loop_strength(body) is body
+
+
+def test_lsr_skips_loop_with_no_induction_variable() -> None:
+    """A loop whose counter has multiple in-loop definitions has no recognized IV; LSR no-ops."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".loop"),
+        ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
+        ir.BinaryOperation(destination="prod", left="i", operation="*", right=5),
+        # Two writes to ``i`` inside the loop — no single-def IV.
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    assert loops.reduce_loop_strength(body) is body
+
+
+def test_lsr_skips_when_multiply_destination_has_multiple_defs() -> None:
+    """A multiply target with more than one definition in the function blocks LSR for that candidate."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Copy(destination="prod", source=0),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".loop"),
+        ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
+        ir.BinaryOperation(destination="prod", left="i", operation="*", right=5),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    # ``prod`` is defined twice (initial ``Copy(prod, 0)`` plus the
+    # multiply), so we can't safely replace the multiply with a Copy
+    # without disturbing the other write.  LSR no-ops.
+    assert loops.reduce_loop_strength(body) is body
+
+
 def test_nested_loops_are_detected_separately() -> None:
     """An inner loop is reported as a distinct :class:`NaturalLoop` from its outer loop."""
     body = [
