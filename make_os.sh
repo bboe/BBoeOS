@@ -211,18 +211,21 @@ rm -rf "$PBUILD" && mkdir -p "$PBUILD"
 # same BSS trailer), so the shell and runtime ABI don't change with the
 # toolchain choice.  The programs listed here require the flat path —
 # each either fails to assemble through ccld or misbehaves at runtime:
-#   arp, dns — build through the object pipeline but fail at runtime
-#           (produce no output / never print the expected result).
+#   arp, dns — build through the object pipeline but page-fault at runtime
+#           (EXC0E on a mis-relocated call into their hand-written ASM
+#           helper modules pulled in via the <name>.deps sidecar).
 #   asm   — file-scope asm_register globals + inline-asm `times` blocks
 #           the object pipeline can't relocate (NASM errors with
 #           `_g_error_word not defined` / `label changed during code
 #           generation` through ccld).
-#   shell — compiles and boots through the linker but command dispatch
-#           breaks at runtime (every command, builtin or external,
-#           returns "unknown command").
 #   trailer_cross_page — its `asm("times ...")` padding only survives
 #           flat assembly; that padding is the whole point of the test.
-FLAT_PROGRAMS="arp asm dns shell trailer_cross_page"
+# shell used to live here too — its command dispatch returned "unknown
+# command" for everything through the linker — but that was a symptom of
+# ccld dropping relocation addends (`buf[i-1]` linked as `buf[i]`), now
+# fixed, so shell builds through the object pipeline like every other
+# program.
+FLAT_PROGRAMS="arp asm dns trailer_cross_page"
 
 compile_program_flat() {
     name=$1

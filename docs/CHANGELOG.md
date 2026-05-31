@@ -11,6 +11,15 @@ time.
 
 ## Unreleased
 
+### Changed
+
+- **`shell` now builds through the object-file pipeline.** Its "every command
+  returns unknown command" failure was a symptom of the dropped-addend linker
+  bug below (`buf[i-1]` linked as `buf[i]`); with that fixed, `shell` no longer
+  needs the legacy flat path and comes off `make_os.sh`'s `FLAT_PROGRAMS`. `arp`
+  / `dns` stay flat — they page-fault (`EXC0E`) on a separate mis-relocation
+  into their hand-written ASM helper modules.
+
 ### Fixed
 
 - **Linker dropped relocation addends (`ccld.py` / `pack-ccobj`).** An object-
