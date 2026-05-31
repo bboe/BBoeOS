@@ -1538,7 +1538,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         Costs ~4 extra bytes per site relative to the flat form.
         """
         if self.object_mode:
-            inverse = {"jc": "jnc", "jnc": "jc"}[condition]
+            inverse = {"jc": "jnc", "jnc": "jc", "je": "jne", "jne": "je"}[condition]
             skip_label = f".libbboeos_skip_{self.new_label()}"
             self.emit(f"        {inverse} {skip_label}")
             self.emit(f"        jmp [{name}_PTR]")
@@ -3949,7 +3949,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.emit(f"        cmp {stack_word} [{self.target.base_register} + 4], {expected}")
                 self.emit(f"        mov {self.target.si_register}, {die_label}")
                 self.emit(f"        mov {self.target.count_register}, {die_length}")
-                self.emit("        jne FUNCTION_DIE")
+                # Flat: direct ``jne FUNCTION_DIE`` (org-relative rel32).
+                # Object: no org, so a direct rel32 to the absolute libbboeos
+                # entry would land at FUNCTION_DIE+PROGRAM_BASE; route through
+                # the base-invariant ``jne .skip / jmp [FUNCTION_DIE_PTR]`` form.
+                self._emit_libbboeos_jcc("jne", "FUNCTION_DIE")
                 fused_argc = True
                 body = body[1:]
 

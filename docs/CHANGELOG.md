@@ -13,14 +13,30 @@ time.
 
 ### Changed
 
-- **`shell` now builds through the object-file pipeline.** Its "every command
-  returns unknown command" failure was a symptom of the dropped-addend linker
-  bug below (`buf[i-1]` linked as `buf[i]`); with that fixed, `shell` no longer
-  needs the legacy flat path and comes off `make_os.sh`'s `FLAT_PROGRAMS`. `arp`
-  / `dns` stay flat — they page-fault (`EXC0E`) on a separate mis-relocation
-  into their hand-written ASM helper modules.
+- **`shell`, `arp`, and `dns` now build through the object-file pipeline.** All
+  three came off `make_os.sh`'s `FLAT_PROGRAMS` as their object-pipeline
+  failures were fixed (see below): `shell` returned "unknown command" for every
+  command (the dropped-addend linker bug), and `arp` / `dns` page-faulted
+  (`EXC0E`) on a direct `jne FUNCTION_DIE` in main's argc-check. Only `asm` and
+  `trailer_cross_page` remain flat, for inline-asm reasons the object pipeline
+  genuinely can't handle.
 
 ### Fixed
+
+- **Object-mode argc-check fused a direct jump to the absolute `die` entry.**
+  `main`'s `if (argc != N) die(...)` startup fusion emitted a literal `jne
+  FUNCTION_DIE` — a rel32 to libbboeos's absolute entry, correct only under the
+  flat path's `org 0x08048000`. In object mode (no `org`, relocated by `ccld`)
+  it landed at `FUNCTION_DIE + PROGRAM_BASE` and page-faulted. It now routes
+  through the base-invariant `jne .skip / jmp [FUNCTION_DIE_PTR]` form like
+  every other libbboeos jump. This is why `arp` / `dns` could not build through
+  the object pipeline.
+
+- **Jump-collapsing peepholes could synthesize an illegal `jCC [mem]`.**
+  `peephole_double_jump` and `peephole_label_forwarding` retargeted a
+  conditional jump onto an unconditional jump's operand without checking it was
+  a label — folding `jCC .skip / jmp [mem] / .skip:` into `jCC [mem]`, which has
+  no valid x86 encoding. They now leave memory-indirect trampolines intact.
 
 - **Linker dropped relocation addends (`ccld.py` / `pack-ccobj`).** An object-
   pipeline program that referenced a global at a constant displacement —
