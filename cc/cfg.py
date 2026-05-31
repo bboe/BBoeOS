@@ -314,3 +314,23 @@ def compute_dominators(cfg: ControlFlowGraph, /) -> dict[BasicBlock, BasicBlock]
                 changed = True
     # Sanity-prune: any block we never assigned must be unreachable.
     return {block: dominator for block, dominator in idom.items() if block in reachable}
+
+
+def flatten_cfg(cfg: ControlFlowGraph, /) -> list[ir.Instruction]:
+    """Round-trip a CFG back to a flat :class:`cc.ir.Instruction` list.
+
+    Walks blocks in CFG source order, emitting each block's leading
+    :class:`cc.ir.Label` (real labels only — synthetic ``<entry>`` /
+    ``<fallthrough_N>`` names are dropped; split blocks and other
+    optimizer-inserted blocks use a real label that survives), then
+    its instructions, then its terminator (if any).  The resulting
+    list is suitable for direct use by the existing codegen.
+    """
+    output: list[ir.Instruction] = []
+    for block in cfg.blocks:
+        if not block.label.startswith(_SYNTHETIC_LABEL_PREFIX):
+            output.append(ir.Label(name=block.label))
+        output.extend(block.instructions)
+        if block.terminator is not None:
+            output.append(block.terminator)
+    return output

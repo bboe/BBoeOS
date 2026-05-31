@@ -441,10 +441,7 @@ class Peepholer:
             if self._extract_local_label(stripped) is not None:
                 continue
             cursor = 0
-            while True:
-                start = stripped.find("[_l_", cursor)
-                if start < 0:
-                    break
+            while (start := stripped.find("[_l_", cursor)) >= 0:
                 # Extract the bare label — stop at the first non-identifier
                 # byte. `[_l_sum+1]` must count as a reference to `_l_sum`,
                 # not `_l_sum+1`.
