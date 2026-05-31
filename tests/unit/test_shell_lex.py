@@ -17,7 +17,7 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-INCLUDE_DIR = REPO_ROOT / "user" / "libbboeos" / "include"
+SHELL_LEX_HEADER = REPO_ROOT / "user" / "libbboeos" / "include" / "shell_lex.h"
 
 _HARNESS = r"""
 #include <stdio.h>
@@ -86,8 +86,9 @@ def _run_lex(line: str) -> list[str]:
         source = work_path / "harness.c"
         binary = work_path / "harness"
         source.write_text(_HARNESS)
+        (work_path / "shell_lex.h").write_text(SHELL_LEX_HEADER.read_text())
         subprocess.run(
-            ["clang", "-std=c99", "-Wall", "-Werror", f"-I{INCLUDE_DIR}", str(source), "-o", str(binary)],
+            ["clang", "-std=c99", "-Wall", "-Werror", str(source), "-o", str(binary)],
             capture_output=True,
             check=True,
             text=True,
