@@ -144,9 +144,10 @@ def test_constant_true_branch_falsefalse_dropped() -> None:
     ]
     optimized = _optimize(body)
     # The comparison is statically true → BranchFalse never fires → drop it.
+    # The SSA pass then propagates ``result``'s single def into the Return.
     assert optimized == [
         ir.Copy(destination="result", source=1),
-        ir.Return(value="result"),
+        ir.Return(value=1),
     ]
 
 
@@ -231,9 +232,10 @@ def test_dead_label_with_no_referrers_removed() -> None:
         ir.Return(value="x"),
     ]
     optimized = _optimize(body)
+    # SSA copy propagation forwards x's single def into the Return.
     assert optimized == [
         ir.Copy(destination="x", source=5),
-        ir.Return(value="x"),
+        ir.Return(value=5),
     ]
 
 
@@ -517,13 +519,42 @@ def test_unreachable_code_after_return_is_dropped() -> None:
 
 
 def test_user_local_is_not_propagated() -> None:
-    """``Copy(user_local, ...)`` is left alone — user locals can be reassigned."""
+    """``Copy(user_local, ...)`` is left alone when the local escapes to opaque IR.
+
+    A ``Block``-wrapped AST reference to ``x`` puts ``x`` in the SSA
+    opaque-reference set, so the SSA pass cannot rename or propagate it.
+    The linear IR pass is also conservative for non-temp destinations,
+    so the body survives the round-trip verbatim.
+    """
+    block_node = ast_nodes.Assign(expr=ast_nodes.Var(line=1, name="x"), line=1, name="y")
+    body = [
+        ir.Copy(destination="x", source=5),
+        ir.Copy(destination="x", source=7),
+        ir.Block(node=block_node),
+        ir.Return(value="x"),
+    ]
+    optimized = _optimize(body)
+    # Body must be preserved verbatim: x escapes via Block and the
+    # optimizer cannot prove the second assignment dominates the Block
+    # read.
+    assert optimized == body
+
+
+def test_user_local_propagated_when_ssa_eligible() -> None:
+    """A straight-line user local with no opaque uses propagates through SSA.
+
+    Phase 3 SSA copy propagation forwards each versioned definition into
+    its uses; for a linear sequence with a single dominating last write,
+    the use sees that write's source value and the dead earlier write
+    collapses out.
+    """
     body = [
         ir.Copy(destination="x", source=5),
         ir.Copy(destination="x", source=7),
         ir.Return(value="x"),
     ]
     optimized = _optimize(body)
-    # Body must be preserved verbatim: x might be the user's actual local
-    # variable and the optimizer cannot prove the second assignment dominates.
-    assert optimized == body
+    assert optimized == [
+        ir.Copy(destination="x", source=7),
+        ir.Return(value=7),
+    ]

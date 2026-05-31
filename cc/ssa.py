@@ -1,14 +1,16 @@
-"""SSA construction + destruction over the basic-block CFG.
+"""SSA construction, optimization, and destruction over the basic-block CFG.
 
-Phase 2 of the SSA migration: takes a :class:`cc.cfg.ControlFlowGraph` and
-produces an :class:`SSAForm` in which every SSA-eligible variable is defined
-exactly once.  Joins where two definitions of the same variable reach the
-same block get a :class:`Phi` node; the renamer assigns each definition a
-fresh version (``name_ssaN``) and rewrites every reachable use to the
-dominating version.  Destruction goes the other way: critical edges split,
-each phi lowered to an explicit :class:`cc.ir.Copy` on every incoming edge,
-phis removed, the resulting CFG flattens back to a flat IR list that the
-existing codegen consumes unchanged.
+Takes a :class:`cc.cfg.ControlFlowGraph` and produces an :class:`SSAForm`
+in which every SSA-eligible variable is defined exactly once.  Joins where
+two definitions of the same variable reach the same block get a :class:`Phi`
+node; the renamer assigns each definition a fresh version (``name_ssaN``)
+and rewrites every reachable use to the dominating version.  Phase 3
+adds SSA-form cleanup passes — trivial-phi removal, dead-phi removal,
+and copy propagation — wired into :func:`optimize_ssa`.  Destruction
+goes the other way: critical edges split, each phi lowered to an explicit
+:class:`cc.ir.Copy` on every incoming edge, phis removed, the resulting
+CFG flattens back to a flat IR list that the existing codegen consumes
+unchanged.
 
 Eligibility for SSA conversion (Phase 2, intentionally conservative):
 
@@ -36,15 +38,16 @@ version stacks.  Destruction is the naive "Copy at end of each predecessor"
 strategy — fine for now; lost-copy and swap problems show up only with
 aggressive scheduling, which Phase 2 doesn't do.
 
-This module is purely additive — no existing pass or codegen consumes
-:class:`SSAForm` yet.  Phase 3 (mem2reg + SSA-aware optimizer passes)
-will wire it into the pipeline.
+:func:`optimize_ssa` is the end-to-end entry point that builds SSA, runs
+the SSA-form passes, destructs back to phi-free IR, and flattens.
+:class:`cc.ir_optimize.Optimizer` calls it once the classical IR-level
+passes reach fixed point.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -54,9 +57,155 @@ from cc.cfg import BasicBlock, ControlFlowGraph, build_cfg, compute_dominance_fr
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+#: Label template for blocks inserted on critical edges.  Must be a
+#: real IR-style label (leading ``.``) because the redirected terminator
+#: in the predecessor branches to it by name and the codegen emits the
+#: branch as ``jmp .ssa_split_N`` — flatten emits the corresponding
+#: ``Label`` so the assembler can resolve the target.
+_SPLIT_LABEL_TEMPLATE = ".ssa_split_{counter}"
+
 #: Suffix template for fresh SSA versions.  ``x`` → ``x_ssa0``, ``x_ssa1``…
 #: Chosen so the un-versioned base survives a split on ``_ssa``.
 _SSA_VERSION_SEPARATOR = "_ssa"
+
+
+def _address_taken_names(body: list[ir.Instruction], /) -> set[str]:
+    """Return every name appearing as the target of an :class:`cc.ast_nodes.AddressOf` in *body*.
+
+    A name whose address is taken can be mutated through the resulting
+    pointer at any later call site (callee receives the pointer, or an
+    :class:`cc.ir.IndexAssign` through an aliased base, or inline asm
+    inside a :class:`cc.ir.Block`).  SSA conversion cannot enumerate
+    those writes, so the name is unsound to rename — propagation could
+    forward a value across a Call that mutated the slot through the
+    leaked pointer.  Walks every value operand including ``Call`` /
+    ``TailCall`` args plus nested :class:`cc.ir.Switch` case bodies.
+    """
+    taken: set[str] = set()
+    for instruction in body:
+        for operand in _iter_value_operands(instruction):
+            if isinstance(operand, ast_nodes.AddressOf):
+                taken.add(operand.var.name)
+        if isinstance(instruction, ir.Switch):
+            for case in instruction.cases:
+                taken.update(_address_taken_names(case.body))
+    return taken
+
+
+def _collect_use_counts(ssa: SSAForm, /) -> dict[str, int]:
+    """Return ``{name: use_count}`` across instructions, terminators, and phi sources in *ssa*."""
+    return dict(Counter(_iter_name_uses(ssa)))
+
+
+def _deversion_instruction(instruction: ir.Instruction, /) -> ir.Instruction:
+    """Return *instruction* with every name (destination + operands) deversioned."""
+    rewritten = _map_value_operands(instruction, rewrite=lambda value: _deversion_name(value) if isinstance(value, str) else value)
+    destination = _instruction_destination(rewritten)
+    if isinstance(destination, str):
+        deversioned_destination = _deversion_name(destination)
+        if deversioned_destination != destination:
+            return dataclasses.replace(rewritten, destination=deversioned_destination)
+    return rewritten
+
+
+def _deversion_name(name: str, /) -> str:
+    """Strip a trailing ``_ssaN`` suffix from *name*, returning the un-versioned base."""
+    prefix, separator, suffix = name.rpartition(_SSA_VERSION_SEPARATOR)
+    if separator and prefix and suffix.isdigit():
+        return prefix
+    return name
+
+
+def _deversion_ssa_form(ssa: SSAForm, /) -> None:
+    """Rewrite every SSA-versioned name back to its un-versioned base, in place.
+
+    Phi destinations, instruction destinations, value operands, and phi
+    sources are all rewritten so the codegen sees only the names the AST
+    layer declared — versioned names are an internal-to-SSA artefact and
+    have no frame-slot allocation outside this module.
+    """
+    for phi_list in ssa.phis.values():
+        for phi in phi_list:
+            phi.destination = _deversion_name(phi.destination)
+            phi.sources = {
+                predecessor: _deversion_name(source) if isinstance(source, str) else source for predecessor, source in phi.sources.items()
+            }
+    for block in ssa.cfg.blocks:
+        block.instructions = [_deversion_instruction(instruction) for instruction in block.instructions]
+        if block.terminator is not None:
+            block.terminator = _deversion_instruction(block.terminator)
+
+
+def _drop_redundant_copies(body: list[ir.Instruction], /) -> list[ir.Instruction]:
+    """Return *body* with self-copies and Copies immediately overwritten by another Copy dropped.
+
+    De-versioning turns destruction-introduced ``Copy(phi_dest_ssaN, src)``
+    into ``Copy(name, src)``; when the preceding ``Copy(name, src)``
+    (the original SSA-renamed def) deversions to the same shape, the
+    two writes collapse to one.  Self-copies (``Copy(x, x)``) come from
+    trivial-phi destruction merging two SSA versions of the same base.
+    """
+    result: list[ir.Instruction] = []
+    for index, instruction in enumerate(body):
+        if isinstance(instruction, ir.Copy) and instruction.destination == instruction.source:
+            continue
+        if isinstance(instruction, ir.Copy) and index + 1 < len(body):
+            successor = body[index + 1]
+            if (
+                isinstance(successor, ir.Copy)
+                and successor.destination == instruction.destination
+                and successor.source != instruction.destination
+            ):
+                continue
+        result.append(instruction)
+    return result
+
+
+def _eliminate_dead_phis(ssa: SSAForm, /) -> bool:
+    changed = False
+    while True:
+        use_counts = _collect_use_counts(ssa)
+        dead: list[tuple[BasicBlock, Phi]] = [
+            (block, phi) for block, phi_list in ssa.phis.items() for phi in phi_list if use_counts.get(phi.destination, 0) == 0
+        ]
+        if not dead:
+            return changed
+        for block, phi in dead:
+            ssa.phis[block].remove(phi)
+            if not ssa.phis[block]:
+                del ssa.phis[block]
+        changed = True
+
+
+def _eliminate_trivial_phis(ssa: SSAForm, /) -> bool:
+    changed = False
+    while triviality := _find_trivial_phi(ssa):
+        block, phi, replacement = triviality
+        ssa.phis[block].remove(phi)
+        if not ssa.phis[block]:
+            del ssa.phis[block]
+        _replace_value_uses(ssa, mapping={phi.destination: replacement})
+        changed = True
+    return changed
+
+
+def _find_trivial_phi(ssa: SSAForm, /) -> tuple[BasicBlock, Phi, ir.Value] | None:
+    """Return the next phi whose operands (minus self-references) reduce to one value."""
+    for block, phi_list in ssa.phis.items():
+        for phi in phi_list:
+            unique: ir.Value | None = None
+            ambiguous = False
+            for source in phi.sources.values():
+                if source == phi.destination:
+                    continue
+                if unique is None:
+                    unique = source
+                elif source != unique:
+                    ambiguous = True
+                    break
+            if not ambiguous and unique is not None:
+                return block, phi, unique
+    return None
 
 
 def _flatten_cfg(cfg: ControlFlowGraph, /) -> list[ir.Instruction]:
@@ -64,7 +213,8 @@ def _flatten_cfg(cfg: ControlFlowGraph, /) -> list[ir.Instruction]:
 
     Walks blocks in CFG source order, emitting each block's leading
     :class:`cc.ir.Label` (real labels only — synthetic ``<entry>`` /
-    ``<fallthrough_N>`` names are dropped), then its instructions, then
+    ``<fallthrough_N>`` names are dropped; split blocks use a real
+    ``.ssa_split_N`` label that survives), then its instructions, then
     its terminator (if any).  The resulting list is suitable for direct
     use by the existing codegen.
     """
@@ -114,6 +264,71 @@ def _iter_ast_var_names(node: object, /) -> Iterator[str]:
             yield from _iter_ast_var_names(item)
 
 
+def _iter_name_uses(ssa: SSAForm, /) -> Iterator[str]:
+    """Yield every string-name use across instructions, terminators, and phi sources in *ssa*.
+
+    Yields:
+        Each string-typed operand encountered, in basic-block iteration
+        order followed by phi-source iteration order.
+
+    """
+    for block in ssa.cfg.blocks:
+        terminator = () if block.terminator is None else (block.terminator,)
+        for instruction in (*block.instructions, *terminator):
+            for operand in _iter_value_operands(instruction):
+                if isinstance(operand, str):
+                    yield operand
+    for phi_list in ssa.phis.values():
+        for phi in phi_list:
+            for source in phi.sources.values():
+                if isinstance(source, str):
+                    yield source
+
+
+def _iter_value_operands(instruction: ir.Instruction, /) -> Iterator[ir.Value]:
+    """Yield each non-destination :data:`cc.ir.Value` operand read by *instruction*.
+
+    Walks the :attr:`cc.ir.Instruction.VALUE_FIELDS` class-level field list
+    so new instruction kinds participate by declaration alone — no isinstance
+    ladder here to fall out of sync with the IR definitions.
+
+    Yields:
+        Each ``Value`` operand in declaration order.  Tuple-typed fields
+        (``Call.args``, ``TailCall.args``) are flattened element-wise.
+
+    """
+    for field_name in instruction.VALUE_FIELDS:
+        value = getattr(instruction, field_name)
+        if value is None:
+            continue
+        if isinstance(value, tuple):
+            yield from value
+        else:
+            yield value
+
+
+def _map_value_operands(instruction: ir.Instruction, /, *, rewrite: Callable[[ir.Value], ir.Value]) -> ir.Instruction:
+    """Return *instruction* with each value operand replaced by ``rewrite(operand)``.
+
+    Tuple-typed fields (``args``) are rewritten element-wise.  Returns the
+    original instruction unchanged (identity-preserving) when no field
+    actually changed, so callers can drive fixed-point loops with ``is``
+    comparisons.  Destinations are intentionally not rewritten — callers
+    that care about them (rename, deversion) handle that separately.
+    """
+    fields: dict[str, object] = {}
+    for field_name in instruction.VALUE_FIELDS:
+        value = getattr(instruction, field_name)
+        if value is None:
+            continue
+        new_value = tuple(rewrite(item) for item in value) if isinstance(value, tuple) else rewrite(value)
+        if new_value != value:
+            fields[field_name] = new_value
+    if not fields:
+        return instruction
+    return dataclasses.replace(instruction, **fields)
+
+
 def _opaque_referenced_names(body: list[ir.Instruction], /) -> set[str]:
     """Return every name referenced inside an opaque region of *body*.
 
@@ -155,12 +370,13 @@ def _place_phi_nodes(
     list to propagate further.
     """
     phis: dict[BasicBlock, list[Phi]] = defaultdict(list)
-    for name, def_blocks in definitions.items():
+    for name in sorted(definitions):
+        def_blocks = definitions[name]
         already_has_phi: set[BasicBlock] = set()
-        worklist = list(def_blocks)
+        worklist = sorted(def_blocks, key=lambda block: block.label)
         while worklist:
             block = worklist.pop()
-            for frontier in dominance_frontiers.get(block, set()):
+            for frontier in sorted(dominance_frontiers.get(block, set()), key=lambda block: block.label):
                 if frontier in already_has_phi:
                     continue
                 phis[frontier].append(Phi(destination=name, original_name=name, sources={}))
@@ -168,6 +384,50 @@ def _place_phi_nodes(
                 if frontier not in def_blocks:
                     worklist.append(frontier)
     return dict(phis)
+
+
+def _propagate_ssa_copies(ssa: SSAForm, /) -> bool:
+    """Forward every SSA-versioned ``ir.Copy`` source through its uses.
+
+    Every SSA-versioned destination has exactly one static def, so each
+    ``Copy(dest=x_ssaN, source=y)`` lets every later use of ``x_ssaN``
+    shortcut to ``y``.  Chains ``x → y`` then ``y → z`` resolve in a
+    single pass before substitution so no intermediate version survives
+    in operand position.  The defining ``Copy`` is **not** dropped: the
+    un-versioned name may still be observable to the AST-level codegen
+    (e.g. a user-declared local with a stack slot allocated outside the
+    IR's accounting).  De-versioning at the end of :func:`optimize_ssa`
+    plus the linear DCE pass remove any genuinely dead temps.  Returns
+    True when the substitution rewrote at least one operand so the
+    outer fixed-point loop knows to keep iterating.
+    """
+    direct_mapping: dict[str, ir.Value] = {}
+    for block in ssa.cfg.blocks:
+        for instruction in block.instructions:
+            if isinstance(instruction, ir.Copy) and _SSA_VERSION_SEPARATOR in instruction.destination:
+                source = instruction.source
+                if isinstance(source, str):
+                    # A bare SSA-versioned source collapses to its un-versioned
+                    # slot after de-versioning.  When destruction appends
+                    # ``Copy(phi_dest, source)`` at the end of the predecessor
+                    # block, the slot may have been overwritten by a later
+                    # ``edx_ssaM = ...`` between the captured SSA point and
+                    # block end, so the de-versioned Copy reads a stale value.
+                    # Restrict propagation to non-string sources (constants,
+                    # AddressOf, etc.) which survive de-versioning intact.
+                    continue
+                direct_mapping[instruction.destination] = source
+    if not direct_mapping:
+        return False
+    resolved: dict[str, ir.Value] = {}
+    for key, initial in direct_mapping.items():
+        value: ir.Value = initial
+        seen: set[str] = {key}
+        while isinstance(value, str) and value in direct_mapping and value not in seen:
+            seen.add(value)
+            value = direct_mapping[value]
+        resolved[key] = value
+    return _replace_value_uses(ssa, mapping=resolved)
 
 
 def _rename_variables(
@@ -233,6 +493,42 @@ def _rename_variables(
     _rename_block(cfg.entry)
 
 
+def _replace_value_uses(ssa: SSAForm, /, *, mapping: dict[str, ir.Value]) -> bool:
+    """Rewrite every operand listed in *mapping* to its replacement, across *ssa* in place.
+
+    Returns True when at least one operand was actually rewritten.
+    """
+    if not mapping:
+        return False
+    changed = False
+    for block in ssa.cfg.blocks:
+        new_instructions = []
+        for instruction in block.instructions:
+            rewritten = _replace_value_uses_in_instruction(instruction, mapping=mapping)
+            if rewritten is not instruction:
+                changed = True
+            new_instructions.append(rewritten)
+        block.instructions = new_instructions
+        if block.terminator is not None:
+            rewritten = _replace_value_uses_in_instruction(block.terminator, mapping=mapping)
+            if rewritten is not block.terminator:
+                changed = True
+            block.terminator = rewritten
+    for phi_list in ssa.phis.values():
+        for phi in phi_list:
+            for predecessor in list(phi.sources):
+                source = phi.sources[predecessor]
+                if isinstance(source, str) and source in mapping:
+                    phi.sources[predecessor] = mapping[source]
+                    changed = True
+    return changed
+
+
+def _replace_value_uses_in_instruction(instruction: ir.Instruction, /, *, mapping: dict[str, ir.Value]) -> ir.Instruction:
+    """Return *instruction* (identity-preserved when untouched) with every mapped operand rewritten."""
+    return _map_value_operands(instruction, rewrite=lambda value: mapping[value] if isinstance(value, str) and value in mapping else value)
+
+
 def _split_critical_edges(cfg: ControlFlowGraph, /) -> ControlFlowGraph:
     """Insert a fresh BB on every critical edge so phi destruction can place copies safely.
 
@@ -243,21 +539,56 @@ def _split_critical_edges(cfg: ControlFlowGraph, /) -> ControlFlowGraph:
     ``B`` predecessors.  Splitting the edge gives a dedicated landing
     pad for ``A → B``'s copies.
 
-    Returns a freshly-rebuilt CFG with new synthetic blocks in source
-    order — re-running dominator analysis on the result is required
-    before SSA construction continues.
+    Mutates *cfg* in place.  Before inserting splits, every block that
+    has no terminator and falls through to a join with multiple
+    predecessors gets an explicit ``Jump`` to that successor — without
+    this, inserting a split before the successor in source order would
+    silently redirect those fall-throughs into the split (which carries
+    destruction Copies for a *different* incoming edge).  The split
+    block is then inserted immediately before ``B`` in source order,
+    and ``A``'s terminator is rewritten to name the split.
+    Predecessor / successor edges are rewired so dominator analysis on
+    the result sees the split block in place of the original ``A → B``
+    link.
     """
-    splits: list[tuple[BasicBlock, BasicBlock]] = [
+    critical: list[tuple[BasicBlock, BasicBlock]] = [
         (block, successor)
         for block in cfg.blocks
         if len(block.successors) >= 2
         for successor in block.successors
         if len(successor.predecessors) >= 2
     ]
-    if not splits:
+    if not critical:
         return cfg
-    msg = "critical edge splitting not yet implemented for Phase 2 — no tests exercise this path"
-    raise NotImplementedError(msg)
+    # Materialize fall-through Jumps before any splits are inserted: a
+    # block that drops into the next source-order block will, after
+    # split insertion, drop into the split instead and pick up its
+    # destruction Copy — even though the source-order successor was
+    # something else entirely.  An explicit Jump bypasses the split.
+    successors_with_splits = {successor.label for _, successor in critical}
+    for index, block in enumerate(cfg.blocks):
+        if block.terminator is not None:
+            continue
+        if index + 1 >= len(cfg.blocks):
+            continue
+        fall_through = cfg.blocks[index + 1]
+        if fall_through.label in successors_with_splits and fall_through in block.successors:
+            block.terminator = ir.Jump(target=fall_through.label)
+    for counter, (predecessor, successor) in enumerate(critical):
+        label = _SPLIT_LABEL_TEMPLATE.format(counter=counter)
+        split = BasicBlock(label=label, terminator=ir.Jump(target=successor.label))
+        split.predecessors.append(predecessor)
+        split.successors.append(successor)
+        cfg.label_to_block[label] = split
+        successor_index = predecessor.successors.index(successor)
+        predecessor.successors[successor_index] = split
+        predecessor_index = successor.predecessors.index(predecessor)
+        successor.predecessors[predecessor_index] = split
+        terminator = predecessor.terminator
+        if isinstance(terminator, (ir.BranchFalse, ir.CarryBranch, ir.Jump)) and terminator.target == successor.label:
+            predecessor.terminator = dataclasses.replace(terminator, target=label)
+        cfg.blocks.insert(cfg.blocks.index(successor), split)
+    return cfg
 
 
 def _substitute_value_operands(
@@ -272,31 +603,9 @@ def _substitute_value_operands(
     Destination is intentionally untouched here — the renamer handles
     that separately (a single fresh version after substituting uses).
     """
-
-    def _rename(value: ir.Value, /) -> ir.Value:
-        if isinstance(value, str) and value in ssa_safe_names:
-            return lookup(value)
-        return value
-
-    if isinstance(instruction, ir.BinaryOperation):
-        return dataclasses.replace(instruction, left=_rename(instruction.left), right=_rename(instruction.right))
-    if isinstance(instruction, ir.Copy):
-        return dataclasses.replace(instruction, source=_rename(instruction.source))
-    if isinstance(instruction, ir.Call):
-        return dataclasses.replace(instruction, args=tuple(_rename(arg) for arg in instruction.args))
-    if isinstance(instruction, ir.Index):
-        return dataclasses.replace(instruction, index=_rename(instruction.index))
-    if isinstance(instruction, ir.IndexAssign):
-        return dataclasses.replace(instruction, index=_rename(instruction.index), source=_rename(instruction.source))
-    if isinstance(instruction, ir.BranchFalse):
-        return dataclasses.replace(instruction, left=_rename(instruction.left), right=_rename(instruction.right))
-    if isinstance(instruction, ir.Return):
-        if instruction.value is None:
-            return instruction
-        return dataclasses.replace(instruction, value=_rename(instruction.value))
-    if isinstance(instruction, ir.TailCall):
-        return dataclasses.replace(instruction, args=tuple(_rename(arg) for arg in instruction.args))
-    return instruction
+    return _map_value_operands(
+        instruction, rewrite=lambda value: lookup(value) if isinstance(value, str) and value in ssa_safe_names else value
+    )
 
 
 @dataclass(eq=False, kw_only=True, slots=True)
@@ -338,12 +647,9 @@ def convert_from_ssa(ssa: SSAForm, /) -> ControlFlowGraph:
     For each :class:`Phi` ``(dest, {pred: value})`` at block ``B``,
     append :class:`cc.ir.Copy` ``(dest = value)`` to ``pred.instructions``
     just before ``pred.terminator``.  Phis are then removed from the
-    SSA-form's phi map.
-
-    The CFG is returned unchanged structurally — only instruction lists
-    inside existing blocks are mutated.  Critical-edge splitting is a
-    precondition (currently raises :exc:`NotImplementedError` when
-    needed); the typical Phase 2 test cases don't trigger any.
+    SSA-form's phi map.  Critical edges were split during
+    :func:`convert_to_ssa`, so every predecessor of a phi-bearing block
+    has exactly one successor — copies cannot bleed into sibling arms.
     """
     for phi_list in ssa.phis.values():
         for phi in phi_list:
@@ -354,20 +660,31 @@ def convert_from_ssa(ssa: SSAForm, /) -> ControlFlowGraph:
     return ssa.cfg
 
 
-def convert_to_ssa(body: list[ir.Instruction], /) -> SSAForm:
+def convert_to_ssa(body: list[ir.Instruction], /, *, excluded_names: frozenset[str] = frozenset()) -> SSAForm:
     """Build a CFG from *body* and convert SSA-eligible variables to versioned form.
 
     Returns an :class:`SSAForm` with the renamed CFG and the phi map.
     Names referenced inside opaque regions (see module docstring) stay
     un-versioned but remain in the IR.  Functions containing any
     :class:`cc.ir.InlineAsm` instruction skip SSA conversion entirely —
-    the asm text would reference stale unversioned names.
+    the asm text would reference stale unversioned names.  Critical
+    edges are split before phi placement so :func:`convert_from_ssa`
+    can lower phis to copies without disturbing sibling control flow.
+
+    ``excluded_names`` carries names the caller knows are unsafe to
+    rename — typically program-level globals plus any address-taken
+    locals.  Function calls may write to those names through the
+    pointer or directly, so the SSA renamer cannot prove the SSA
+    versioning chain stays in sync with the actual slot value.
+    Excluding them keeps the original un-versioned reads / writes in
+    the IR, so propagation through them cannot bypass an intervening
+    Call that mutated the slot.
     """
     cfg = build_cfg(body)
     has_inline_asm = any(isinstance(instruction, ir.InlineAsm) for instruction in body)
     if has_inline_asm:
         return SSAForm(cfg=cfg, phis={}, ssa_safe_names=set())
-    excluded = _opaque_referenced_names(body)
+    excluded = _opaque_referenced_names(body) | excluded_names | _address_taken_names(body)
     all_destinations: set[str] = set()
     for instruction in body:
         destination = _instruction_destination(instruction)
@@ -376,6 +693,7 @@ def convert_to_ssa(body: list[ir.Instruction], /) -> SSAForm:
     ssa_safe_names = all_destinations - excluded
     if not ssa_safe_names:
         return SSAForm(cfg=cfg, phis={}, ssa_safe_names=set())
+    cfg = _split_critical_edges(cfg)
     definitions: dict[str, set[BasicBlock]] = {name: set() for name in ssa_safe_names}
     for block in cfg.blocks:
         for instruction in [*block.instructions, *([block.terminator] if block.terminator is not None else [])]:
@@ -398,3 +716,35 @@ def flatten_ssa_form(ssa: SSAForm, /) -> list[ir.Instruction]:
     """
     cfg = convert_from_ssa(ssa)
     return _flatten_cfg(cfg)
+
+
+def optimize_ssa(body: list[ir.Instruction], /, *, excluded_names: frozenset[str] = frozenset()) -> list[ir.Instruction]:
+    """Round-trip *body* through SSA, run the SSA-form passes, and flatten back.
+
+    Bypassed for functions containing :class:`cc.ir.InlineAsm` (no
+    SSA-eligible names) and for bodies that produce no SSA work — both
+    cases return *body* unchanged so the optimizer pipeline keeps the
+    original instruction list.  Active passes: trivial-phi removal,
+    copy propagation, and dead-phi cleanup.  Before flattening, every
+    SSA-versioned name is rewritten back to its un-versioned base so
+    the codegen sees the original frame-slot names; the destruction
+    Copies introduced for phi joins collapse to self-copies in that
+    rename and are dropped.
+
+    ``excluded_names`` is forwarded to :func:`convert_to_ssa` as the
+    caller's set of names that must not participate in SSA renaming —
+    typically program globals plus address-taken locals, so call-site
+    propagation cannot forward a stale value across a Call that may
+    have mutated the underlying slot.
+    """
+    ssa = convert_to_ssa(body, excluded_names=excluded_names)
+    if not ssa.ssa_safe_names:
+        return body
+    while True:
+        propagated = _propagate_ssa_copies(ssa)
+        collapsed = _eliminate_trivial_phis(ssa)
+        if not propagated and not collapsed:
+            break
+    _eliminate_dead_phis(ssa)
+    _deversion_ssa_form(ssa)
+    return _drop_redundant_copies(flatten_ssa_form(ssa))

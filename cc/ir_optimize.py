@@ -50,6 +50,7 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 from cc import ast_nodes, ir
+from cc.ssa import optimize_ssa
 from cc.tokens import INVERT_COMPARISON
 
 if TYPE_CHECKING:
@@ -88,6 +89,26 @@ def _branch_target(instruction: ir.Instruction, /) -> str | None:
     if isinstance(instruction, (ir.Jump, ir.BranchFalse, ir.CarryBranch)):
         return instruction.target
     return None
+
+
+def _collect_global_names(program: ir.Program, /) -> frozenset[str]:
+    """Return the set of program-level global ``name`` strings from *program*.
+
+    Any AST node in :attr:`cc.ir.Program.globals` carrying a runtime
+    ``name`` string is captured.  The SSA optimizer uses this set to
+    exclude globals from renaming so propagation cannot forward a
+    stale read across a ``Call`` (the callee may have written through
+    the same name).  Nodes without a usable ``name`` attribute (e.g.
+    ``StructDecl`` shapes) are skipped — the renamer only ever
+    consults the set when checking instruction destinations, so
+    irrelevant entries cost nothing.
+    """
+    names: set[str] = set()
+    for node in program.globals:
+        name = getattr(node, "name", None)
+        if isinstance(name, str):
+            names.add(name)
+    return frozenset(names)
 
 
 def _evaluate_constant_comparison(*, left: int, operation: str, right: int) -> bool | None:
@@ -353,11 +374,23 @@ class Optimizer:
         ``strings`` preserved.  ``carry_return`` functions skip tail-call
         elimination — those return their boolean via the carry flag,
         which a tail ``jmp`` to a plain-AX callee would not set.
+
+        Program-level global names are collected once and forwarded to
+        :func:`cc.ssa.optimize_ssa` as the SSA exclusion set so the
+        renamer treats every ``Call`` as a potential mutation of any
+        global.  Without this, propagation could forward a stale
+        ``global = 0`` past a callee that reassigned ``global``,
+        miscompiling code that relies on the post-call value.
         """
+        global_names = _collect_global_names(program)
         optimized_functions = [
             ir.Function(
                 ast_node=function.ast_node,
-                body=self._optimize_body(function.body, carry_return=function.ast_node.carry_return),
+                body=self._optimize_body(
+                    function.body,
+                    carry_return=function.ast_node.carry_return,
+                    excluded_ssa_names=global_names,
+                ),
                 strings=function.strings,
             )
             for function in program.functions
@@ -728,20 +761,35 @@ class Optimizer:
             index = jump_index + 1
         return result
 
-    def _optimize_body(self, body: list[ir.Instruction], /, *, carry_return: bool = False) -> list[ir.Instruction]:
+    def _optimize_body(
+        self,
+        body: list[ir.Instruction],
+        /,
+        *,
+        carry_return: bool = False,
+        excluded_ssa_names: frozenset[str] = frozenset(),
+    ) -> list[ir.Instruction]:
         """Run propagation + folding + CFG simplification + DCE to fixed point.
 
         Ordering matters: propagation feeds folding feeds branch-condition
         folding feeds CFG simplification (newly-constant branches expose
         dead code).  DCE runs last so it sees the smallest live set.  The
         outer loop iterates because, e.g., dropping a dead label can
-        expose a redundant ``Jump`` whose target collapsed.  Tail-call
-        elimination runs once after fixed-point because it produces a
-        terminator (``ir.TailCall``) that the unreachable-code pass
-        inside ``_simplify_control_flow`` then uses to drop any
-        stranded instructions before the next ``Label``.  Skipped for
-        ``carry_return`` callers — their CF-based return shape cannot
-        survive a tail ``jmp``.
+        expose a redundant ``Jump`` whose target collapsed.  After the
+        scalar pipeline converges, the body round-trips through SSA so
+        the Phase 3 phi / copy-propagation passes can collapse joins the
+        linear pipeline can't see; one more sweep of the scalar passes
+        cleans up the resulting copies.  Tail-call elimination runs once
+        after fixed-point because it produces a terminator (``ir.TailCall``)
+        that the unreachable-code pass inside ``_simplify_control_flow``
+        then uses to drop any stranded instructions before the next
+        ``Label``.  Skipped for ``carry_return`` callers — their CF-based
+        return shape cannot survive a tail ``jmp``.
+
+        ``excluded_ssa_names`` is forwarded to :func:`cc.ssa.optimize_ssa`
+        so the renamer can skip names the caller knows are
+        call-clobbered — typically program globals from
+        :func:`_collect_global_names`.
         """
         current = list(body)
         while True:
@@ -751,6 +799,15 @@ class Optimizer:
             if after_dead_code == current:
                 break
             current = after_dead_code
+        if (after_ssa := optimize_ssa(current, excluded_names=excluded_ssa_names)) != current:
+            current = after_ssa
+            while True:
+                after_propagation = self._propagate(current)
+                after_control_flow = self._simplify_control_flow(after_propagation)
+                after_dead_code = self._dead_code_elimination(after_control_flow)
+                if after_dead_code == current:
+                    break
+                current = after_dead_code
         if not carry_return:
             current = self._eliminate_tail_calls(current)
             current = self._eliminate_unreachable_code(current)
