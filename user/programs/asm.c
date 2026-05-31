@@ -1594,6 +1594,9 @@ void handle_lea() {
        EAX is zero, but a different byte stream). */
     if (type2 == 2) {
         emit_modrm_direct(register1_id, value2);
+    } else if (type2 == 4) {
+        emit_sib_mem(register1_id, register2_id, parse_operand_index_reg,
+                     parse_operand_scale, value2);
     } else {
         emit_indexed_mem(register1_id, register2_id, value2);
     }
