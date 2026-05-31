@@ -3584,11 +3584,39 @@ class EmissionMixin:
                 # Variable index: compute address in SI, then store.
                 # Guard goes OUTSIDE the push/pop ax pair so the pop
                 # order matches the push order (push ax..., pop ax, pop si).
+                si = self.target.si_register
+                pinned_index_register = (
+                    self.pinned_register[statement.index.name]
+                    if isinstance(statement.index, Var) and statement.index.name in self.pinned_register
+                    else None
+                )
+                # SIB addressing (``[si + idx*k]``) is a 32-bit-mode feature;
+                # the 8086/80286 16-bit addressing forms only permit specific
+                # BX/BP x SI/DI register pairs, so emitting ``[si+edx]`` in a
+                # 16-bit build is rejected by NASM.  Gate the fast path on a
+                # 32-bit-or-wider target.
+                if (
+                    pinned_index_register is not None
+                    and pinned_index_register != si
+                    and element_size in (1, 2, 4, 8)
+                    and self.target.int_size >= 4
+                ):
+                    # x86 SIB-addressing fast path: when the index lives in a
+                    # pinned register distinct from SI, fold the ``add si,
+                    # idx*k`` into the store's effective address so the body
+                    # is just ``mov acc, expr / mov [si + idx*k], acc`` — no
+                    # push/pop, no scratch add, no scale instruction.
+                    guarded = self._si_scratch_guard_begin(name)
+                    self.generate_expression(statement.expr)
+                    self._emit_load_var(name, register=si)
+                    scale_suffix = "" if element_size == 1 else f"*{element_size}"
+                    self.emit(f"        mov [{si}+{pinned_index_register}{scale_suffix}], {store_acc}")
+                    self._si_scratch_guard_end(guarded=guarded)
+                    return
                 guarded = self._si_scratch_guard_begin(name)
                 self.generate_expression(statement.expr)
                 self.emit(f"        push {self.target.acc}")
-                self._emit_load_var(name, register=self.target.si_register)
-                si = self.target.si_register
+                self._emit_load_var(name, register=si)
                 # If the index is a simple Var/Int, evaluating it doesn't
                 # clobber SI, so we can skip the push/pop round-trip.
                 if isinstance(statement.index, (Var, Int)):

@@ -2181,6 +2181,45 @@ def test_increment_decrement_lowers_prefix_and_postfix() -> None:
     assert " add " in asm or " sub " in asm, f"expected a postfix-recovery add/sub:\n{asm}"
 
 
+def test_indexed_store_with_pinned_index_uses_sib_addressing() -> None:
+    """A byte-array indexed write where the index is pinned to a register collapses to ``[base+idx]``.
+
+    The compiled body of ``audio_buffer[i] = SILENCE`` previously emitted
+    ``push acc / mov si, [base] / mov acc, idx / add si, acc / pop acc /
+    mov [si], al`` — 6 instructions, with a register-shuffle around the
+    address computation.  With x86 SIB-addressing exposed for pinned-
+    register indices, the body now collapses to ``mov al, value / mov
+    si, [base] / mov [si+idx_reg], al`` — 3 instructions, no scratch
+    register shuffle.
+    """
+    asm = _kernel(
+        """
+        char buffer[8];
+        void fill(void) {
+            int i;
+            i = 0;
+            while (i < 8) {
+                buffer[i] = 'x';
+                i = i + 1;
+            }
+        }
+    """,
+        bits=32,
+    )
+    # The body must use SIB addressing for the byte store.  Conservatively
+    # search for ``[<si>+<idx>]`` patterns — the specific registers depend
+    # on what the auto-pin selector picked.
+    assert any(line.strip().startswith("mov [") and "+" in line and line.strip().endswith(", al") for line in asm.splitlines()), (
+        f"expected SIB-encoded byte store ``mov [si+idx], al`` in:\n{asm}"
+    )
+    # And the pre-optimization manual ``add si, <reg>`` ahead of a byte
+    # store should be gone (no surviving line of that shape inside the
+    # loop body for this trivial case).
+    assert not any(line.strip() == "add esi, edx" or line.strip() == "add esi, eax" for line in asm.splitlines()), (
+        f"manual SI+index add survived in:\n{asm}"
+    )
+
+
 def test_int_local_compared_to_int_literal_compiles() -> None:
     """Plain ``int x; if (x == 0)`` is unaffected — both operands classify as integer."""
     asm = _kernel("""
