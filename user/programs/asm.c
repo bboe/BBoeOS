@@ -123,6 +123,17 @@ int parse_operand_address_size;
    and stashes the displacement / immediate here for the caller to
    read after the call — cc.py's return ABI is AX-only. */
 int parse_operand_value;
+/* Index register id (0..7) for SIB-addressed memory operands
+   (type 4: ``[base + index*scale + disp]``).  ``parse_operand``
+   leaves this set when it returns type 4 — the base register lives
+   in the low byte of the packed return as usual, the displacement
+   in ``parse_operand_value``, and the index here.  Untouched for
+   non-SIB operand types. */
+int parse_operand_index_reg;
+/* Scale (1, 2, 4, or 8) for SIB-addressed memory operands.  Paired
+   with ``parse_operand_index_reg``; both are only meaningful when
+   ``parse_operand`` returned type 4. */
+int parse_operand_scale;
 /* 512-byte output-byte buffer.  ``emit_byte`` / ``flush_output``
    index into it directly. */
 uint8_t output_buffer[512];
@@ -173,6 +184,7 @@ void emit_indexed_mem(int reg_field, int rm_reg_id, int disp);
 void emit_modrm_direct(int reg, int disp);
 void emit_modrm_disp(int modrm, int disp);
 void emit_operand_size_prefix(int size);
+void emit_sib_mem(int reg_field, int base, int index, int scale, int disp);
 void emit_sized(int base, int size);
 void emit_sized_mem(int base, int size);
 void emit_word(int value);
@@ -859,6 +871,56 @@ void emit_operand_size_prefix(int size) {
     }
     if (size != default_bits) {
         emit_byte(0x66);
+    }
+}
+
+/* Emit a ``[base + index*scale + disp]`` ModR/M + SIB + disp for
+   32-bit addressing.  ``reg_field`` is the /r field (reg-operand
+   number, or sub-opcode for unary forms); ``base`` and ``index``
+   are register ids (0..7); ``scale`` is 1, 2, 4, or 8; ``disp``
+   is the signed displacement.
+   The ModR/M byte is mod | (reg<<3) | 100 (rm=100 signals SIB);
+   the SIB byte is (scale_bits<<6) | (index<<3) | base where
+   scale_bits is 0/1/2/3 for x1/x2/x4/x8.  Special case: when
+   ``base`` is EBP (5) and disp == 0 the SIB-with-mod=00 form
+   means disp32-no-base — we have to encode as mod=01 disp8=0
+   instead, matching NASM.
+   The caller is responsible for any address-size prefix (this
+   helper assumes 32-bit addressing — SIB is a 32-bit-mode-only
+   feature; emitting it under 16-bit addressing would be wrong and
+   is not expected here). */
+void emit_sib_mem(int reg_field, int base, int index, int scale, int disp) {
+    base &= 0xFF;
+    index &= 0xFF;
+    int scale_bits = 0;
+    if (scale == 2) {
+        scale_bits = 1;
+    } else if (scale == 4) {
+        scale_bits = 2;
+    } else if (scale == 8) {
+        scale_bits = 3;
+    }
+    int reg_bits = (reg_field & 0x7) << 3;
+    int sib = (scale_bits << 6) | ((index & 0x7) << 3) | (base & 0x7);
+    if (base == 5 && disp == 0) {
+        /* [ebp + index*scale] with mod=00 means disp32 with no base;
+           force mod=01 disp8=0 instead. */
+        emit_byte(reg_bits | 0x44);
+        emit_byte(sib);
+        emit_byte(0);
+        return;
+    }
+    if (disp == 0) {
+        emit_byte(reg_bits | 0x04);
+        emit_byte(sib);
+    } else if (disp >= -128 && disp <= 127) {
+        emit_byte(reg_bits | 0x44);
+        emit_byte(sib);
+        emit_byte(disp & 0xFF);
+    } else {
+        emit_byte(reg_bits | 0x84);
+        emit_byte(sib);
+        emit_dword(disp);
     }
 }
 
@@ -1604,6 +1666,11 @@ void handle_mov() {
     int register1_id = packed_operand1 & 0xFF;
     int value1 = parse_operand_value;
     int op1_parsed_size = op1_size;
+    /* Snapshot op1's SIB state (index reg + scale) before op2 parses;
+       op2 might itself be a SIB form that would overwrite the globals
+       before the type1 == 4 emit branch reads them. */
+    int op1_index_reg = parse_operand_index_reg;
+    int op1_scale = parse_operand_scale;
     skip_comma();
     /* ``mov r32, crN`` — companion of the cr-as-destination path.
        Emits 0F 20 /r.  Only legal when op1 is a 32-bit GPR; for
@@ -1676,6 +1743,12 @@ void handle_mov() {
             emit_indexed_mem(register1_id, register2_id, value2);
             return;
         }
+        if (type2 == 4) {
+            emit_sized_mem(0x8A, size1);
+            emit_sib_mem(register1_id, register2_id, parse_operand_index_reg,
+                         parse_operand_scale, value2);
+            return;
+        }
         abort_unknown();
     }
     if (type1 == 2) {
@@ -1710,6 +1783,23 @@ void handle_mov() {
         if (type2 == 1) {
             emit_sized_mem(0xC6, size1);
             emit_indexed_mem(0, register1_id, value1);
+            emit_sized_imm(value2, size1);
+            return;
+        }
+    }
+    if (type1 == 4) {
+        /* SIB-addressed store: ``mov [base+index*scale+disp], reg``
+           and ``mov [base+index*scale+disp], imm``.  Pull the SIB
+           state from the snapshot taken before op2's parse_operand. */
+        if (type2 == 0) {
+            emit_sized_mem(0x88, size1);
+            emit_sib_mem(register2_id, register1_id, op1_index_reg, op1_scale,
+                         value1);
+            return;
+        }
+        if (type2 == 1) {
+            emit_sized_mem(0xC6, size1);
+            emit_sib_mem(0, register1_id, op1_index_reg, op1_scale, value1);
             emit_sized_imm(value2, size1);
             return;
         }
@@ -2921,6 +3011,104 @@ int parse_operand() {
             parse_operand_address_size = reg_size;
         }
         skip_ws();
+        /* SIB-addressed forms: ``[reg1*scale + reg2 (+ disp)]`` and
+           ``[reg1 + reg2 (* scale) (+ disp)]``.  Only valid under
+           32-bit addressing (the 8086/80286 16-bit forms permit only
+           the BX/BP × SI/DI register pairs at fixed encodings — not
+           the general SIB shape).
+             - ``*`` right after reg1 puts reg1 in the index field and
+               reg2 (which must follow ``+``) in the base field;
+             - ``+ reg2`` followed by optional ``* scale`` puts reg1
+               in the base and reg2 in the index;
+             - a trailing ``+ expr`` or ``- expr`` becomes the disp.
+           Anything we can't parse as SIB falls through to the legacy
+           ``[reg + disp]`` (type 3) path. */
+        if (reg_size == 32 && source_cursor[0] == '*') {
+            /* ``[reg1*scale + reg2 (+ disp)]`` — reg1 is the index.
+               ``parse_number`` (not ``resolve_value``) consumes only
+               the scale digit so a trailing ``+ disp`` lands in the
+               disp branch below — ``resolve_value`` would greedily
+               parse the whole ``4 + 8`` expression as scale = 12. */
+            source_cursor += 1;
+            skip_ws();
+            int scale = parse_number();
+            skip_ws();
+            int base_register_id = -1;
+            if (source_cursor[0] == '+') {
+                source_cursor += 1;
+                skip_ws();
+                int packed_base = parse_register();
+                if (packed_base >= 0 && ((packed_base >> 8) & 0xFF) == 32) {
+                    base_register_id = packed_base & 0xFF;
+                }
+            }
+            if (base_register_id < 0) {
+                abort_unknown();
+            }
+            skip_ws();
+            int disp = 0;
+            if (source_cursor[0] == '+') {
+                source_cursor += 1;
+                skip_ws();
+                disp = resolve_value();
+            } else if (source_cursor[0] == '-') {
+                disp = resolve_value();
+            }
+            skip_ws();
+            if (source_cursor[0] == ']') {
+                source_cursor += 1;
+            }
+            parse_operand_value = disp;
+            parse_operand_index_reg = register_id;
+            parse_operand_scale = scale;
+            return (4 << 8) | base_register_id; /* type=4 (SIB) */
+        }
+        if (reg_size == 32 && source_cursor[0] == '+') {
+            /* Peek past the ``+`` for a second 32-bit register — if
+               present we have a SIB form ``[reg1 + reg2 (* scale)
+               (+ disp)]``.  On miss, restore the cursor so the legacy
+               disp path below sees the original ``+ expr``. */
+            char *plus_saved = source_cursor;
+            source_cursor += 1;
+            skip_ws();
+            int packed_index = parse_register();
+            if (packed_index >= 0 && ((packed_index >> 8) & 0xFF) == 32) {
+                int index_register_id = packed_index & 0xFF;
+                skip_ws();
+                int scale = 1;
+                if (source_cursor[0] == '*') {
+                    source_cursor += 1;
+                    skip_ws();
+                    scale = parse_number();
+                    skip_ws();
+                }
+                int disp = 0;
+                if (source_cursor[0] == '+') {
+                    source_cursor += 1;
+                    skip_ws();
+                    disp = resolve_value();
+                } else if (source_cursor[0] == '-') {
+                    disp = resolve_value();
+                }
+                skip_ws();
+                if (source_cursor[0] == ']') {
+                    source_cursor += 1;
+                }
+                /* ESP can't be an index — swap so esp is the base.
+                   Only legal when scale == 1; otherwise NASM rejects. */
+                int base_id = register_id;
+                int swapped_index = index_register_id;
+                if (swapped_index == 4 && scale == 1) {
+                    swapped_index = base_id;
+                    base_id = 4;
+                }
+                parse_operand_value = disp;
+                parse_operand_index_reg = swapped_index;
+                parse_operand_scale = scale;
+                return (4 << 8) | base_id; /* type=4 (SIB) */
+            }
+            source_cursor = plus_saved;
+        }
         int disp = 0;
         /* ``[reg + expr]`` and ``[reg - expr]`` — leave the sign for
            resolve_value so left-to-right semantics apply (``[bp-4+1]``

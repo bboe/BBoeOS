@@ -24,12 +24,12 @@ programs (`make_os.sh` passes `--bits 32`); every row in this table is now
 | chmod   | 149            | 164         | 221       | +57   |
 | cp      | 268            | 328         | 265       | -63  |
 | date    | 15             | 21          | 23        | +2    |
-| dns     | 724            | 1189        | 1269      | +80   |
+| dns     | 724            | 1189        | 1231      | +42   |
 | edit    | 2018           | 2707        | 3315      | +608  |
-| ls      | 135            | 412         | 698       | +286  |
+| ls      | 135            | 412         | 685       | +273  |
 | mkdir   | 123            | 142         | 163       | +21   |
 | mv      | 217            | 242         | 270       | +28   |
-| ping    | 1034           | 1230        | 1511      | +281  |
+| ping    | 1034           | 1230        | 1488      | +258  |
 | uptime  | 50             | 67          | 102       | +35   |
 
 **arp (-99):** The three scratch arrays (`mac_buffer[6]`, `receive_buffer[128]`,
