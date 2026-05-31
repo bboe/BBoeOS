@@ -203,36 +203,14 @@ fi
 PBUILD=build/c
 rm -rf "$PBUILD" && mkdir -p "$PBUILD"
 
-# cc.py user programs route through the object-file + linker pipeline
+# Every cc.py user program routes through the object-file + linker pipeline:
 #     cc.py --object → nasm -f bin -l → cc.py pack-ccobj → ccld.py
-# by default.  Programs whose names appear in FLAT_PROGRAMS stay on
-# the legacy single-TU flat path (cc.py → nasm -f bin).  Either path
-# produces a flat binary loadable by program_enter (same PROGRAM_BASE,
-# same BSS trailer), so the shell and runtime ABI don't change with the
-# toolchain choice.  The programs listed here require the flat path —
-# each fails to assemble through ccld:
-#   trailer_cross_page — its `asm("times ...")` padding only survives
-#           flat assembly; that padding is the whole point of the test.
-# shell, arp, dns, and asm used to live here too.  shell's command
-# dispatch returned "unknown command" through the linker and arp/dns
-# page-faulted (EXC0E) at runtime — both were codegen/linker bugs, now
-# fixed: ccld dropping relocation addends (`buf[i-1]` linked as `buf[i]`),
-# and main's argc-check fusion emitting a direct `jne FUNCTION_DIE` (a
-# rel32 to the absolute libbboeos entry, only valid under the flat path's
-# `org`).  asm's self-hosted assembler references its file-scope globals
-# from inline asm under the legacy `_g_<name>` spelling, which object mode
-# left undefined (`_g_error_word not defined`); cc.py now emits a
-# `_g_<name>:` alias label beside every object-mode global, so all four
-# build through the object pipeline like every other program.
-FLAT_PROGRAMS="trailer_cross_page"
-
-compile_program_flat() {
-    name=$1
-    source=$2
-    python3 cc.py --bits 32 "$source" "$PBUILD/$name.asm" || return 1
-    nasm -f bin -i kernel/include/ -o "$PBUILD/$name" "$PBUILD/$name.asm" || return 1
-}
-
+# producing a flat binary loadable by program_enter (PROGRAM_BASE, BSS
+# trailer).  The legacy single-TU flat path (cc.py → nasm -f bin) is gone:
+# shell, arp, dns, and asm all used to require it for codegen/linker bugs
+# since fixed, and trailer_cross_page — the last holdout — now pads itself
+# in .rodata instead of with `asm("times nop")` in the code path, so it
+# links cleanly too.
 compile_program_object() {
     name=$1
     source=$2
@@ -260,26 +238,11 @@ compile_program_object() {
     python3 tools/ccld.py --output "$PBUILD/$name" $objects || return 1
 }
 
-is_flat_program() {
-    case " $FLAT_PROGRAMS " in
-        *" $1 "*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 for name in $USER_PROGRAMS; do
-    if is_flat_program "$name"; then
-        compile_program_flat "$name" "user/programs/$name.c" || exit 1
-    else
-        compile_program_object "$name" "user/programs/$name.c" || exit 1
-    fi
+    compile_program_object "$name" "user/programs/$name.c" || exit 1
 done
 for name in $TEST_PROGRAMS; do
-    if is_flat_program "$name"; then
-        compile_program_flat "$name" "tests/programs/$name.c" || exit 1
-    else
-        compile_program_object "$name" "tests/programs/$name.c" || exit 1
-    fi
+    compile_program_object "$name" "tests/programs/$name.c" || exit 1
 done
 
 dd bs=512 count="$SECTORS" if=/dev/zero of="$IMAGE" 2>/dev/null
