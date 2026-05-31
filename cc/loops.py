@@ -227,7 +227,9 @@ def _hoist_invariants_into_preheader(
     *,
     body_block_order: list[BasicBlock],
     definition_count: dict[str, int],
+    dominator_sets: dict[BasicBlock, frozenset[BasicBlock]],
     excluded_names: frozenset[str],
+    loop_exits: frozenset[BasicBlock],
     preheader: BasicBlock,
 ) -> bool:
     """Identify invariant instructions across *body_block_order* and move them into *preheader*.
@@ -249,13 +251,30 @@ def _hoist_invariants_into_preheader(
     treated as defined inside the loop (a callee may have written
     through the underlying slot).
 
+    *loop_exits* and *dominator_sets* gate the safety check that
+    speculative load hoisting requires (see below): a load may be
+    lifted out of the loop only when its containing block dominates
+    every exit, so the value would have been read on every path the
+    loop body actually takes to an exit.
+
     Returns True when any instruction was hoisted.
     """
     names_defined_in_loop = _names_defined_in_loop(body_block_order=body_block_order)
-    if any(
+    has_call = any(
         isinstance(instruction, (ir.Call, ir.CarryBranch, ir.TailCall)) for block in body_block_order for instruction in block.instructions
-    ) or any(isinstance(block.terminator, (ir.CarryBranch, ir.TailCall)) for block in body_block_order):
+    ) or any(isinstance(block.terminator, (ir.CarryBranch, ir.TailCall)) for block in body_block_order)
+    if has_call:
         names_defined_in_loop |= excluded_names
+    # An ``ir.Index`` (memory load) is only hoistable when no instruction
+    # in the loop can mutate memory the load might read.  ``IndexAssign``
+    # is the direct write; ``Call`` / ``CarryBranch`` / ``TailCall``
+    # could mutate any memory through a pointer the callee receives.
+    # When any of those appear, leave loads in place — alias analysis
+    # is out of scope.
+    has_memory_writer = has_call or any(
+        isinstance(instruction, ir.IndexAssign) for block in body_block_order for instruction in block.instructions
+    )
+    block_of: dict[int, BasicBlock] = {id(instruction): block for block in body_block_order for instruction in block.instructions}
     invariant: dict[int, ir.Instruction] = {}
     invariant_destinations: set[str] = set()
     changed = True
@@ -276,6 +295,22 @@ def _hoist_invariants_into_preheader(
                     instruction, invariant_destinations=invariant_destinations, names_defined_in_loop=names_defined_in_loop
                 ):
                     continue
+                if isinstance(instruction, ir.Index):
+                    # Memory-load safety: skip when any writer is in the
+                    # loop, when the base pointer is itself loop-defined
+                    # (the ``base`` field is a name, not a ``Value``, so
+                    # ``_operands_invariant`` does not see it), or when
+                    # the containing block does not dominate every exit
+                    # — speculatively hoisting a load past a guard the
+                    # loop's body would have evaluated would introduce a
+                    # fault on a control-flow path the original program
+                    # never took.
+                    if has_memory_writer:
+                        continue
+                    if instruction.base in names_defined_in_loop:
+                        continue
+                    if not all(block_of[id(instruction)] in dominator_sets[exit_block] for exit_block in loop_exits):
+                        continue
                 invariant[id(instruction)] = instruction
                 invariant_destinations.add(destination)
                 changed = True
@@ -289,19 +324,19 @@ def _hoist_invariants_into_preheader(
 
 
 def _is_hoistable_kind(instruction: ir.Instruction, /) -> bool:
-    """Return True if *instruction* is a pure, speculatable kind safe to hoist.
+    """Return True if *instruction* is a pure-or-speculatable kind that LICM can consider.
 
-    The first cut admits only :class:`cc.ir.BinaryOperation` — arithmetic
-    and bitwise operations have no observable side effects and cannot
-    fault.  :class:`cc.ir.Copy` is intentionally excluded because copy
-    propagation already removes most loop-local copies; hoisting them
-    would only churn the IR without enabling further wins.
-    :class:`cc.ir.Index` (memory load) is also excluded for now: a
-    speculatively-hoisted load could fault on a pointer that the loop
-    pre-condition would have rejected.  A future pass can lift loads
-    by adding a "dominates every loop exit" check.
+    :class:`cc.ir.BinaryOperation` has no observable side effects and
+    cannot fault, so it is hoistable whenever its operands are
+    invariant.  :class:`cc.ir.Index` (memory load) is hoistable only
+    when the caller's additional safety checks pass (no memory writer
+    in the loop, base is loop-invariant, the load's block dominates
+    every loop exit so the speculative read cannot fault on a path the
+    body would have rejected).  :class:`cc.ir.Copy` is intentionally
+    excluded: copy propagation already removes loop-local copies; a
+    hoist would churn the IR without enabling further wins.
     """
-    return isinstance(instruction, ir.BinaryOperation)
+    return isinstance(instruction, (ir.BinaryOperation, ir.Index))
 
 
 def _iter_ast_referenced_names(node: object, /) -> Iterator[str]:
@@ -584,11 +619,17 @@ def hoist_loop_invariants(body: list[ir.Instruction], /, *, excluded_names: froz
         return body
     definition_count = _count_destination_definitions(cfg)
     block_index = {block: index for index, block in enumerate(cfg.blocks)}
+    dominator_sets = _dominator_sets(compute_dominators(cfg))
     hoisted_any = False
     for loop, preheader in preheaders.items():
         body_block_order = sorted(loop.body, key=block_index.__getitem__)
         if _hoist_invariants_into_preheader(
-            body_block_order=body_block_order, definition_count=definition_count, excluded_names=excluded_names, preheader=preheader
+            body_block_order=body_block_order,
+            definition_count=definition_count,
+            dominator_sets=dominator_sets,
+            excluded_names=excluded_names,
+            loop_exits=loop.exits,
+            preheader=preheader,
         ):
             hoisted_any = True
     if not hoisted_any:
