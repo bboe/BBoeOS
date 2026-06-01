@@ -173,6 +173,7 @@ int symbol_count;
    enforces ISO C99 declare-before-use; the prototypes placate the
    syntax check without affecting codegen. */
 int apply_binary(int lhs, int op, int rhs);
+void cmov_handler(int opcode_low);
 void define_macro();
 void emit_address_disp(int disp);
 void emit_address_size_prefix(int size);
@@ -1319,6 +1320,74 @@ void handle_cld() {
 
 void handle_cli() {
     emit_byte(0xFA);
+}
+
+/* ``cmov<cc> reg, r/m`` — conditional move (Pentium Pro+, i686).
+   Two-byte opcode ``0F 4X`` where X is the architectural condition
+   code (0=o, 1=no, 2=b/nae, 3=ae/nb, 4=e/z, 5=ne/nz, 6=be/na,
+   7=a/nbe, 8=s, 9=ns, A=p, B=np, C=l, D=ge, E=le, F=g) followed by
+   the standard ModR/M ``reg, r/m`` encoding.  cc.py uses cmov to
+   collapse simple ternaries (``x = cond ? a : b``) from a branchy
+   ``Jcc / mov / jmp / mov`` diamond down to ``mov acc, b / cmov<cc>
+   acc, a`` — two instructions, no branches.
+
+   The handler shape mirrors ``handle_movzx``: register-only first
+   operand (cmov has no immediate form), register or memory second
+   (including SIB types 3 and 4).  16-bit forms take the ``0x66``
+   operand-size prefix.  Each ``handle_cmov<cc>`` is a one-line
+   wrapper that hands the condition code to this helper. */
+void cmov_handler(int opcode_low) {
+    skip_ws();
+    int packed_register = parse_register();
+    int register1_id = packed_register & 0xFF;
+    int size = (packed_register >> 8) & 0xFF;
+    skip_comma();
+    int packed_operand = parse_operand();
+    int type2 = (packed_operand >> 8) & 0xFF;
+    int register2_id = packed_operand & 0xFF;
+    int value2 = parse_operand_value;
+    int op1_index_reg = parse_operand_index_reg;
+    int op1_scale = parse_operand_scale;
+    emit_operand_size_prefix(size);
+    if (type2 != 0) {
+        emit_address_size_prefix(parse_operand_address_size);
+    }
+    emit_byte(0x0F);
+    emit_byte(0x40 | (opcode_low & 0x0F));
+    if (type2 == 0) {
+        emit_byte(0xC0 | (register1_id << 3) | register2_id);
+    } else if (type2 == 2) {
+        emit_modrm_direct(register1_id, value2);
+    } else if (type2 == 4) {
+        emit_sib_mem(register1_id, register2_id, op1_index_reg, op1_scale,
+                     value2);
+    } else {
+        emit_indexed_mem(register1_id, register2_id, value2);
+    }
+}
+
+void handle_cmove() {
+    cmov_handler(0x4);
+}
+
+void handle_cmovg() {
+    cmov_handler(0xF);
+}
+
+void handle_cmovge() {
+    cmov_handler(0xD);
+}
+
+void handle_cmovl() {
+    cmov_handler(0xC);
+}
+
+void handle_cmovle() {
+    cmov_handler(0xE);
+}
+
+void handle_cmovne() {
+    cmov_handler(0x5);
 }
 
 /* ``cmp`` covers r-r, r-imm, r-[mem], [mem]-imm, and [disp16]-imm.
@@ -4008,6 +4077,14 @@ asm("\n"
     "        dd STR_CLC, handle_clc\n"
     "        dd STR_CLD, handle_cld\n"
     "        dd STR_CLI, handle_cli\n"
+    "        dd STR_CMOVE,  handle_cmove\n"
+    "        dd STR_CMOVG,  handle_cmovg\n"
+    "        dd STR_CMOVGE, handle_cmovge\n"
+    "        dd STR_CMOVL,  handle_cmovl\n"
+    "        dd STR_CMOVLE, handle_cmovle\n"
+    "        dd STR_CMOVNE, handle_cmovne\n"
+    "        dd STR_CMOVNZ, handle_cmovne\n"
+    "        dd STR_CMOVZ,  handle_cmove\n"
     "        dd STR_CMP, handle_cmp\n"
     "        dd STR_CMPSB, handle_cmpsb\n"
     "        dd STR_CMPSW, handle_cmpsw\n"
@@ -4084,6 +4161,14 @@ asm("\n"
     "STR_CLC     db 'clc',0\n"
     "STR_CLD     db 'cld',0\n"
     "STR_CLI     db 'cli',0\n"
+    "STR_CMOVE   db 'cmove',0\n"
+    "STR_CMOVG   db 'cmovg',0\n"
+    "STR_CMOVGE  db 'cmovge',0\n"
+    "STR_CMOVL   db 'cmovl',0\n"
+    "STR_CMOVLE  db 'cmovle',0\n"
+    "STR_CMOVNE  db 'cmovne',0\n"
+    "STR_CMOVNZ  db 'cmovnz',0\n"
+    "STR_CMOVZ   db 'cmovz',0\n"
     "STR_CMP     db 'cmp',0\n"
     "STR_CMPSB   db 'cmpsb',0\n"
     "STR_CMPSW   db 'cmpsw',0\n"
