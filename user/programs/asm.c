@@ -1921,6 +1921,11 @@ void handle_movsb() {
     emit_byte(0xA4);
 }
 
+void handle_movsd() {
+    emit_operand_size_prefix(32);
+    emit_byte(0xA5);
+}
+
 void handle_movsw() {
     emit_operand_size_prefix(16);
     emit_byte(0xA5);
@@ -2142,6 +2147,11 @@ void handle_stc() {
 
 void handle_stosb() {
     emit_byte(0xAA);
+}
+
+void handle_stosd() {
+    emit_operand_size_prefix(32);
+    emit_byte(0xAB);
 }
 
 void handle_stosw() {
@@ -4118,6 +4128,7 @@ asm("\n"
     "        dd STR_LOOP, handle_loop\n"
     "        dd STR_MOV, handle_mov\n"
     "        dd STR_MOVSB, handle_movsb\n"
+    "        dd STR_MOVSD, handle_movsd\n"
     "        dd STR_MOVSW, handle_movsw\n"
     "        dd STR_MOVZX, handle_movzx\n"
     "        dd STR_MUL, handle_mul\n"
@@ -4141,6 +4152,7 @@ asm("\n"
     "        dd STR_SHR, handle_shr\n"
     "        dd STR_STC, handle_stc\n"
     "        dd STR_STOSB, handle_stosb\n"
+    "        dd STR_STOSD, handle_stosd\n"
     "        dd STR_STOSW, handle_stosw\n"
     "        dd STR_SUB, handle_sub\n"
     "        dd STR_TEST, handle_test\n"
@@ -4211,6 +4223,7 @@ asm("\n"
     "STR_MACRO   db 'macro',0\n"
     "STR_MOV     db 'mov',0\n"
     "STR_MOVSB   db 'movsb',0\n"
+    "STR_MOVSD   db 'movsd',0\n"
     "STR_MOVSW   db 'movsw',0\n"
     "STR_MOVZX   db 'movzx',0\n"
     "STR_MUL     db 'mul',0\n"
@@ -4236,6 +4249,7 @@ asm("\n"
     "STR_SHR     db 'shr',0\n"
     "STR_STC     db 'stc',0\n"
     "STR_STOSB   db 'stosb',0\n"
+    "STR_STOSD   db 'stosd',0\n"
     "STR_STOSW   db 'stosw',0\n"
     "STR_SUB     db 'sub',0\n"
     "STR_TEST    db 'test',0\n"

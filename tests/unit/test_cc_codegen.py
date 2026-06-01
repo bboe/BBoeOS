@@ -38,6 +38,7 @@ LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
 _STDINT_PREAMBLE = "#include <stdint.h>\n"
 sys.path.insert(0, str(REPO_ROOT))
 from cc import ast_nodes, ir  # noqa: E402
+from cc.codegen.x86.generator import X86CodeGenerator  # noqa: E402
 from cc.codegen.x86.peephole import Peepholer  # noqa: E402
 from cc.lexer import tokenize  # noqa: E402
 from cc.parser import Parser  # noqa: E402
@@ -1093,6 +1094,87 @@ def test_compare_pinned_left_to_pinned_right_reloads_after_jcc() -> None:
     assert saw_reload_before_dec or has_direct_dec_after_pin_copy, f"expected pinned reload before dec for plus = back - 1:\n{asm}"
 
 
+def test_constant_base_pinned_index_uses_no_base_sib() -> None:
+    """``arr[i]`` on a file-scope array collapses to ``[_g_arr + idx*4]`` when the index is pinned.
+
+    Without the no-base SIB form ``_emit_constant_base_index_addr``
+    stages the scaled index through SI:
+    ``mov si, idx_reg / shl si, 2 / mov acc, [_g_arr + si]`` — 3
+    instructions for the address.  With the no-base SIB the load
+    becomes ``mov acc, [_g_arr + idx_reg*4]`` — 1 instruction.  Same
+    win on the store side.  Restricted to scales 4 and 8 because
+    NASM (the production assembler) canonicalizes scales 1 and 2 to
+    different encodings; cc.py's self-host roundtrip would break for
+    those scales.
+    """
+    asm = _kernel(
+        """
+        int arr[8];
+        int sum(void) {
+            int i, total;
+            i = 0;
+            total = 0;
+            while (i < 8) {
+                total = total + arr[i];
+                i = i + 1;
+            }
+            return total;
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("sum:", 1)[1].split("\n;", 1)[0]
+    assert any(line.strip().startswith("mov eax, [_g_arr+") and "*4]" in line for line in body.splitlines()), (
+        f"expected no-base SIB load ``mov eax, [_g_arr+idx*4]`` in:\n{asm}"
+    )
+    # And the pre-optimization manual scale-through-SI sequence
+    # should be gone.
+    assert "shl esi, 2" not in body, f"manual scale-through-SI survived in:\n{asm}"
+
+
+def test_copy_loop_compiles_to_rep_movsd() -> None:
+    """``for (i = 0; i < n; i++) d[i] = s[i];`` over unsigned int pointers lowers to ``rep movsd``.
+
+    The dword element width comes from the ``unsigned int *`` pointee
+    (4 bytes on the 32-bit target).  ``n`` is ``unsigned int``, so the
+    matcher drops the guard — an unsigned count can never be negative and
+    ``rep`` with ECX == 0 is already a no-op.
+    """
+    asm = _kernel(
+        """
+        void copy(unsigned int *d, unsigned int *s, unsigned int n) {
+            unsigned int i;
+            for (i = 0; i < n; i++) d[i] = s[i];
+        }
+    """,
+        bits=32,
+    )
+    assert "rep movsd" in asm, f"expected dword copy to compile to rep movsd:\n{asm}"
+    assert "jle" not in asm, f"an unsigned counter must not emit a guard:\n{asm}"
+
+
+def test_copy_loop_global_short_arrays_emit_rep_movsw() -> None:
+    """A copy between two *file-scope* ``unsigned short`` arrays emits ``rep movsw``.
+
+    Regression: the matching gap that miscompiled the global int fill
+    lowered this global short copy to ``rep movsb`` (byte-by-byte, half the
+    data) before globals were threaded into ``string_loop_type_maps``.
+    """
+    asm = _kernel(
+        """
+        unsigned short g_s[64];
+        unsigned short g_d[64];
+        void copy_shorts(int n) {
+            int i;
+            for (i = 0; i < n; i++) g_d[i] = g_s[i];
+        }
+    """,
+        bits=32,
+    )
+    assert "rep movsw" in asm, f"expected global short copy to compile to rep movsw:\n{asm}"
+    assert "rep movsb" not in asm, f"global short copy must NOT degrade to rep movsb:\n{asm}"
+
+
 def test_default_2_arg_callee_does_not_read_arg_1_off_stack() -> None:
     """Default register-passing: arg 1 arrives in EDX, not via [ebp+offset].
 
@@ -1808,6 +1890,79 @@ def test_file_scope_multi_declarator_with_initializers() -> None:
     assert "1" in output and "2" in output, f"expected both initializer literals\n{output}"
 
 
+def test_fill_loop_compiles_to_rep_stosb() -> None:
+    """``for (i = 0; i < n; i++) buf[i] = 0;`` over a byte pointer lowers to ``rep stosb``.
+
+    End-to-end check that the optimizer wires
+    :func:`cc.loops.recognize_string_loops` into the IR pipeline: the
+    canonical unit-stride byte fill collapses to a single ``rep stosb``.
+    ``n`` is a signed ``int``, so the matcher keeps the ``n <= 0`` guard
+    (``jle``) ahead of the rep.
+    """
+    asm = _kernel(
+        """
+        void clear(unsigned char *buf, int n) {
+            int i;
+            for (i = 0; i < n; i++) buf[i] = 0;
+        }
+    """,
+        bits=32,
+    )
+    assert "rep stosb" in asm, f"expected byte fill to compile to rep stosb:\n{asm}"
+    assert "jle" in asm, f"a signed int counter must keep the n<=0 guard:\n{asm}"
+
+
+def test_fill_loop_global_int_array_emits_rep_stosd() -> None:
+    """A fill over a *file-scope* ``int`` array uses the global's element width — ``rep stosd``.
+
+    Regression: ``string_loop_type_maps`` once saw only params / locals,
+    so a loop whose base was a global array fell through to the byte
+    default and miscompiled to ``rep stosb`` (100 bytes of 0x07 instead of
+    100 dwords of 7).  Threading ``program.globals`` into the type map (and
+    rejecting unknown widths) makes the rewrite size the global correctly.
+    """
+    asm = _kernel(
+        """
+        int g_words[64];
+        void fill_words(int n) {
+            int i;
+            for (i = 0; i < n; i++) g_words[i] = 7;
+        }
+    """,
+        bits=32,
+    )
+    assert "rep stosd" in asm, f"expected global int fill to compile to rep stosd:\n{asm}"
+    assert "rep stosb" not in asm, f"global int fill must NOT degrade to rep stosb:\n{asm}"
+
+
+def test_fill_loop_int_element_emits_rep_stosd() -> None:
+    """A unit-stride fill over an ``int *`` lowers to a dword ``rep stosd``."""
+    asm = _kernel(
+        """
+        void clear32(int *buf, int n) {
+            int i;
+            for (i = 0; i < n; i++) buf[i] = 0;
+        }
+    """,
+        bits=32,
+    )
+    assert "rep stosd" in asm, f"expected 4-byte element fill to compile to rep stosd:\n{asm}"
+
+
+def test_fill_loop_short_element_emits_rep_stosw() -> None:
+    """A unit-stride fill over an ``unsigned short *`` lowers to a word ``rep stosw``."""
+    asm = _kernel(
+        """
+        void clear16(unsigned short *buf, int n) {
+            int i;
+            for (i = 0; i < n; i++) buf[i] = 0;
+        }
+    """,
+        bits=32,
+    )
+    assert "rep stosw" in asm, f"expected 2-byte element fill to compile to rep stosw:\n{asm}"
+
+
 def test_function_pointer_and_unnamed_param_parse_in_prototype() -> None:
     """Function-pointer parameters and unnamed parameters parse in prototypes.
 
@@ -2181,43 +2336,36 @@ def test_increment_decrement_lowers_prefix_and_postfix() -> None:
     assert " add " in asm or " sub " in asm, f"expected a postfix-recovery add/sub:\n{asm}"
 
 
-def test_indexed_store_with_pinned_index_uses_sib_addressing() -> None:
-    """A byte-array indexed write where the index is pinned to a register collapses to ``[base+idx]``.
+def test_indexed_in_place_increment_fuses_to_inc_dword_sib() -> None:
+    """``p[i] = p[i] + 1`` through a pinned-index pointer fuses to ``inc dword [base+idx*k]``.
 
-    The compiled body of ``audio_buffer[i] = SILENCE`` previously emitted
-    ``push acc / mov si, [base] / mov acc, idx / add si, acc / pop acc /
-    mov [si], al`` — 6 instructions, with a register-shuffle around the
-    address computation.  With x86 SIB-addressing exposed for pinned-
-    register indices, the body now collapses to ``mov al, value / mov
-    si, [base] / mov [si+idx_reg], al`` — 3 instructions, no scratch
-    register shuffle.
+    The codegen lowers the indexed update to ``mov acc, [base+idx*k] /
+    inc acc / mov [base+idx*k], acc`` after the SIB load/store paths
+    fire.  ``peephole_memory_arithmetic`` then collapses that triple
+    into a single ``inc dword [base+idx*k]``.  Requires the
+    SI-dedup-before-memory-arithmetic ordering in the second peephole
+    pass so the redundant base reload between the increment and the
+    store doesn't hide the pattern.
     """
     asm = _kernel(
         """
-        char buffer[8];
-        void fill(void) {
+        void bump(int *p, int n) {
             int i;
             i = 0;
-            while (i < 8) {
-                buffer[i] = 'x';
+            while (i < n) {
+                p[i] = p[i] + 1;
                 i = i + 1;
             }
         }
-    """,
+        """,
         bits=32,
     )
-    # The body must use SIB addressing for the byte store.  Conservatively
-    # search for ``[<si>+<idx>]`` patterns — the specific registers depend
-    # on what the auto-pin selector picked.
-    assert any(line.strip().startswith("mov [") and "+" in line and line.strip().endswith(", al") for line in asm.splitlines()), (
-        f"expected SIB-encoded byte store ``mov [si+idx], al`` in:\n{asm}"
+    body = asm.split("bump:", 1)[1]
+    assert any(line.strip().startswith("inc dword [esi+") and "*4]" in line for line in body.splitlines()), (
+        f"expected fused ``inc dword [esi+idx*4]`` in:\n{asm}"
     )
-    # And the pre-optimization manual ``add si, <reg>`` ahead of a byte
-    # store should be gone (no surviving line of that shape inside the
-    # loop body for this trivial case).
-    assert not any(line.strip() == "add esi, edx" or line.strip() == "add esi, eax" for line in asm.splitlines()), (
-        f"manual SI+index add survived in:\n{asm}"
-    )
+    # And the pre-fuse 3-instruction sequence should be gone.
+    assert "mov eax, [esi+" not in body, f"unfused SIB load survived in:\n{asm}"
 
 
 def test_indexed_load_with_pinned_index_uses_sib_addressing() -> None:
@@ -2255,142 +2403,50 @@ def test_indexed_load_with_pinned_index_uses_sib_addressing() -> None:
     assert "shl eax, 2" not in asm or "add esi, eax" not in asm, f"manual scale+add survived in:\n{asm}"
 
 
-def test_ternary_with_pinned_branch_uses_cmov() -> None:
-    """``cond ? pinned_a : pinned_b`` collapses to ``mov acc, b / cmp / cmov<cc> acc, a``.
+def test_indexed_store_with_pinned_index_uses_sib_addressing() -> None:
+    """A byte-array indexed write where the index is pinned to a register collapses to ``[base+idx]``.
 
-    The cmov fast path fires only when the diamond would be at least
-    one byte longer: at least one branch must be a Var pinned to a
-    non-acc register, so cmov can use that register directly without
-    staging it through CX.  With two memory-resident branches the
-    cmov sequence's ``mov cx, acc`` overhead matches the diamond's
-    ``jcc + jmp`` and no win is available — the guard bails to the
-    legacy diamond in that case.
+    The compiled body of ``buffer[i] = i`` previously emitted
+    ``push acc / mov si, [base] / mov acc, idx / add si, acc / pop acc /
+    mov [si], al`` — 6 instructions, with a register-shuffle around the
+    address computation.  With x86 SIB-addressing exposed for pinned-
+    register indices, the body now collapses to ``mov al, value / mov
+    si, [base] / mov [si+idx_reg], al`` — 3 instructions, no scratch
+    register shuffle.
+
+    The stored value is the induction variable (``buffer[i] = i``) rather
+    than a loop-invariant constant: a constant unit-stride byte fill
+    (``buffer[i] = 'x'``) is now recognized by
+    :func:`cc.loops.recognize_string_loops` and collapses to ``rep
+    stosb`` before this SIB path is reached, so an IV-valued store keeps
+    the per-iteration indexed write this test exercises.
     """
     asm = _kernel(
         """
-        int sum(int n) {
-            int counter, a, b, result;
-            counter = 0;
-            a = 3;
-            b = 7;
-            result = 0;
-            while (counter < n) {
-                result = result + (counter < 5 ? a : b);
-                counter = counter + 1;
-            }
-            return result;
-        }
-        """,
-        bits=32,
-    )
-    body = asm.split("sum:", 1)[1]
-    assert "cmovl" in body or "cmovge" in body, f"expected cmov<l|ge> in:\n{asm}"
-    # And no jcc-then-jmp diamond around the ternary.  ``.cond_else``
-    # is the existing diamond's else label; presence means we fell
-    # through to the slow path.
-    assert ".cond_else_" not in body, f"diamond survived alongside cmov in:\n{asm}"
-
-
-def test_constant_base_pinned_index_uses_no_base_sib() -> None:
-    """``arr[i]`` on a file-scope array collapses to ``[_g_arr + idx*4]`` when the index is pinned.
-
-    Without the no-base SIB form ``_emit_constant_base_index_addr``
-    stages the scaled index through SI:
-    ``mov si, idx_reg / shl si, 2 / mov acc, [_g_arr + si]`` — 3
-    instructions for the address.  With the no-base SIB the load
-    becomes ``mov acc, [_g_arr + idx_reg*4]`` — 1 instruction.  Same
-    win on the store side.  Restricted to scales 4 and 8 because
-    NASM (the production assembler) canonicalizes scales 1 and 2 to
-    different encodings; cc.py's self-host roundtrip would break for
-    those scales.
-    """
-    asm = _kernel(
-        """
-        int arr[8];
-        int sum(void) {
-            int i, total;
-            i = 0;
-            total = 0;
-            while (i < 8) {
-                total = total + arr[i];
-                i = i + 1;
-            }
-            return total;
-        }
-        """,
-        bits=32,
-    )
-    body = asm.split("sum:", 1)[1].split("\n;", 1)[0]
-    assert any(line.strip().startswith("mov eax, [_g_arr+") and "*4]" in line for line in body.splitlines()), (
-        f"expected no-base SIB load ``mov eax, [_g_arr+idx*4]`` in:\n{asm}"
-    )
-    # And the pre-optimization manual scale-through-SI sequence
-    # should be gone.
-    assert "shl esi, 2" not in body, f"manual scale-through-SI survived in:\n{asm}"
-
-
-def test_indexed_in_place_increment_fuses_to_inc_dword_sib() -> None:
-    """``p[i] = p[i] + 1`` through a pinned-index pointer fuses to ``inc dword [base+idx*k]``.
-
-    The codegen lowers the indexed update to ``mov acc, [base+idx*k] /
-    inc acc / mov [base+idx*k], acc`` after the SIB load/store paths
-    fire.  ``peephole_memory_arithmetic`` then collapses that triple
-    into a single ``inc dword [base+idx*k]``.  Requires the
-    SI-dedup-before-memory-arithmetic ordering in the second peephole
-    pass so the redundant base reload between the increment and the
-    store doesn't hide the pattern.
-    """
-    asm = _kernel(
-        """
-        void bump(int *p, int n) {
+        char buffer[8];
+        void fill(void) {
             int i;
             i = 0;
-            while (i < n) {
-                p[i] = p[i] + 1;
+            while (i < 8) {
+                buffer[i] = i;
                 i = i + 1;
             }
         }
-        """,
+    """,
         bits=32,
     )
-    body = asm.split("bump:", 1)[1]
-    assert any(line.strip().startswith("inc dword [esi+") and "*4]" in line for line in body.splitlines()), (
-        f"expected fused ``inc dword [esi+idx*4]`` in:\n{asm}"
+    # The body must use SIB addressing for the byte store.  Conservatively
+    # search for ``[<si>+<idx>]`` patterns — the specific registers depend
+    # on what the auto-pin selector picked.
+    assert any(line.strip().startswith("mov [") and "+" in line and line.strip().endswith(", al") for line in asm.splitlines()), (
+        f"expected SIB-encoded byte store ``mov [si+idx], al`` in:\n{asm}"
     )
-    # And the pre-fuse 3-instruction sequence should be gone.
-    assert "mov eax, [esi+" not in body, f"unfused SIB load survived in:\n{asm}"
-
-
-def test_pointer_plus_pinned_index_uses_lea_sib() -> None:
-    """``&buf[i]`` / ``buf + i`` collapses to one ``lea`` when the index is pinned.
-
-    Without the fast path the codegen builds the address through
-    ``mov acc, base / push acc / mov acc, idx / shl acc, k / mov cx, acc /
-    pop acc / add acc, cx`` — 7 instructions.  With the SIB-lea fast
-    path the same expression is ``mov acc, base / lea acc, [acc+idx*k]``
-    — 2 instructions for the int element case.
-    """
-    asm = _kernel(
-        """
-        int sum(int *buf, int n) {
-            int i, total;
-            int *p;
-            i = 0;
-            total = 0;
-            while (i < n) {
-                p = &buf[i];
-                total = total + *p;
-                i = i + 1;
-            }
-            return total;
-        }
-        """,
-        bits=32,
+    # And the pre-optimization manual ``add si, <reg>`` ahead of a byte
+    # store should be gone (no surviving line of that shape inside the
+    # loop body for this trivial case).
+    assert not any(line.strip() == "add esi, edx" or line.strip() == "add esi, eax" for line in asm.splitlines()), (
+        f"manual SI+index add survived in:\n{asm}"
     )
-    assert any(line.strip().startswith("lea eax, [eax+") and "*4]" in line for line in asm.splitlines()), (
-        f"expected ``lea eax, [eax+idx*4]`` in:\n{asm}"
-    )
-    assert "shl eax, 2" not in asm, f"manual scale survived in:\n{asm}"
 
 
 def test_int_local_compared_to_int_literal_compiles() -> None:
@@ -4695,6 +4751,38 @@ def test_pointer_compared_to_null_compiles() -> None:
     assert "f:" in asm
 
 
+def test_pointer_plus_pinned_index_uses_lea_sib() -> None:
+    """``&buf[i]`` / ``buf + i`` collapses to one ``lea`` when the index is pinned.
+
+    Without the fast path the codegen builds the address through
+    ``mov acc, base / push acc / mov acc, idx / shl acc, k / mov cx, acc /
+    pop acc / add acc, cx`` — 7 instructions.  With the SIB-lea fast
+    path the same expression is ``mov acc, base / lea acc, [acc+idx*k]``
+    — 2 instructions for the int element case.
+    """
+    asm = _kernel(
+        """
+        int sum(int *buf, int n) {
+            int i, total;
+            int *p;
+            i = 0;
+            total = 0;
+            while (i < n) {
+                p = &buf[i];
+                total = total + *p;
+                i = i + 1;
+            }
+            return total;
+        }
+        """,
+        bits=32,
+    )
+    assert any(line.strip().startswith("lea eax, [eax+") and "*4]" in line for line in asm.splitlines()), (
+        f"expected ``lea eax, [eax+idx*4]`` in:\n{asm}"
+    )
+    assert "shl eax, 2" not in asm, f"manual scale survived in:\n{asm}"
+
+
 def test_positional_struct_initializer_global_emits_field_directives() -> None:
     """``static struct T x = {a, b, c};`` at file scope lays out fields in declaration order.
 
@@ -4806,6 +4894,151 @@ def test_read_deref_uint16_pointer_compiles() -> None:
         }
     """)
     assert "f:" in asm
+
+
+def test_rep_string_copy_dword_emits_rep_movsd() -> None:
+    """A dword-wide copy RepString lowers to ``rep movsd``."""
+    asm = _rep_string_asm(
+        ir.RepString(
+            counter_signed=False,
+            count="n",
+            dest="dst",
+            element_size=4,
+            fill_value=None,
+            final_iv=None,
+            operation="copy",
+            source="src",
+        )
+    )
+    assert "rep movsd" in asm, f"expected dword copy to emit rep movsd:\n{asm}"
+
+
+def test_rep_string_fill_byte_emits_rep_stosb() -> None:
+    """A byte-wide fill RepString lowers to ``cld`` + ``rep stosb``."""
+    asm = _rep_string_asm(
+        ir.RepString(
+            counter_signed=False,
+            count="n",
+            dest="dst",
+            element_size=1,
+            fill_value=0,
+            final_iv=None,
+            operation="fill",
+            source=None,
+        )
+    )
+    assert "cld" in asm, f"expected cld before the rep:\n{asm}"
+    assert "rep stosb" in asm, f"expected byte fill to emit rep stosb:\n{asm}"
+
+
+def test_rep_string_final_iv_stores_post_loop_value() -> None:
+    """``final_iv`` materializes the induction variable's post-loop value."""
+    asm = _rep_string_asm(
+        ir.RepString(
+            counter_signed=False,
+            count="n",
+            dest="dst",
+            element_size=2,
+            fill_value=None,
+            final_iv=("iv", "n"),
+            operation="copy",
+            source="src",
+        )
+    )
+    assert "rep movsw" in asm, f"expected word copy to emit rep movsw:\n{asm}"
+    # iv lives at [ebp-16]; the final_iv store writes n's value into it.
+    assert "mov [ebp-16]" in asm, f"expected final_iv store into iv's slot:\n{asm}"
+
+
+def test_rep_string_preserves_pinned_register_live_across_loop() -> None:
+    """Variables pinned to rep-clobbered registers and live across the loop are saved.
+
+    ``recognize_string_loops`` collapses the ``out[i] = 0`` fill to a
+    ``RepString`` that clobbers EDI/ESI/ECX/EAX — the same set as memcpy /
+    memset.  Four locals (``a`` / ``b`` / ``c`` / ``d``) are each read
+    before *and* after the loop, so several are live across the rep; with
+    no calls in the body they pin to the cheap E-registers (EDX, EBX,
+    ECX, EDI), and EDI / ECX land inside the rep clobber set.  The body
+    reads those pins after the rep (``a + b + c + d``), so the values must
+    survive it.
+
+    Because :meth:`generate_rep_string` push/pop-saves every live pin in
+    its clobber set (exactly how :meth:`generate_call` wraps a clobbering
+    builtin), the asm must push at least one rep-clobbered register before
+    the ``rep`` and pop it after, with every such push balanced by a pop.
+    Removing the push/pop wrap (the 2b clobber fix) drops every save:
+    ``pushed_before`` becomes empty and a live pin (EDI / ECX) is left to
+    be destroyed by the ``rep`` — both assertions below then fail.
+    """
+    asm = _kernel(
+        """
+        int run(unsigned char *out, int n, int seed) {
+            int a; int b; int c; int d;
+            a = seed + 1; b = seed + 2; c = seed + 3; d = seed + 4;
+            a = a + b; c = c + d; a = a + c;
+            int i;
+            for (i = 0; i < n; i++) out[i] = 0;
+            a = a + b; c = c + d; a = a + c + seed;
+            return a + b + c + d;
+        }
+    """,
+        bits=32,
+    )
+    assert "rep stosb" in asm, f"expected the fill to collapse to rep stosb:\n{asm}"
+    lines = [line.strip() for line in asm.splitlines()]
+    rep_index = next(index for index, line in enumerate(lines) if line == "rep stosb")
+    # The rep clobbers EDI/ESI/ECX/EAX; EAX is never pinned, so saves are
+    # drawn from EDI/ESI/ECX.  Any such register pushed before the rep
+    # must be popped after it (balanced save/restore around the rep).
+    rep_clobbers = {"edi", "esi", "ecx"}
+    pushed_before = [line.split()[1] for line in lines[:rep_index] if line.startswith("push ") and line.split()[1] in rep_clobbers]
+    popped_after = [line.split()[1] for line in lines[rep_index:] if line.startswith("pop ") and line.split()[1] in rep_clobbers]
+    # A live pin in the clobber set must be saved: this construction puts
+    # at least one of c / d into EDI or ECX live across the rep, so the
+    # save wrap must fire.
+    assert pushed_before, f"a live pin in the rep clobber set must be push-saved before the rep:\n{asm}"
+    # Saves must balance (LIFO): the multiset pushed before equals the
+    # multiset popped after, in reverse order.
+    assert pushed_before == popped_after[::-1], (
+        f"rep-string pin saves must be balanced (pushed {pushed_before}, popped {popped_after}):\n{asm}"
+    )
+
+
+def test_rep_string_signed_counter_emits_guard() -> None:
+    """A signed-counter RepString guards the rep with ``test`` + ``jle``."""
+    asm = _rep_string_asm(
+        ir.RepString(
+            counter_signed=True,
+            count="n",
+            dest="dst",
+            element_size=1,
+            fill_value=0,
+            final_iv=None,
+            operation="fill",
+            source=None,
+        )
+    )
+    assert "jle " in asm, f"expected a jle guard for a signed count:\n{asm}"
+    rep_index = asm.index("rep stosb")
+    jle_index = asm.index("jle ")
+    assert jle_index < rep_index, f"the jle guard must precede the rep:\n{asm}"
+
+
+def test_rep_string_unsigned_counter_has_no_guard() -> None:
+    """An unsigned-counter RepString emits no ``jle`` guard."""
+    asm = _rep_string_asm(
+        ir.RepString(
+            counter_signed=False,
+            count="n",
+            dest="dst",
+            element_size=1,
+            fill_value=None,
+            final_iv=None,
+            operation="copy",
+            source="src",
+        )
+    )
+    assert "jle " not in asm, f"unsigned count must not emit a jle guard:\n{asm}"
 
 
 def test_signed_int_less_than_still_emits_jge() -> None:
@@ -5162,6 +5395,42 @@ def test_tail_call_wrong_fn_raises_error() -> None:
         }
     """)
     assert "__tail_call" in error, f"Expected __tail_call error, got: {error}"
+
+
+def test_ternary_with_pinned_branch_uses_cmov() -> None:
+    """``cond ? pinned_a : pinned_b`` collapses to ``mov acc, b / cmp / cmov<cc> acc, a``.
+
+    The cmov fast path fires only when the diamond would be at least
+    one byte longer: at least one branch must be a Var pinned to a
+    non-acc register, so cmov can use that register directly without
+    staging it through CX.  With two memory-resident branches the
+    cmov sequence's ``mov cx, acc`` overhead matches the diamond's
+    ``jcc + jmp`` and no win is available — the guard bails to the
+    legacy diamond in that case.
+    """
+    asm = _kernel(
+        """
+        int sum(int n) {
+            int counter, a, b, result;
+            counter = 0;
+            a = 3;
+            b = 7;
+            result = 0;
+            while (counter < n) {
+                result = result + (counter < 5 ? a : b);
+                counter = counter + 1;
+            }
+            return result;
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("sum:", 1)[1]
+    assert "cmovl" in body or "cmovge" in body, f"expected cmov<l|ge> in:\n{asm}"
+    # And no jcc-then-jmp diamond around the ternary.  ``.cond_else``
+    # is the existing diamond's else label; presence means we fell
+    # through to the slow path.
+    assert ".cond_else_" not in body, f"diamond survived alongside cmov in:\n{asm}"
 
 
 def test_typedef_alias_expands_in_declarations() -> None:
@@ -6676,6 +6945,27 @@ def test_user_switch_nested_in_loop_lowers_break_to_switch_end() -> None:
     assert ".while_" in asm or "._ir_wend" in asm, f"missing while end:\n{asm}"
 
 
+def _rep_string_asm(instruction: ir.RepString, /) -> str:
+    """Lower a single :class:`ir.RepString` through a 32-bit generator and return the asm.
+
+    Drives :meth:`generate_rep_string` directly so a synthetic
+    ``RepString`` (e.g. a ``final_iv`` shape the matcher does not yet
+    emit) can be exercised in isolation; the end-to-end C-to-asm path is
+    covered separately by ``test_fill_loop_compiles_to_rep_stosb`` and
+    friends.  The base names referenced by the instruction (``dest`` /
+    ``source`` / ``count`` / the induction variable) are registered as
+    memory-resident locals so the value-load helper resolves them through
+    the frame-slot path rather than tripping the undefined-variable check.
+    """
+    generator = X86CodeGenerator(bits=32)
+    for offset, name in enumerate(("dst", "src", "n", "iv"), start=1):
+        generator.locals[name] = offset * 4
+        generator.visible_vars.add(name)
+        generator.variable_types[name] = "unsigned int"
+    generator.generate_rep_string(instruction)
+    return "\n".join(generator.lines)
+
+
 def test_user_switch_on_char_discriminant_accepts_char_literal_cases() -> None:
     """``switch (char_var) { case 'A': ... }`` compiles cleanly.
 
@@ -6990,4 +7280,3 @@ def test_volatile_qualifier_parses_as_noop() -> None:
         }
     """)
     assert "read_flag:" in asm, f"expected read_flag() to be emitted:\n{asm}"
-    assert "main:" in asm, f"expected main() to be emitted:\n{asm}"

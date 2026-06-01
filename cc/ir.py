@@ -197,6 +197,30 @@ class LoopBoundary(_NoValueFields):
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class RepString:
+    """``rep movs``/``rep stos`` over an element-wise loop region.
+
+    Produced by :func:`cc.loops.recognize_string_loops` when a natural
+    loop is a unit-stride fill or copy.  Side-effecting (a store); never
+    eliminated by DCE.  ``count`` is the iteration count n; for a signed
+    counter the emitter guards ``n <= 0`` before the ``rep``.  ``final_iv``
+    materializes the induction variable's post-loop value when it is read
+    after the loop.
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("count", "fill_value")
+
+    operation: str  # "fill" | "copy"
+    element_size: int  # 1 | 2 | 4
+    dest: str  # base name (pointer / array)
+    source: str | None  # base name for copy; None for fill
+    count: Value  # iteration count n
+    fill_value: Value | None  # fill value; None for copy
+    counter_signed: bool
+    final_iv: tuple[str, Value] | None
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Return:
     """Function return, optionally with a value."""
 
@@ -271,6 +295,7 @@ Instruction = (
     | Jump
     | Label
     | LoopBoundary
+    | RepString
     | Return
     | Switch
     | TailCall

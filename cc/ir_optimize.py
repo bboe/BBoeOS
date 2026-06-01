@@ -50,12 +50,14 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 from cc import ast_nodes, ir
-from cc.loops import hoist_loop_invariants, reduce_loop_strength
+from cc.loops import hoist_loop_invariants, recognize_string_loops, reduce_loop_strength, string_loop_type_maps
 from cc.ssa import optimize_ssa
 from cc.tokens import INVERT_COMPARISON
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from cc.target import X86CodegenTarget
 
 #: Binary operations safe to constant-fold with Python ``int`` arithmetic.
 #: Bit-pattern preserving + signedness-independent.  Comparisons, division,
@@ -167,6 +169,7 @@ def _has_side_effects(instruction: ir.Instruction, /) -> bool:
             ir.Jump,
             ir.Label,
             ir.LoopBoundary,
+            ir.RepString,
             ir.Return,
             ir.TailCall,
         ),
@@ -205,6 +208,11 @@ def _instruction_value_operands(instruction: ir.Instruction, /) -> tuple[ir.Valu
         return (instruction.index, instruction.source)
     if isinstance(instruction, ir.BranchFalse):
         return (instruction.left, instruction.right)
+    if isinstance(instruction, ir.RepString):
+        operands = [instruction.count]
+        if instruction.fill_value is not None:
+            operands.append(instruction.fill_value)
+        return tuple(operands)
     if isinstance(instruction, ir.Return):
         return () if instruction.value is None else (instruction.value,)
     return ()
@@ -365,7 +373,17 @@ class Optimizer:
 
     Stateless: a single instance can optimize many programs.  Each
     function body is optimized independently — no inter-procedural state.
+
+    *target* (when supplied) lets the rep-string loop recognizer resolve
+    element widths and counter signedness from each function's declared
+    types — the only pass that is target-width-dependent.  When ``None``
+    (e.g. unit tests that drive the scalar pipeline directly) the
+    rep-string pass is skipped; every other pass is target-agnostic.
     """
+
+    def __init__(self, *, target: X86CodegenTarget | None = None) -> None:
+        """Store the codegen *target* used to resolve rep-string type maps."""
+        self._target = target
 
     def optimize(self, program: ir.Program, /) -> ir.Program:
         """Return a new ``Program`` with each function body optimized in place.
@@ -384,18 +402,27 @@ class Optimizer:
         miscompiling code that relies on the post-call value.
         """
         global_names = _collect_global_names(program)
-        optimized_functions = [
-            ir.Function(
-                ast_node=function.ast_node,
-                body=self._optimize_body(
-                    function.body,
-                    carry_return=function.ast_node.carry_return,
-                    excluded_ssa_names=global_names,
-                ),
-                strings=function.strings,
+        optimized_functions = []
+        for function in program.functions:
+            if self._target is not None:
+                element_sizes, signed_counters = string_loop_type_maps(
+                    function.ast_node, program_globals=program.globals, target=self._target
+                )
+            else:
+                element_sizes, signed_counters = None, None
+            optimized_functions.append(
+                ir.Function(
+                    ast_node=function.ast_node,
+                    body=self._optimize_body(
+                        function.body,
+                        carry_return=function.ast_node.carry_return,
+                        excluded_ssa_names=global_names,
+                        signed_counters=signed_counters,
+                        variable_element_sizes=element_sizes,
+                    ),
+                    strings=function.strings,
+                )
             )
-            for function in program.functions
-        ]
         return ir.Program(functions=optimized_functions, globals=program.globals)
 
     @staticmethod
@@ -769,6 +796,8 @@ class Optimizer:
         *,
         carry_return: bool = False,
         excluded_ssa_names: frozenset[str] = frozenset(),
+        signed_counters: dict[str, bool] | None = None,
+        variable_element_sizes: dict[str, int] | None = None,
     ) -> list[ir.Instruction]:
         """Drive the IR-level optimization pipeline to fixed point.
 
@@ -781,13 +810,23 @@ class Optimizer:
         dropping a dead label can expose a redundant ``Jump`` whose
         target collapsed.
 
-        After the scalar pipeline converges, the body round-trips through
-        SSA so the Phase 3 phi / copy-propagation passes can collapse
-        joins the linear pipeline can't see; another scalar fixed-point
-        cleans up the resulting copies.  Then
-        :func:`cc.loops.hoist_loop_invariants` runs once, and the scalar
-        pipeline runs one more time to clean up the rewritten loops
-        (collapsing empty Jump-only preheaders that no instruction
+        After the first scalar fixed point converges,
+        :func:`cc.loops.recognize_string_loops` runs once — *before* the
+        SSA round-trip — because SSA copy-propagates a fill / copy loop's
+        induction-variable entry value into its comparison and index
+        (the ``i++`` increment lowers to an opaque ``Block`` SSA can't see
+        through), which erases the recognizable loop shape.  Collapsing the
+        loop to a single :class:`cc.ir.RepString` first both lets the
+        matcher fire and hands SSA / LICM / strength-reduction a clean node
+        they leave untouched; the scalar pipeline then drops the now-dead
+        IV init.
+
+        The body next round-trips through SSA so the Phase 3 phi /
+        copy-propagation passes can collapse joins the linear pipeline
+        can't see; another scalar fixed-point cleans up the resulting
+        copies.  Then :func:`cc.loops.hoist_loop_invariants` runs once, and
+        the scalar pipeline runs one more time to clean up the rewritten
+        loops (collapsing empty Jump-only preheaders that no instruction
         populated, propagating through newly-exposed dominance).
 
         Tail-call elimination runs once after fixed-point because it
@@ -801,8 +840,34 @@ class Optimizer:
         and :func:`cc.loops.hoist_loop_invariants` so neither renames
         nor hoists across names the caller knows are call-clobbered —
         typically program globals from :func:`_collect_global_names`.
+
+        ``variable_element_sizes`` / ``signed_counters`` are the per-
+        function type maps (from :func:`cc.loops.string_loop_type_maps`)
+        that the rep-string recognizer uses to pick the ``rep`` width and
+        drop the ``n <= 0`` guard for a provably unsigned counter.  Both
+        ``None`` (no target supplied to the :class:`Optimizer`) skips the
+        rep-string pass entirely.
         """
         current = self._scalar_fixed_point(list(body))
+        # Rep-string recognition runs on the canonical pre-SSA loop shape
+        # (``BranchFalse(left=IV, ...)`` with the IV's ``i++`` increment
+        # still in the body).  The SSA round-trip below cannot see through
+        # the ``Block(IncrementDecrement)`` that the IR builder emits for
+        # ``i++``, so it copy-propagates the IV's entry value (0) into the
+        # comparison / index and erases the recognizable shape — running
+        # the matcher after SSA would never fire on real loops.  Lowering
+        # the fill / copy to a single :class:`cc.ir.RepString` here also
+        # hands SSA a clean node (count / fill_value are ordinary Value
+        # operands) it leaves untouched, and spares LICM / strength
+        # reduction from re-analyzing the collapsed loop.
+        if (
+            self._target is not None
+            and (
+                after_rep := recognize_string_loops(current, signed_counters=signed_counters, variable_element_sizes=variable_element_sizes)
+            )
+            != current
+        ):
+            current = self._scalar_fixed_point(after_rep)
         if (after_ssa := optimize_ssa(current, excluded_names=excluded_ssa_names)) != current:
             current = self._scalar_fixed_point(after_ssa)
         if (after_licm := hoist_loop_invariants(current, excluded_names=excluded_ssa_names)) != current:
