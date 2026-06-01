@@ -129,3 +129,13 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   self-hosted assembler.  Backlog item #3.
   Plan: [2026-06-01-cc-rep-string-loops-plan.md](./2026-06-01-cc-rep-string-loops-plan.md).
   Status: implemented on branch `bboe/cc-rep-string-loops` (PR #566).
+- [2026-06-01 — cc.py `Place` refactor](./2026-06-01-cc-place-refactor-plan.md)
+  — unify the ~15-node access-expression zoo (`Index`, `MemberAccess`,
+  `IndexMember*`, `Deref*`, `DoubleIndex`, …) behind a single recursive
+  `Place` (addressable-location) AST plus five `Place*` operation nodes
+  and a recursive `_resolve_place` address core, so chained accesses
+  like `a[i][j].f[k]` compose for free.  Design context lives in
+  `docs/cc_future_work.md` ("AST representation") on `main`.  Plan-only
+  doc; staged — Plan 1 = `Place` infra + the `IndexMember*` family as a
+  byte-exact proof-of-concept, with the IR-touching `Index` fold
+  sequenced last.  Status: planned.
