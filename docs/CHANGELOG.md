@@ -39,6 +39,20 @@ time.
 
 ### Fixed
 
+- **cc.py miscompiled unit-stride loops that store the induction variable.**
+  `for (i = 0; i < n; i++) buffer[i] = i;` (and any loop whose body stored the
+  advancing index itself) lowered the `i++` step to an opaque
+  `Block(IncrementDecrement)` whose only reference to `i` is the bare
+  `target_name` string. The SSA eligibility filter's AST walker yielded names
+  only from `Var` nodes, so it never saw that write and versioned `i` as
+  loop-invariant — collapsing the guard to `cmp 0, n` (an infinite loop for `n >
+  0`) and the stored value to a constant `0`. The walker now also yields the
+  bare-string `target_name` (`IncrementDecrement` / `DerefIncrement{,Assign}`)
+  and `object_name` (the `Member*` family) lvalue references in both copies
+  (`cc/ssa.py`, `cc/ir_optimize.py`), so such loops stay on the un-versioned
+  scalar path. Pre-existing (not a regression); surfaced during the rep-string
+  loop work (PR #566), which correctly left these non-idiom loops on the scalar
+  path where the bug lived.
 - **Object mode left inline-asm `_g_<name>` global references undefined.** The
   self-hosted assembler (`asm`) reaches its file-scope globals from inline asm
   under the legacy `_g_<name>` spelling, but object mode emitted only the bare
