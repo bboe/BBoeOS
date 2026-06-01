@@ -55,7 +55,7 @@ sequenced **last**. Plans are independently shippable:
   straight from the AST, bypassing SSA + the optimizer, while `Index` /
   `IndexAssign` are in the IR specifically so the loop / rep-string optimizer can
   see subscripts (see "IR vs. direct emission: why the access nodes bypass the
-  optimizer" in `docs/cc_future_work.md` on `main`). Two viable targets:
+  optimizer" in `2026-06-01-cc-place-refactor-design.md`). Two viable targets:
   - **(a) Keep the small IR.** Make `_resolve_place` the *single shared
     address-computation routine* that both the IR `Index` lowering and the direct
     member emission call. Dedupes the pointer math (the worst facet of the dual
