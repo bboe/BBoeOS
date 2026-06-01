@@ -722,7 +722,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # lowering leaves :attr:`_current_call_pinned_initialized`
             # at ``None`` so any nested calls fall back to the
             # conservative full save-set.
-            if isinstance(instruction, (ir.Call, ir.CarryBranch, ir.TailCall)):
+            if isinstance(instruction, (ir.Call, ir.CarryBranch, ir.RepString, ir.TailCall)):
+                # ``ir.RepString`` clobbers EDI/ESI/ECX/EAX like memcpy /
+                # memset; :meth:`generate_rep_string` saves the live pins
+                # among them, and consults this same liveness filter so a
+                # pin whose local is not yet written isn't pushed (its
+                # value is garbage).
                 result[id(instruction)] = frozenset(defined)
             for target_name in self._ir_instruction_store_targets(instruction):
                 if target_name in pinned_locals:
@@ -2233,6 +2238,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # IndexAssign writes through a base pointer, not to the
             # named base itself — leaves the base's register
             # contents unchanged.  Not a store to the pin.
+            return []
+        if isinstance(instruction, ir.RepString):
+            # A rep-string fill / copy writes through ``dest`` (and reads
+            # ``source``) but those are base pointers, not stores to the
+            # named local.  Only ``final_iv`` materializes a named local
+            # — the induction variable's post-loop value.  The matcher
+            # currently only emits ``final_iv=None`` so this contributes
+            # nothing today, but recording it keeps the pinned-liveness
+            # tracker correct once final_iv materialization lands.
+            if instruction.final_iv is not None:
+                return [instruction.final_iv[0]]
             return []
         return []
 

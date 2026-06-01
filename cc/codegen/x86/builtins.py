@@ -807,8 +807,7 @@ class BuiltinsMixin:
             (self.target.si_register, source_argument),
             (self.target.count_register, count_argument),
         ])
-        self.emit("        cld")
-        self.emit("        rep movsb")
+        self._emit_rep_move(element_size=1)
         self.ax_clear()
 
     def builtin_memset(self, arguments: list[Node], /) -> None:
@@ -829,8 +828,7 @@ class BuiltinsMixin:
             (self.target.acc, value_argument),
             (self.target.count_register, count_argument),
         ])
-        self.emit("        cld")
-        self.emit("        rep stosb")
+        self._emit_rep_fill(element_size=1)
         self.ax_clear()
 
     def builtin_mkdir(

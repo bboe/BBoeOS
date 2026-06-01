@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import fields
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -724,6 +724,16 @@ class EmissionMixin:
             self.emit(f"        mov word [{scratch}], {self.target.low_word(accumulator)}")
         else:
             self.emit(f"        mov [{scratch}], {accumulator}")
+
+    def _emit_rep_fill(self, *, element_size: int) -> None:
+        """Emit cld + rep stos{b,w,d}. EDI/EAX/ECX preloaded by caller."""
+        self.emit("        cld")
+        self.emit(f"        rep stos{self._rep_width_suffix(element_size)}")
+
+    def _emit_rep_move(self, *, element_size: int) -> None:
+        """Emit cld + rep movs{b,w,d}. EDI/ESI/ECX preloaded by caller."""
+        self.emit("        cld")
+        self.emit(f"        rep movs{self._rep_width_suffix(element_size)}")
 
     def _emit_scale_index(self, register: str, /, *, scale: int) -> None:
         """Multiply *register* by *scale* (1, 2, or 4) in place.
@@ -1670,6 +1680,17 @@ class EmissionMixin:
             return False  # stack arg — can't clean up after a jmp
         return True
 
+    #: Canonical (16-bit-name) clobber sets for a recognized rep-string
+    #: loop, keyed by operation.  Mirrors ``BUILTIN_CLOBBERS["memcpy"]`` /
+    #: ``["memset"]`` exactly — a ``rep movs`` touches DI/SI/CX/AX (AX is
+    #: cleared by the trailing ``ax_clear``), a ``rep stos`` touches
+    #: DI/CX/AX.  ``_pinned_registers_to_save`` normalises both sides
+    #: through ``target.low_word`` so these match E-register pins too.
+    REP_STRING_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
+        "copy": frozenset({"ax", "cx", "di", "si"}),
+        "fill": frozenset({"ax", "cx", "di"}),
+    }
+
     def _lower_ir_instruction(self, instruction: ir.Instruction) -> None:
         match instruction:
             case ir.BinaryOperation(destination=destination, operation=operation, left=left, right=right):
@@ -1762,6 +1783,12 @@ class EmissionMixin:
                     if continue_label is not None:
                         self.loop_continue_labels.pop()
                     self.loop_end_labels.pop()
+            case ir.RepString():
+                self._current_call_pinned_initialized = self._ir_call_pinned_initialized.get(id(instruction))
+                try:
+                    self.generate_rep_string(instruction)
+                finally:
+                    self._current_call_pinned_initialized = None
             case ir.Switch():
                 self._generate_ir_switch(instruction)
             case ir.Block(node=node):
@@ -1852,6 +1879,11 @@ class EmissionMixin:
         # the tail jmp is valid and the named register's stale value
         # is never used.
         return any(self._node_contains_var(stmt, param_name) for stmt in body)
+
+    @staticmethod
+    def _rep_width_suffix(element_size: int, /) -> str:
+        """Map element size 1/2/4 to the string-op mnemonic suffix."""
+        return {1: "b", 2: "w", 4: "d"}[element_size]
 
     @staticmethod
     def _substitute_extended_asm_template(
@@ -2208,7 +2240,7 @@ class EmissionMixin:
         # before codegen so every backend (current x86, future ARM /
         # x86-64) benefits without having to re-implement equivalent
         # peephole rewrites at the asm-text level.
-        ir_program = Optimizer().optimize(ir_program)
+        ir_program = Optimizer(target=self.target).optimize(ir_program)
         ir_by_name = {
             f.ast_node.name: f
             for f in ir_program.functions
@@ -4008,6 +4040,64 @@ class EmissionMixin:
             return
         message = f"unsupported 'unsigned long' expression: {type(expression).__name__}"
         raise CompileError(message, line=expression.line)
+
+    def generate_rep_string(self, instruction: ir.RepString) -> None:
+        """Lower :class:`ir.RepString` to ``rep movs{b,w,d}`` / ``rep stos{b,w,d}``.
+
+        Loads the destination base into DI, the source base (copy) into
+        SI or the fill value (fill) into the accumulator, and the
+        iteration count into the count register.  When the loop counter
+        is signed (``counter_signed``) a ``test``/``jle`` guard skips the
+        ``rep`` for a non-positive count — ``rep`` with ECX interpreted
+        as unsigned would otherwise run up to 4 G iterations on a
+        negative count.  ``final_iv``, when present, materializes the
+        induction variable's post-loop value via the same store path as
+        :class:`ir.Copy`.
+
+        The three operand loads (DI=dest, SI=source / AX=fill_value,
+        CX=count) are routed through :meth:`_emit_builtin_arg_moves` — the
+        same topological scheduler memcpy / memset use — so loading one
+        operand into DI/SI can't clobber a pinned-register source another
+        operand still needs (e.g. ``count`` pinned to a register the
+        ``dest`` load would overwrite).
+
+        Because a rep-string clobbers EDI/ESI/ECX/EAX (see
+        :attr:`REP_STRING_CLOBBERS`), any caller pin living in that set is
+        push/pop-saved around the ``rep`` exactly as :meth:`generate_call`
+        wraps a clobbering builtin.  ``_current_call_pinned_initialized``
+        (set by the IR lowering dispatch from
+        :meth:`_compute_pinned_initialized_per_call`) filters out pins
+        whose local isn't written yet so we never save garbage.
+        """
+        clobbers = self.REP_STRING_CLOBBERS[instruction.operation]
+        saved = self._pinned_registers_to_save(clobbers)
+        for register in saved:
+            self.emit(f"        push {register}")
+        count_register = self.target.count_register
+        register_args: list[tuple[str, Node]] = [(self.target.di_register, Var(name=instruction.dest))]
+        if instruction.operation == "copy":
+            register_args.append((self.target.si_register, Var(name=instruction.source)))
+        else:
+            register_args.append((self.target.acc, self._ir_value_to_ast(instruction.fill_value)))
+        register_args.append((count_register, self._ir_value_to_ast(instruction.count)))
+        self._emit_builtin_arg_moves(register_args)
+        skip_label: str | None = None
+        if instruction.counter_signed:
+            skip_label = f".rep_skip_{self.new_label()}"
+            self.emit(f"        test {count_register}, {count_register}")
+            self.emit(f"        jle {skip_label}")
+        if instruction.operation == "copy":
+            self._emit_rep_move(element_size=instruction.element_size)
+        else:
+            self._emit_rep_fill(element_size=instruction.element_size)
+        if skip_label is not None:
+            self.emit(f"{skip_label}:")
+        for register in reversed(saved):
+            self.emit(f"        pop {register}")
+        if instruction.final_iv is not None:
+            iv_name, iv_value = instruction.final_iv
+            self.emit_store_local(expression=self._ir_value_to_ast(iv_value), name=iv_name)
+        self.ax_clear()
 
     def generate_return(self, statement: Return, /) -> None:
         """Generate assembly for a return statement.

@@ -13,6 +13,12 @@ time.
 
 ### Changed
 
+- **cc.py recognizes hand-written init/copy loops as `rep` string ops.** A
+  unit-stride `for (i=0;i<n;i++) dst[i]=V;` / `dst[i]=src[i];` now lowers to
+  `rep stos{b,w,d}` / `rep movs{b,w,d}` (element widths 1/2/4) via a new IR pass
+  over natural loops.  Signed loop bounds are guarded so a negative count is a
+  no-op (matching C), not a 4 GB `rep`.  The self-hosted assembler gained
+  `movsd`/`stosd` to round-trip the 4-byte forms.
 - **Shell: tab completion.** Press Tab to complete command names (builtins and
   executables in `bin/`) in first-word position, or files and directories in
   argument position.  Single matches are inserted in-place (directories get a

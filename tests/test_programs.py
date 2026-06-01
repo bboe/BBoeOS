@@ -929,6 +929,15 @@ TESTS: list[ProgramTest] = [
         r"^\.\./",
         filesystems=_EXT2_ONLY,
     ),
+    # rep_loops_test exercises cc.py's rep-string loop rewrite at runtime:
+    # unit-stride fills (rep stosb/stosw/stosd), a copy (rep movsb), and a
+    # signed-counter loop with a negative bound whose n<=0 guard must skip
+    # the rep entirely (leaving b unchanged).  The work lives off main() so
+    # codegen routes it through the IR path where the rewrite fires.  The
+    # printed values prove the rewritten loops wrote the right full-width
+    # bytes: 65 (0x41) 4660 (0x1234) 3735928559 (0xdeadbeef), then cb[0] and
+    # the guard-skipped b[0], both still 65.
+    ProgramTest("rep_loops_test", ["rep_loops_test"], r"^65 4660 3735928559 65 65$"),
     ProgramTest(
         "rm",
         ["cp src/parse_ip.asm out.asm", "rm out.asm", "cat out.asm"],
