@@ -20,6 +20,10 @@ time.
   (`int cx, cy;`); the empty statement (`;`, e.g. a `while (cond);` spin loop);
   and `&obj.field[i]` / `&ptr->field[i]` (address of an indexed array/pointer
   member, scaled by a general `imul` for struct-sized elements).
+- **cc.py dereference of a parenthesized pointer expression (`*(p+1)`).** The
+  `*(base + index)` and `*(base)` forms now desugar to `base[index]`, so kilo's
+  `*(p+1)` / `*(p+klen)` compile (previously only `*name`, `*++p`, and the `*(T
+  *)cast` form were accepted).
 - **cc.py `--permissive` mode for third-party C.** An opt-in flag that relaxes
   the house-style comparison strictness: integer literal `0` counts as a
   null-pointer constant, so `if (p)`, `p == 0`, and `c != 0` compile without the
