@@ -20,6 +20,45 @@ def _function(body: list[ir.Instruction], /) -> ir.Function:
     return ir.Function(ast_node=ast, body=body, strings=[])
 
 
+def test_branch_false_target_predecessor_retargets_to_preheader() -> None:
+    """A predecessor whose ``BranchFalse`` names the header has its target rewritten to the preheader."""
+    body = [
+        ir.BranchFalse(left="x", operation="==", right=0, target=".loop"),
+        ir.Return(value=None),
+        ir.Label(name=".loop"),
+        ir.BranchFalse(left="y", operation="==", right=0, target=".end"),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value=None),
+    ]
+    graph = cfg.build_cfg(_function(body).body)
+    found = loops.natural_loops(graph)
+    preheaders = loops.insert_preheaders(graph, loops=found)
+    preheader = preheaders[found[0]]
+    # The entry's BranchFalse(target=".loop") now names the preheader.
+    entry_terminator = graph.entry.terminator
+    assert isinstance(entry_terminator, ir.BranchFalse)
+    assert entry_terminator.target == preheader.label
+
+
+def test_do_while_loop_header_is_single_predecessor_join() -> None:
+    """A do-while body's header is reached only via the back-edge after entry — single latch."""
+    body = [
+        ir.Label(name=".body"),
+        ir.Copy(destination="x", source=1),
+        ir.BranchFalse(left="x", operation="==", right=0, target=".body"),
+        ir.Return(value=None),
+    ]
+    graph = cfg.build_cfg(_function(body).body)
+    result = loops.natural_loops(graph)
+    assert len(result) == 1
+    loop = result[0]
+    assert loop.header is graph.label_to_block[".body"]
+    assert loop.latches == frozenset({graph.label_to_block[".body"]})
+    # Self-loop: body is just the header.
+    assert loop.body == frozenset({graph.label_to_block[".body"]})
+
+
 def test_hoist_invariant_binary_operation_moves_to_preheader() -> None:
     """A BinaryOp whose operands are loop-external moves out of the body to the preheader."""
     body = [
@@ -130,6 +169,42 @@ def test_hoist_respects_dependency_order_in_preheader() -> None:
         if isinstance(instruction, ir.BinaryOperation) and instruction.destination == "_ir_t2"
     )
     assert t1_index < t2_index
+
+
+def test_hoist_scans_carry_branch_terminator_for_address_taken_locals() -> None:
+    """Address-taken locals passed to a ``CarryBranch``-wrapped call are loop-defined.
+
+    Regression: ``_names_defined_in_loop`` only walked
+    ``block.instructions``, missing the AST inside
+    :class:`cc.ir.CarryBranch` terminators.  A local declared in the
+    function and passed via :class:`cc.ast_nodes.AddressOf` to a
+    carry-return callee inside the loop was therefore mis-classified
+    as loop-external, and a subsequent ``BinaryOperation`` reading
+    that local was hoisted ahead of the call.  Caught by
+    ``kernel/fs/fd/fs.c::fd_read_file``, whose
+    ``chunk = 512 - byte_offset;`` was lifted past the
+    ``vfs_read_sec(&byte_offset, …)`` that fills ``byte_offset`` each
+    iteration.
+    """
+    call_ast = ast_nodes.Call(
+        line=1,
+        args=[ast_nodes.AddressOf(line=1, var=ast_nodes.Var(line=1, name="byte_offset")), ast_nodes.Var(line=1, name="pointer")],
+        name="vfs_read_sec",
+    )
+    body = [
+        ir.Copy(destination="byte_offset", source=0),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".loop"),
+        ir.CarryBranch(call_ast=call_ast, target=".kont", when="clear"),
+        ir.Return(value=0),
+        ir.Label(name=".kont"),
+        ir.BinaryOperation(destination="_ir_t", left=512, operation="-", right="byte_offset"),
+        ir.BranchFalse(left="_ir_t", operation="==", right=0, target=".end"),
+        ir.Jump(target=".loop"),
+        ir.Label(name=".end"),
+        ir.Return(value="_ir_t"),
+    ]
+    assert loops.hoist_loop_invariants(body) is body
 
 
 def test_hoist_skips_function_with_inline_asm() -> None:
@@ -279,58 +354,6 @@ def test_hoist_treats_block_defined_local_as_loop_defined() -> None:
     assert binary_index > block_index
 
 
-def test_hoist_variant_binary_operation_stays_in_body() -> None:
-    """A BinaryOp whose operand is defined inside the loop is not moved."""
-    body = [
-        ir.Copy(destination="a", source=10),
-        ir.Jump(target=".loop"),
-        ir.Label(name=".loop"),
-        ir.Copy(destination="b", source=1),  # 'b' defined inside loop
-        ir.BinaryOperation(destination="_ir_t", left="a", right="b", operation="+"),
-        ir.BranchFalse(left="_ir_t", operation="==", right=0, target=".end"),
-        ir.Jump(target=".loop"),
-        ir.Label(name=".end"),
-        ir.Return(value=None),
-    ]
-    assert loops.hoist_loop_invariants(body) is body
-
-
-def test_hoist_scans_carry_branch_terminator_for_address_taken_locals() -> None:
-    """Address-taken locals passed to a ``CarryBranch``-wrapped call are loop-defined.
-
-    Regression: ``_names_defined_in_loop`` only walked
-    ``block.instructions``, missing the AST inside
-    :class:`cc.ir.CarryBranch` terminators.  A local declared in the
-    function and passed via :class:`cc.ast_nodes.AddressOf` to a
-    carry-return callee inside the loop was therefore mis-classified
-    as loop-external, and a subsequent ``BinaryOperation`` reading
-    that local was hoisted ahead of the call.  Caught by
-    ``kernel/fs/fd/fs.c::fd_read_file``, whose
-    ``chunk = 512 - byte_offset;`` was lifted past the
-    ``vfs_read_sec(&byte_offset, …)`` that fills ``byte_offset`` each
-    iteration.
-    """
-    call_ast = ast_nodes.Call(
-        line=1,
-        args=[ast_nodes.AddressOf(line=1, var=ast_nodes.Var(line=1, name="byte_offset")), ast_nodes.Var(line=1, name="pointer")],
-        name="vfs_read_sec",
-    )
-    body = [
-        ir.Copy(destination="byte_offset", source=0),
-        ir.Jump(target=".loop"),
-        ir.Label(name=".loop"),
-        ir.CarryBranch(call_ast=call_ast, target=".kont", when="clear"),
-        ir.Return(value=0),
-        ir.Label(name=".kont"),
-        ir.BinaryOperation(destination="_ir_t", left=512, operation="-", right="byte_offset"),
-        ir.BranchFalse(left="_ir_t", operation="==", right=0, target=".end"),
-        ir.Jump(target=".loop"),
-        ir.Label(name=".end"),
-        ir.Return(value="_ir_t"),
-    ]
-    assert loops.hoist_loop_invariants(body) is body
-
-
 def test_hoist_treats_excluded_global_as_loop_defined_across_a_call() -> None:
     """A global named in ``excluded_names`` is loop-variant when the body has a call.
 
@@ -386,73 +409,20 @@ def test_hoist_treats_increment_decrement_target_as_loop_defined() -> None:
     assert result is body
 
 
-def test_self_loop_body_does_not_swallow_entry_block() -> None:
-    """A self-loop's body is just ``{header}`` — the entry block must NOT be pulled in.
-
-    Regression: walking predecessors from a self-looping latch (where
-    ``latch is header``) used to step out of the loop via the latch's
-    other predecessors (the entry fall-through into the header),
-    incorrectly classifying pre-loop instructions as loop-body
-    candidates for LICM to hoist.  Manifested as use-before-def in
-    kernel/drivers/ata.c, where ``saved_lba = lba & 0xFFFF;`` (above
-    a ``while (1) { … }``) had its right-hand side hoisted past its
-    own Copy use.
-    """
+def test_hoist_variant_binary_operation_stays_in_body() -> None:
+    """A BinaryOp whose operand is defined inside the loop is not moved."""
     body = [
-        ir.Copy(destination="saved", source=1),
+        ir.Copy(destination="a", source=10),
+        ir.Jump(target=".loop"),
         ir.Label(name=".loop"),
-        ir.BranchFalse(left="status", operation="==", right=0, target=".loop"),
-        ir.Return(value=None),
-    ]
-    graph = cfg.build_cfg(_function(body).body)
-    found = loops.natural_loops(graph)
-    assert len(found) == 1
-    loop = found[0]
-    entry = graph.entry
-    header = graph.label_to_block[".loop"]
-    assert header is loop.header
-    assert entry is not header
-    assert entry not in loop.body
-    assert loop.body == frozenset({header})
-
-
-def test_branch_false_target_predecessor_retargets_to_preheader() -> None:
-    """A predecessor whose ``BranchFalse`` names the header has its target rewritten to the preheader."""
-    body = [
-        ir.BranchFalse(left="x", operation="==", right=0, target=".loop"),
-        ir.Return(value=None),
-        ir.Label(name=".loop"),
-        ir.BranchFalse(left="y", operation="==", right=0, target=".end"),
+        ir.Copy(destination="b", source=1),  # 'b' defined inside loop
+        ir.BinaryOperation(destination="_ir_t", left="a", right="b", operation="+"),
+        ir.BranchFalse(left="_ir_t", operation="==", right=0, target=".end"),
         ir.Jump(target=".loop"),
         ir.Label(name=".end"),
         ir.Return(value=None),
     ]
-    graph = cfg.build_cfg(_function(body).body)
-    found = loops.natural_loops(graph)
-    preheaders = loops.insert_preheaders(graph, loops=found)
-    preheader = preheaders[found[0]]
-    # The entry's BranchFalse(target=".loop") now names the preheader.
-    entry_terminator = graph.entry.terminator
-    assert isinstance(entry_terminator, ir.BranchFalse)
-    assert entry_terminator.target == preheader.label
-
-
-def test_do_while_loop_header_is_single_predecessor_join() -> None:
-    """A do-while body's header is reached only via the back-edge after entry — single latch."""
-    body = [
-        ir.Label(name=".body"),
-        ir.Copy(destination="x", source=1),
-        ir.BranchFalse(left="x", operation="==", right=0, target=".body"),
-        ir.Return(value=None),
-    ]
-    graph = cfg.build_cfg(_function(body).body)
-    result = loops.natural_loops(graph)
-    assert len(result) == 1
-    loop = result[0]
-    assert loop.header is graph.label_to_block[".body"]
-    assert loop.latches == frozenset({graph.label_to_block[".body"]})
-    # Self-loop: body is just the header.
-    assert loop.body == frozenset({graph.label_to_block[".body"]})
+    assert loops.hoist_loop_invariants(body) is body
 
 
 def test_insert_preheader_for_simple_while_loop_routes_entry_through_preheader() -> None:
@@ -583,6 +553,22 @@ def test_irreducible_back_edge_target_does_not_dominate_source_no_loop() -> None
     # Since entry → .B exists without going through .A, .A does not dominate .B.
     result = loops.natural_loops(graph)
     assert result == []
+
+
+def test_iter_read_names_yields_rep_string_dest_source_count_and_final_iv() -> None:
+    """``_iter_read_names`` reports every name a ``RepString`` reads: dest, source, count, and final_iv value."""
+    rep = ir.RepString(
+        operation="copy",
+        element_size=1,
+        dest="p",
+        source="q",
+        count="n",
+        fill_value=None,
+        counter_signed=True,
+        final_iv=("i", "m"),
+    )
+    names = set(loops._iter_read_names(rep))  # noqa: SLF001
+    assert {"p", "q", "n", "m"} <= names
 
 
 def test_linear_function_has_no_loops() -> None:
@@ -872,6 +858,490 @@ def test_nested_loops_are_detected_separately() -> None:
     # Inner header is in outer body but not vice versa.
     assert graph.label_to_block[".inner"] in outer.body
     assert graph.label_to_block[".outer"] not in inner.body
+
+
+def test_recognize_copy_loop_rejects_iv_read_after_loop() -> None:
+    """Item A: the IV-liveness check applies to the copy idiom too."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.Index(destination="_ir_t0", base="s", index="i"),
+        ir.IndexAssign(base="d", index="i", source="_ir_t0"),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+        ir.Return(value="i"),
+    ]
+    out = loops.recognize_string_loops(body, variable_element_sizes={"d": 4, "s": 4})
+    assert out is body
+
+
+def test_recognize_copy_loop_rejects_multiuse_temp() -> None:
+    """The load temp must be used only by the store; an extra reader of it rejects the copy."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.Index(destination="_ir_t0", base="s", index="i"),
+        ir.IndexAssign(base="d", index="i", source="_ir_t0"),
+        ir.IndexAssign(base="e", index="i", source="_ir_t0"),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+    ]
+    out = loops.recognize_string_loops(body, variable_element_sizes={"d": 4, "s": 4, "e": 4})
+    assert not any(isinstance(instruction, ir.RepString) for instruction in out)
+
+
+def test_recognize_copy_loop_rejects_unknown_element_size() -> None:
+    """With no element-size map the bases' widths are unknown, so the copy is NOT rewritten (no byte-default)."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.Index(destination="_ir_t0", base="s", index="i"),
+        ir.IndexAssign(base="d", index="i", source="_ir_t0"),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+    ]
+    out = loops.recognize_string_loops(body)
+    assert not any(isinstance(instruction, ir.RepString) for instruction in out)
+    assert any(isinstance(instruction, ir.IndexAssign) for instruction in out)
+
+
+def test_recognize_copy_loop_rejects_width_mismatch() -> None:
+    """When the element-size map disagrees on source vs dest width, the copy is rejected."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.Index(destination="_ir_t0", base="s", index="i"),
+        ir.IndexAssign(base="d", index="i", source="_ir_t0"),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+    ]
+    out = loops.recognize_string_loops(body, variable_element_sizes={"d": 4, "s": 1})
+    assert not any(isinstance(instruction, ir.RepString) for instruction in out)
+
+
+def test_recognize_copy_loop_rewrites_to_rep_string() -> None:
+    """A unit-stride ``for (i=0;i<n;i++) d[i]=s[i];`` loop becomes a single ``RepString(operation="copy")``."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.LoopBoundary(continue_label="fstep0", end_label="fend0", push=True),
+        ir.Index(destination="_ir_t0", base="s", index="i"),
+        ir.IndexAssign(base="d", index="i", source="_ir_t0"),
+        ir.LoopBoundary(continue_label="fstep0", end_label="fend0", push=False),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+    ]
+    out = loops.recognize_string_loops(body, variable_element_sizes={"d": 4, "s": 4})
+    reps = [instruction for instruction in out if isinstance(instruction, ir.RepString)]
+    assert len(reps) == 1
+    assert reps[0].operation == "copy"
+    assert reps[0].dest == "d"
+    assert reps[0].source == "s"
+    assert reps[0].element_size == 4
+    assert reps[0].count == "n"
+    assert reps[0].fill_value is None
+    assert reps[0].counter_signed is True
+    assert reps[0].final_iv is None
+    assert not any(isinstance(instruction, (ir.Index, ir.IndexAssign)) for instruction in out)
+
+
+def test_recognize_fill_loop_rejects_eight_byte_element() -> None:
+    """Item C: an 8-byte element fill is rejected (codegen has no rep width for 8)."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+    ]
+    assert loops.recognize_string_loops(body, variable_element_sizes={"buf": 8}) is body
+
+
+def test_recognize_fill_loop_rejects_extra_body_statement() -> None:
+    """Item E: a third significant instruction in the body is not a bare fill; no rewrite."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.Copy(destination="extra", source=1),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+    ]
+    assert loops.recognize_string_loops(body) is body
+
+
+def test_recognize_fill_loop_rejects_index_not_iv() -> None:
+    """Item E: a store indexed by a different variable than the IV is not a fill; no rewrite."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Copy(destination="j", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="j", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+    ]
+    assert loops.recognize_string_loops(body) is body
+
+
+def test_recognize_fill_loop_rejects_iv_address_taken_after_loop() -> None:
+    """Item A/E: an ``AddressOf`` of the IV after the loop counts as a use of it."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+        ir.Call(args=(ast_nodes.AddressOf(line=1, var=ast_nodes.Var(line=1, name="i")),), destination=None, name="use"),
+        ir.Return(value=None),
+    ]
+    assert loops.recognize_string_loops(body) is body
+
+
+def test_recognize_fill_loop_rejects_iv_address_taken_inside_idiomatic_body() -> None:
+    """Item E: an ``AddressOf`` of the IV inside an *idiomatic* fill body blocks the rewrite.
+
+    Non-vacuous coverage of ``_iv_address_taken_in_loop``: the body is a
+    bare single-instruction fill ``buf[i] = &i;`` — exactly the shape the
+    fill matcher accepts (one ``IndexAssign`` indexed by the IV, fill
+    value not a loop-defined scalar name).  Every other rejection reason
+    is satisfied (unit stride, zero-dominating init, IV dead outside the
+    loop, 1-byte element), so the address-taken guard is the *only* thing
+    preventing the rewrite.  ``IndexAssign.source`` is a ``Value`` and
+    ``Value = int | str | ast_nodes.AddressOf``, so ``&IV`` genuinely
+    reaches an idiomatic 1-instruction body — the guard is live code, not
+    dead.  Taking ``&i`` forces the counter into a memory slot the
+    scalar-IV-eliminating rewrite would leave stale, so rejecting is
+    correct.
+    """
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=ast_nodes.AddressOf(line=1, var=ast_nodes.Var(line=1, name="i"))),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+        ir.Return(value=None),
+    ]
+    assert loops.recognize_string_loops(body) is body
+
+
+def test_recognize_fill_loop_rejects_iv_in_branch_condition_after_loop() -> None:
+    """Item A: the IV in a post-loop ``BranchFalse`` condition blocks the rewrite."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+        ir.BranchFalse(left="i", operation="==", right=0, target="other"),
+        ir.Label(name="other"),
+        ir.Return(value=None),
+    ]
+    assert loops.recognize_string_loops(body) is body
+
+
+def test_recognize_fill_loop_rejects_iv_init_in_non_dominating_if_arm() -> None:
+    """Item B: a ``Copy(IV, 0)`` inside a non-dominating ``if`` arm does not prove zero-start.
+
+    The init sits inside the taken arm of a branch; the loop runs after
+    the join.  Textually the nearest preceding write to ``i`` is the
+    ``Copy(i, 0)``, but it does not dominate the loop header — on the
+    not-taken path ``i`` is whatever it was at entry.  Reject.
+    """
+    body = [
+        ir.BranchFalse(left="cond", operation="==", right=0, target="join"),
+        ir.Copy(destination="i", source=0),
+        ir.Jump(target="join"),
+        ir.Label(name="join"),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+        ir.Return(value=None),
+    ]
+    assert loops.recognize_string_loops(body) is body
+
+
+def test_recognize_fill_loop_rejects_iv_read_after_loop_via_copy() -> None:
+    """Item A: an IV read by a ``Copy`` after the end label blocks the rewrite."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+        ir.Copy(destination="x", source="i"),
+        ir.Return(value="x"),
+    ]
+    assert loops.recognize_string_loops(body) is body
+
+
+def test_recognize_fill_loop_rejects_iv_read_after_loop_via_return() -> None:
+    """Item A: an IV live after the loop (read by a trailing ``Return``) blocks the rewrite.
+
+    The scalar loop leaves ``i == n``; ``RepString`` never materializes
+    ``i`` and the init ``Copy(i, 0)`` would be DCE'd, so returning ``i``
+    after the loop would miscompile.  Reject (return body unchanged).
+    """
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+        ir.Return(value="i"),
+    ]
+    assert loops.recognize_string_loops(body) is body
+
+
+def test_recognize_fill_loop_rejects_iv_read_in_block_before_header_via_goto() -> None:
+    """Item A (CFG-based): an IV read in a block positioned *before* the header but reached after the loop blocks the rewrite.
+
+    The flat-suffix scan (``body[end+1:]``) misses this: the post-use
+    block ``postuse`` sits textually before the loop header, yet control
+    reaches it only after the loop exits (``Label(fend0); Jump(postuse)``).
+    A CFG-based liveness check sees ``sink[i]`` reading the IV in a block
+    outside the loop body and rejects.  A flat-suffix check would wrongly
+    rewrite (one ``RepString``), miscompiling because ``final_iv`` is None
+    and the scalar loop leaves ``i == n`` for the post-use to observe.
+    """
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Jump(target="floop0"),
+        ir.Label(name="postuse"),
+        ir.IndexAssign(base="sink", index="i", source=7),
+        ir.Return(value=None),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+        ir.Jump(target="postuse"),
+    ]
+    assert loops.recognize_string_loops(body) is body
+
+
+def test_recognize_fill_loop_rejects_iv_used_as_index_base_after_loop() -> None:
+    """Item A: the IV referenced as an ``Index`` index after the loop blocks the rewrite.
+
+    ``Index.index`` is a value field, but this also exercises the
+    post-loop scan reaching index operands.
+    """
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+        ir.Index(destination="last", base="buf", index="i"),
+        ir.Return(value="last"),
+    ]
+    assert loops.recognize_string_loops(body) is body
+
+
+def test_recognize_fill_loop_rejects_non_unit_stride() -> None:
+    """Item E: an IV step of 2 is not a recognized induction variable; no rewrite."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=2),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+    ]
+    assert loops.recognize_string_loops(body) is body
+
+
+def test_recognize_fill_loop_rewrites_to_rep_string() -> None:
+    """A unit-stride ``for (i=0;i<n;i++) buf[i]=0;`` loop becomes a single ``RepString(operation="fill")``."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.LoopBoundary(continue_label="fstep0", end_label="fend0", push=True),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.LoopBoundary(continue_label="fstep0", end_label="fend0", push=False),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+    ]
+    out = loops.recognize_string_loops(body, variable_element_sizes={"buf": 1})
+    reps = [instruction for instruction in out if isinstance(instruction, ir.RepString)]
+    assert len(reps) == 1
+    assert reps[0].operation == "fill"
+    assert reps[0].dest == "buf"
+    assert reps[0].fill_value == 0
+    assert reps[0].count == "n"
+    assert reps[0].element_size == 1
+    assert reps[0].counter_signed is True
+    assert not any(isinstance(instruction, ir.IndexAssign) for instruction in out)
+
+
+def test_recognize_fill_loop_uses_supplied_element_size() -> None:
+    """``variable_element_sizes`` overrides the default byte width for the fill destination."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="words", index="i", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+    ]
+    out = loops.recognize_string_loops(body, variable_element_sizes={"words": 4})
+    reps = [instruction for instruction in out if isinstance(instruction, ir.RepString)]
+    assert len(reps) == 1
+    assert reps[0].element_size == 4
+
+
+def test_recognize_fill_loop_with_dominating_init_still_rewrites() -> None:
+    """Item B: a straight-line ``Copy(IV, 0)`` before the loop dominates the header and IS rewritten."""
+    body = [
+        ir.BranchFalse(left="cond", operation="==", right=0, target="join"),
+        ir.Copy(destination="unrelated", source=7),
+        ir.Jump(target="join"),
+        ir.Label(name="join"),
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+        ir.Return(value=None),
+    ]
+    out = loops.recognize_string_loops(body, variable_element_sizes={"buf": 1})
+    reps = [instruction for instruction in out if isinstance(instruction, ir.RepString)]
+    assert len(reps) == 1
+    assert reps[0].operation == "fill"
+
+
+def test_recognize_fill_loop_with_iv_dead_after_loop_still_rewrites() -> None:
+    """Item A: the same loop with the IV unused afterward is rewritten as before."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        ir.IndexAssign(base="buf", index="i", source=0),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+        ir.Return(value=None),
+    ]
+    out = loops.recognize_string_loops(body, variable_element_sizes={"buf": 1})
+    reps = [instruction for instruction in out if isinstance(instruction, ir.RepString)]
+    assert len(reps) == 1
+    assert reps[0].operation == "fill"
+
+
+def test_recognize_string_loops_ignores_non_idiomatic_body() -> None:
+    """A loop body that is neither a bare fill nor a bare load+store copy is left untouched."""
+    body = [
+        ir.Copy(destination="i", source=0),
+        ir.Label(name="floop0"),
+        ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
+        # Load then store from an unrelated name (not the loaded temp) —
+        # not the load+store copy shape, not a fill.
+        ir.Index(destination="_ir_t", base="src", index="i"),
+        ir.IndexAssign(base="buf", index="i", source="other"),
+        ir.Label(name="fstep0"),
+        ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
+        ir.Jump(target="floop0"),
+        ir.Label(name="fend0"),
+    ]
+    assert loops.recognize_string_loops(body) is body
+    assert any(isinstance(instruction, ir.IndexAssign) for instruction in loops.recognize_string_loops(body))
+
+
+def test_recognize_string_loops_no_loops_returns_body_unchanged() -> None:
+    """A straight-line function has no loop to recognize; the body is returned unchanged."""
+    body = [
+        ir.Copy(destination="x", source=0),
+        ir.Return(value=None),
+    ]
+    assert loops.recognize_string_loops(body) is body
+
+
+def test_self_loop_body_does_not_swallow_entry_block() -> None:
+    """A self-loop's body is just ``{header}`` — the entry block must NOT be pulled in.
+
+    Regression: walking predecessors from a self-looping latch (where
+    ``latch is header``) used to step out of the loop via the latch's
+    other predecessors (the entry fall-through into the header),
+    incorrectly classifying pre-loop instructions as loop-body
+    candidates for LICM to hoist.  Manifested as use-before-def in
+    kernel/drivers/ata.c, where ``saved_lba = lba & 0xFFFF;`` (above
+    a ``while (1) { … }``) had its right-hand side hoisted past its
+    own Copy use.
+    """
+    body = [
+        ir.Copy(destination="saved", source=1),
+        ir.Label(name=".loop"),
+        ir.BranchFalse(left="status", operation="==", right=0, target=".loop"),
+        ir.Return(value=None),
+    ]
+    graph = cfg.build_cfg(_function(body).body)
+    found = loops.natural_loops(graph)
+    assert len(found) == 1
+    loop = found[0]
+    entry = graph.entry
+    header = graph.label_to_block[".loop"]
+    assert header is loop.header
+    assert entry is not header
+    assert entry not in loop.body
+    assert loop.body == frozenset({header})
 
 
 def test_simple_while_loop_has_one_latch_and_one_exit() -> None:
