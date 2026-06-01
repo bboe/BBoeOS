@@ -1754,6 +1754,23 @@ class Peepholer:
         self.peephole_fold_single_write_byte_constant_local()
         self.peephole_fuse_byte_modify_in_place()
         self.peephole_dead_temp_slots()
+        # Dedup SI reloads now so the indexed-update peephole below can
+        # see ``load / op / store`` as a contiguous triple.  The codegen
+        # emits a fresh ``mov si, [base]`` ahead of both the load and
+        # the store; without this dedup the store's reload sits between
+        # the increment and the store, hiding the pattern.
+        self._dedup_register_reloads(self.target.si_register)
+        # Re-run after the cleanup passes above expose patterns that the
+        # first pass missed.  Indexed updates (``arr[i] = arr[i] + 1``
+        # through a pointer parameter) lower to ``mov acc, [base+idx*k] /
+        # spill / inc acc / spill / reload / mov si, [base] / store
+        # [base+idx*k]``; ``store_reload`` + ``dead_temp_slots`` +
+        # the SI dedup above collapse all the round-trips to ``mov acc,
+        # [base+idx*k] / inc acc / store``, which this pass fuses into a
+        # single ``inc dword [base+idx*k]``.  This is now possible
+        # because the ALU+SIB asm.c extension in PR #558 accepts that
+        # encoding.
+        self.peephole_memory_arithmetic()
         self.peephole_narrow_acc_immediate_for_byte_out()
         self.peephole_constant_to_register()
         self.peephole_register_arithmetic()
