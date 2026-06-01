@@ -49,8 +49,31 @@ sequenced **last**. Plans are independently shippable:
 - **Plan 4:** Unify the scattered axes — `AddressOf` / `IncrementDecrement` /
   `IndexedCall` over arbitrary `Place`; enable the new shapes that fall out for
   free (`&arr[i]`, `a[i]++`, `a[i][j].f = x`).
-- **Plan 5 (highest risk):** Fold `Index` / `IndexAssign` into `Place` through a
-  `Place`-aware IR builder + SSA + loop/rep-string optimizer.
+- **Decision spike (gates Plan 5 — do this first):** Resolve the
+  IR-vs-direct-emission fork before committing to Plan 5's shape. Context: the
+  member/deref/index families ride the `ir.Block` escape hatch and are emitted
+  straight from the AST, bypassing SSA + the optimizer, while `Index` /
+  `IndexAssign` are in the IR specifically so the loop / rep-string optimizer can
+  see subscripts (see "IR vs. direct emission: why the access nodes bypass the
+  optimizer" in `docs/cc_future_work.md` on `main`). Two viable targets:
+  - **(a) Keep the small IR.** Make `_resolve_place` the *single shared
+    address-computation routine* that both the IR `Index` lowering and the direct
+    member emission call. Dedupes the pointer math (the worst facet of the dual
+    path) while `Block` stays as a deliberate, documented escape hatch. Lower
+    risk; preserves Plan 1's asm-emitting core as the permanent shared core.
+  - **(b) Grow the IR.** Lower *all* `Place` into IR address/load/store ops,
+    retire `Block` for accesses, and gain optimization on member access for free.
+    Textbook-clean single path, but a real IR expansion (every new IR op must be
+    handled by SSA + every pass + liveness), it runs against the project's
+    small-IR stance, and it makes Plan 1's `_resolve_place` interim scaffolding
+    Plan 5 throws away.
+  Output: a short design doc recording the choice + rationale. Plan 5 cannot be
+  written until this lands.
+- **Plan 5 (highest risk, fork-dependent):** Fold `Index` / `IndexAssign` into
+  `Place`. Under **(a)**: route `Index`'s address computation through the shared
+  `_resolve_place` core, leaving subscripts visible to the loop / rep-string
+  optimizer at the IR level. Under **(b)**: a `Place`-aware IR builder + SSA +
+  loop/rep-string optimizer over IR address ops.
 
 Each plan ends with the same gate: golden snapshot unchanged for converted
 shapes, full `tests/test_asm.py` and `tests/test_programs.py` (bbfs + ext2)
