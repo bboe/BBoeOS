@@ -1455,6 +1455,18 @@ class Parser:
                 operand=operand,
             )
             return PointerDereference(expression=operand.expression, line=line, target_type=pointee_type)
+        if self.peek()[0] == "LPAREN":
+            # ``*(expr)`` — dereference of a parenthesized pointer
+            # expression (no cast).  Desugar the ``*(base + index)`` and
+            # ``*(base)`` forms to ``base[index]`` so the Index lowering
+            # handles the pointee-typed load; Index needs a named base.
+            operand = self.parse_primary()
+            if isinstance(operand, BinaryOperation) and operand.operation == "+" and isinstance(operand.left, Var):
+                return Index(array=operand.left, index=operand.right, line=line)
+            if isinstance(operand, Var):
+                return Index(array=operand, index=Int(line=line, value=0), line=line)
+            message = "unsupported dereference of a complex pointer expression (use base[index])"
+            raise CompileError(message, line=line)
         if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
             # Prefix ``*++p`` / ``*--p`` as an rvalue: bump ``p`` by
             # sizeof(*p) first, then deref the post-incremented pointer.
