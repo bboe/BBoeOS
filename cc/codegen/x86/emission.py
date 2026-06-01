@@ -936,6 +936,33 @@ class EmissionMixin:
             self.ax_clear()
             return
         operator, left, right = expression.operation, expression.left, expression.right
+        # x86 SIB-addressing fast path for ``ptr + i`` / ``&arr[i]``:
+        # when the index is a Var pinned to a non-acc register and the
+        # element size is x86-encodable (1, 2, 4, 8), one ``lea`` collapses
+        # the whole base-plus-scaled-index computation.  Without this the
+        # codegen builds the address through ``generate_expression(left) /
+        # push acc / generate_expression(right) / shl acc, k / mov cx, acc /
+        # pop acc / add acc, cx`` — 7 instructions where ``mov acc, base /
+        # lea acc, [acc + idx*k]`` does the same in 2.  Gated on 32-bit-or-
+        # wider (16-bit addressing forms reject SIB).
+        if (
+            operator == "+"
+            and isinstance(left, Var)
+            and isinstance(right, Var)
+            and right.name in self.pinned_register
+            and self.pinned_register[right.name] != self.target.acc
+            and self.target.int_size >= 4
+        ):
+            # Restrict to element_size >= 2: the element_size == 1 case
+            # already lowers to ``add acc, idx`` (2 bytes) via the pinned-
+            # register fast path below, which beats lea's 3-byte SIB encoding.
+            element_size = self._arithmetic_element_size(left.name)
+            if element_size in (2, 4, 8):
+                self.generate_expression(left)
+                idx_reg = self.pinned_register[right.name]
+                self.emit(f"        lea {self.target.acc}, [{self.target.acc}+{idx_reg}*{element_size}]")
+                self.ax_clear()
+                return
         # Pointer arithmetic: scale the right operand by the element size when
         # the left side is a pointer or array variable.  ptr + N → ptr + N*sizeof(*ptr).
         # For byte pointers (char*, unsigned char*) element_size is 1 so nothing changes.
@@ -1374,8 +1401,6 @@ class EmissionMixin:
                     self.emit(f"        mov {self.target.acc}, [{addr}]")
                 self._si_scratch_guard_end(guarded=guarded)
             else:
-                guarded = self._si_scratch_guard_begin(vname)
-                self._emit_load_var(vname, register=self.target.si_register)
                 si = self.target.si_register
                 # Index scaling: ``p[i]`` advances by sizeof(*p)
                 # bytes per ``i``, so a narrow pointee (unsigned short* on
@@ -1386,6 +1411,37 @@ class EmissionMixin:
                     scale_size = 1
                 else:
                     scale_size = self.target.int_size
+                # x86 SIB-addressing fast path: when the index lives in a
+                # pinned register distinct from SI, fold ``acc = idx*k;
+                # si += acc`` into the load's effective address.  Same
+                # gating as the IndexAssign SIB write path
+                # (``generate_index_assign``).
+                pinned_index_register = (
+                    self.pinned_register[index_expression.name]
+                    if isinstance(index_expression, Var) and index_expression.name in self.pinned_register
+                    else None
+                )
+                if (
+                    pinned_index_register is not None
+                    and pinned_index_register != si
+                    and scale_size in (1, 2, 4, 8)
+                    and self.target.int_size >= 4
+                ):
+                    guarded = self._si_scratch_guard_begin(vname)
+                    self._emit_load_var(vname, register=si)
+                    scale_suffix = "" if scale_size == 1 else f"*{scale_size}"
+                    addr = f"{si}+{pinned_index_register}{scale_suffix}"
+                    if is_byte:
+                        self.emit_byte_load_zx(f"[{addr}]")
+                    elif narrow_word:
+                        _word_load(addr)
+                    else:
+                        self.emit(f"        mov {self.target.acc}, [{addr}]")
+                    self._si_scratch_guard_end(guarded=guarded)
+                    self.ax_clear()
+                    return
+                guarded = self._si_scratch_guard_begin(vname)
+                self._emit_load_var(vname, register=si)
 
                 def _scale(register: str, /) -> None:
                     if scale_size == 1:

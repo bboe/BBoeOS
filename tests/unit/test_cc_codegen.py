@@ -2220,6 +2220,73 @@ def test_indexed_store_with_pinned_index_uses_sib_addressing() -> None:
     )
 
 
+def test_indexed_load_with_pinned_index_uses_sib_addressing() -> None:
+    """A pointer indexed read where the index is pinned to a register collapses to ``mov acc, [base+idx*k]``.
+
+    Counterpart to :func:`test_indexed_store_with_pinned_index_uses_sib_addressing`.
+    Without the SIB-load fast path the body lowered to ``mov si, [base] /
+    mov acc, idx / shl acc, 2 / add si, acc / mov acc, [si]`` — 5
+    instructions; with SIB it collapses to ``mov si, [base] / mov acc,
+    [si+idx_reg*4]`` — 2 instructions.
+    """
+    asm = _kernel(
+        """
+        int sum(int *buf, int n) {
+            int i, acc;
+            i = 0;
+            acc = 0;
+            while (i < n) {
+                acc = acc + buf[i];
+                i = i + 1;
+            }
+            return acc;
+        }
+        """,
+        bits=32,
+    )
+    # SIB-encoded dword load through the buffer pointer.  Be conservative
+    # about which registers the auto-pin selector picked — match
+    # ``mov eax, [<si>+<idx>*4]`` only.
+    assert any(line.strip().startswith("mov eax, [") and "*4]" in line for line in asm.splitlines()), (
+        f"expected SIB-encoded dword load ``mov eax, [si+idx*4]`` in:\n{asm}"
+    )
+    # And the pre-optimization manual ``shl acc, 2 / add si, acc``
+    # sequence ahead of a load should be gone.
+    assert "shl eax, 2" not in asm or "add esi, eax" not in asm, f"manual scale+add survived in:\n{asm}"
+
+
+def test_pointer_plus_pinned_index_uses_lea_sib() -> None:
+    """``&buf[i]`` / ``buf + i`` collapses to one ``lea`` when the index is pinned.
+
+    Without the fast path the codegen builds the address through
+    ``mov acc, base / push acc / mov acc, idx / shl acc, k / mov cx, acc /
+    pop acc / add acc, cx`` — 7 instructions.  With the SIB-lea fast
+    path the same expression is ``mov acc, base / lea acc, [acc+idx*k]``
+    — 2 instructions for the int element case.
+    """
+    asm = _kernel(
+        """
+        int sum(int *buf, int n) {
+            int i, total;
+            int *p;
+            i = 0;
+            total = 0;
+            while (i < n) {
+                p = &buf[i];
+                total = total + *p;
+                i = i + 1;
+            }
+            return total;
+        }
+        """,
+        bits=32,
+    )
+    assert any(line.strip().startswith("lea eax, [eax+") and "*4]" in line for line in asm.splitlines()), (
+        f"expected ``lea eax, [eax+idx*4]`` in:\n{asm}"
+    )
+    assert "shl eax, 2" not in asm, f"manual scale survived in:\n{asm}"
+
+
 def test_int_local_compared_to_int_literal_compiles() -> None:
     """Plain ``int x; if (x == 0)`` is unaffected — both operands classify as integer."""
     asm = _kernel("""

@@ -528,6 +528,9 @@ void emit_alu_binop(int rfield) {
         emit_sized_mem(op_rr, size);
         if (mem_type == 3) {
             emit_indexed_mem(reg_id, mem_reg, mem_val);
+        } else if (mem_type == 4) {
+            emit_sib_mem(reg_id, mem_reg, parse_operand_index_reg,
+                         parse_operand_scale, mem_val);
         } else {
             emit_modrm_direct(reg_id, mem_val);
         }
@@ -550,6 +553,10 @@ void emit_alu_binop(int rfield) {
     } else if (type2 == 3) {
         emit_sized_mem(op_rr | 2, size1);
         emit_indexed_mem(register1_id, register2_id, value2);
+    } else if (type2 == 4) {
+        emit_sized_mem(op_rr | 2, size1);
+        emit_sib_mem(register1_id, register2_id, parse_operand_index_reg,
+                     parse_operand_scale, value2);
     } else {
         emit_alu_reg_imm(op_rr, register1_id, size1, value2);
     }
@@ -658,7 +665,9 @@ int emit_alu_mem_imm(int rfield) {
     int memory_type = (packed_operand >> 8) & 0xFF;
     int base_register_id = packed_operand & 0xFF;
     int memory_value = parse_operand_value;
-    if (memory_type != 2 && memory_type != 3) {
+    int memory_index_reg = parse_operand_index_reg;
+    int memory_scale = parse_operand_scale;
+    if (memory_type != 2 && memory_type != 3 && memory_type != 4) {
         abort_unknown();
     }
     skip_comma();
@@ -681,9 +690,12 @@ int emit_alu_mem_imm(int rfield) {
         emit_sized_mem(op_rr, size);
         if (memory_type == 2) {
             emit_modrm_direct(source_register_id, memory_value);
-        } else {
+        } else if (memory_type == 3) {
             emit_indexed_mem(source_register_id, base_register_id,
                              memory_value);
+        } else {
+            emit_sib_mem(source_register_id, base_register_id, memory_index_reg,
+                         memory_scale, memory_value);
         }
         return 1;
     }
@@ -711,8 +723,11 @@ int emit_alu_mem_imm(int rfield) {
     emit_byte(opcode);
     if (memory_type == 2) {
         emit_modrm_direct(rfield, memory_value);
-    } else {
+    } else if (memory_type == 3) {
         emit_indexed_mem(rfield, base_register_id, memory_value);
+    } else {
+        emit_sib_mem(rfield, base_register_id, memory_index_reg, memory_scale,
+                     memory_value);
     }
     if (is_imm8) {
         emit_byte(imm & 0xFF);
@@ -1329,14 +1344,23 @@ void handle_cmp() {
                 emit_indexed_mem(register1_id, register2_id, value2);
                 return;
             }
+            if (type2 == 4) {
+                emit_sized_mem(0x3A, size1);
+                emit_sib_mem(register1_id, register2_id,
+                             parse_operand_index_reg, parse_operand_scale,
+                             value2);
+                return;
+            }
         }
         int imm = resolve_value();
         emit_alu_reg_imm(0x38, register1_id, size1, imm);
         return;
     }
-    if (type1 != 2 && type1 != 3) {
+    if (type1 != 2 && type1 != 3 && type1 != 4) {
         return;
     }
+    int op1_index_reg = parse_operand_index_reg;
+    int op1_scale = parse_operand_scale;
     int imm = resolve_value();
     int opcode;
     int is_imm8;
@@ -1363,8 +1387,10 @@ void handle_cmp() {
     emit_byte(opcode);
     if (type1 == 2) {
         emit_modrm_direct(7, value1);
-    } else {
+    } else if (type1 == 3) {
         emit_indexed_mem(7, register1_id, value1);
+    } else {
+        emit_sib_mem(7, register1_id, op1_index_reg, op1_scale, value1);
     }
     if (is_imm8) {
         emit_byte(imm & 0xFF);
@@ -1568,6 +1594,9 @@ void handle_lea() {
        EAX is zero, but a different byte stream). */
     if (type2 == 2) {
         emit_modrm_direct(register1_id, value2);
+    } else if (type2 == 4) {
+        emit_sib_mem(register1_id, register2_id, parse_operand_index_reg,
+                     parse_operand_scale, value2);
     } else {
         emit_indexed_mem(register1_id, register2_id, value2);
     }
@@ -1842,6 +1871,9 @@ void handle_movzx() {
         emit_byte(0xC0 | (register1_id << 3) | register2_id);
     } else if (type2 == 2) {
         emit_modrm_direct(register1_id, value2);
+    } else if (type2 == 4) {
+        emit_sib_mem(register1_id, register2_id, parse_operand_index_reg,
+                     parse_operand_scale, value2);
     } else {
         emit_indexed_mem(register1_id, register2_id, value2);
     }
@@ -2089,13 +2121,17 @@ void handle_test() {
             }
         }
     } else {
+        int op1_index_reg = parse_operand_index_reg;
+        int op1_scale = parse_operand_scale;
         int imm = resolve_value();
         emit_address_size_prefix(parse_operand_address_size);
         emit_byte(0xF6);
         if (type1 == 2) {
             emit_modrm_direct(0, value1);
-        } else {
+        } else if (type1 == 3) {
             emit_indexed_mem(0, register1_id, value1);
+        } else {
+            emit_sib_mem(0, register1_id, op1_index_reg, op1_scale, value1);
         }
         emit_byte(imm & 0xFF);
     }

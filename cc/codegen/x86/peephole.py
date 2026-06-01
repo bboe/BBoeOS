@@ -59,9 +59,18 @@ class Peepholer:
         value: str | None = None
         result: list[str] = []
         # Instructions that clobber the destination register directly.
+        # ``CCREL_CALL`` / ``CCREL_JMP`` are the object-mode forms of
+        # ``call`` / ``jmp`` to externs (expanded by ccobj_markers.inc
+        # to real ``call rel32`` / ``jmp rel32``); they clobber callee-
+        # saved registers at runtime just like the bare forms, so they
+        # must reset the tracker too.  Without them, the dedup deleted
+        # a post-call ``mov esi, [ebp-4]`` reload in sort.c's
+        # ``merge_pass`` and silently corrupted line_pointers.
         clobber_prefixes = (
             f"add {register}",
             "call ",
+            "CCREL_CALL ",
+            "CCREL_JMP ",
             "int ",
             "lodsb",
             "lodsw",
