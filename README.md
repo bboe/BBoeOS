@@ -122,4 +122,4 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   analysis) plus a `RepString` IR node.  Adds `movsd` / `stosd` to the
   self-hosted assembler.  Backlog item #3.
   Plan: [2026-06-01-cc-rep-string-loops-plan.md](./2026-06-01-cc-rep-string-loops-plan.md).
-  Status: design + plan complete; implementation pending.
+  Status: implemented on branch `bboe/cc-rep-string-loops` (PR #566).
