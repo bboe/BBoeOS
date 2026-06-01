@@ -1491,14 +1491,33 @@ class Parser:
         """Parse ``struct NAME { type field; ... };`` at file scope."""
         line = self.peek()[2]
         self.eat("STRUCT")
-        name_token = self.eat("IDENT")
-        name = name_token[1]
+        name = self.eat("IDENT")[1]
+        fields = self._parse_struct_field_block()
+        self.eat("SEMI")
+        decl = StructDecl(fields=fields, line=line, name=name)
+        self.struct_decls[name] = decl
+        return decl
+
+    def _parse_struct_field_block(self) -> list[StructField]:
+        """Parse a ``{ type field; ... }`` member block (LBRACE through RBRACE).
+
+        Shared by the plain ``struct NAME { ... };`` declaration and the
+        ``typedef struct [TAG] { ... } ALIAS;`` shape so both grow field
+        kinds (function-pointer members, anonymous bitfields, fixed-size
+        array fields) from one place.  The opening brace must be the next
+        token; the closing brace is consumed.
+
+        A single member line may declare several comma-separated names
+        sharing one base type (``int cx, cy;`` / ``int r, g, b;``); each
+        becomes its own :class:`StructField`.  Per-declarator pointer
+        stars (``char *a, *b;``) are not supported — give each its own
+        line.
+        """
+        line = self.peek()[2]
         self.eat("LBRACE")
         fields: list[StructField] = []
         while self.peek()[0] != "RBRACE":
-            field_type = self.parse_type()
-            bit_width: int | None = None
-            field_name: str | None
+            base_type = self.parse_type()
             if self.peek()[0] == "LPAREN":
                 # Function pointer field: type (*field_name)(params)
                 self.eat("LPAREN")
@@ -1508,44 +1527,44 @@ class Parser:
                 self.eat("LPAREN")
                 self.parse_parameters()  # tuple discarded; struct-field function-pointer size is always pointer-width
                 self.eat("RPAREN")
-                field_type = "function_pointer"
-            elif self.peek()[0] == "COLON":
+                self.eat("SEMI")
+                fields.append(StructField(bit_width=None, field_name=field_name, line=line, type_name="function_pointer"))
+                continue
+            if self.peek()[0] == "COLON":
                 # Anonymous bitfield: ``unsigned char : N;``
                 self.eat("COLON")
                 bit_width = int(self.eat("NUMBER")[1])
-                field_name = None
-            else:
+                self.eat("SEMI")
+                fields.append(StructField(bit_width=bit_width, field_name=None, line=line, type_name=base_type))
+                continue
+            # One or more comma-separated named declarators sharing base_type.
+            while True:
+                declarator_type = base_type
+                bit_width = None
                 field_name = self.eat("IDENT")[1]
                 if self.peek()[0] == "COLON":
                     self.eat("COLON")
                     bit_width = int(self.eat("NUMBER")[1])
-            # Optional [N] for fixed-size array fields (e.g. ``char _reserved[15]``).
-            if bit_width is None and self.peek()[0] == "LBRACKET":
-                self.eat("LBRACKET")
-                count_token = self.eat("NUMBER")
-                self.eat("RBRACKET")
-                field_type = f"{field_type}[{count_token[1]}]"
-            if bit_width is not None:
-                if field_type != "unsigned char":
-                    message = f"bitfield container must be unsigned char (got {field_type!r}) at line {line}"
-                    raise SyntaxError(message)
-                if not 1 <= bit_width <= 8:
-                    message = f"bitfield width must be 1..8 (got {bit_width}) at line {line}"
-                    raise SyntaxError(message)
+                elif self.peek()[0] == "LBRACKET":
+                    # Optional [N] fixed-size array field (e.g. ``char _reserved[15]``).
+                    self.eat("LBRACKET")
+                    count_token = self.eat("NUMBER")
+                    self.eat("RBRACKET")
+                    declarator_type = f"{base_type}[{count_token[1]}]"
+                if bit_width is not None:
+                    if base_type != "unsigned char":
+                        message = f"bitfield container must be unsigned char (got {base_type!r}) at line {line}"
+                        raise SyntaxError(message)
+                    if not 1 <= bit_width <= 8:
+                        message = f"bitfield width must be 1..8 (got {bit_width}) at line {line}"
+                        raise SyntaxError(message)
+                fields.append(StructField(bit_width=bit_width, field_name=field_name, line=line, type_name=declarator_type))
+                if self.peek()[0] != "COMMA":
+                    break
+                self.eat("COMMA")
             self.eat("SEMI")
-            fields.append(
-                StructField(
-                    bit_width=bit_width,
-                    field_name=field_name,
-                    line=line,
-                    type_name=field_type,
-                )
-            )
         self.eat("RBRACE")
-        self.eat("SEMI")
-        decl = StructDecl(fields=fields, line=line, name=name)
-        self.struct_decls[name] = decl
-        return decl
+        return fields
 
     def _parse_tail_call(self) -> Node:
         """Parse a ``__tail_call(fn_ptr, arg1, ...)`` statement.
@@ -1567,23 +1586,35 @@ class Parser:
         self.eat("SEMI")
         return TailCall(args=args, fn=fn, line=token[2])
 
-    def _parse_typedef_declaration(self) -> None:
+    def _parse_typedef_declaration(self) -> StructDecl | None:
         """Consume a top-level ``typedef`` and register the alias.
 
-        Two shapes are handled:
+        Shapes handled:
 
         * ``typedef <ret> (*<alias>)(<args>);`` — function-pointer
           typedef.  The inner argument list is parsed and discarded;
           cc.py treats every function pointer as an opaque pointer-width
           value, so the alias resolves to ``"function_pointer"``.
+        * ``typedef struct [TAG] { ... } <alias>;`` — a struct definition
+          bundled with an alias; delegated to
+          :meth:`_parse_typedef_struct_definition`, which returns the
+          ``StructDecl`` for the layout.
         * ``typedef <type> <alias>;`` — plain alias.  If the alias slot
           is a keyword (e.g. ``typedef int int;`` in a header used by
           both clang and cc.py) the keyword is silently consumed instead
           of registered; otherwise the alias maps to the base type.
 
-        Always returns ``None`` (typedefs produce no AST node).
+        Returns a :class:`StructDecl` for the struct-definition shape,
+        else ``None`` (most typedefs produce no AST node).
         """
         self.eat("TYPEDEF")
+        # ``typedef struct [TAG] { ... } ALIAS;`` — a struct *definition*,
+        # not a reference to an existing tag.  Detected by a ``{`` right
+        # after ``struct`` (anonymous) or after ``struct TAG`` (tagged).
+        if self.peek()[0] == "STRUCT" and (
+            self.peek(offset=1)[0] == "LBRACE" or (self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE")
+        ):
+            return self._parse_typedef_struct_definition()
         target_type = self.parse_type()
         if self.peek()[0] == "LPAREN":
             self.eat("LPAREN")
@@ -1595,7 +1626,7 @@ class Parser:
             self.eat("RPAREN")
             self.eat("SEMI")
             self.typedef_aliases[alias_name] = "function_pointer"
-            return
+            return None
         alias_kind = self.peek()[0]
         if alias_kind == "IDENT":
             alias_name = self.eat("IDENT")[1]
@@ -1607,6 +1638,34 @@ class Parser:
             message = f"expected typedef alias name, got {token[0]} ({token[1]!r})"
             raise CompileError(message, line=token[2])
         self.eat("SEMI")
+        return None
+
+    def _parse_typedef_struct_definition(self) -> StructDecl:
+        """Parse ``typedef struct [TAG] { fields } ALIAS;``.
+
+        Registers the struct layout (under its tag, or under the alias
+        name when the struct is anonymous) and maps the alias to the
+        ``struct <tag>`` spelling so later ``ALIAS x;`` references resolve
+        through the same path as an explicit ``struct <tag> x;``.  Returns
+        the :class:`StructDecl` so the generator records the field layout,
+        exactly as for a plain ``struct NAME { ... };``.
+        """
+        line = self.peek()[2]
+        self.eat("STRUCT")
+        tag: str | None = None
+        if self.peek()[0] == "IDENT":
+            tag = self.eat("IDENT")[1]
+        fields = self._parse_struct_field_block()
+        alias_name = self.eat("IDENT")[1]
+        self.eat("SEMI")
+        # An anonymous struct has no tag of its own; key the layout under
+        # the alias so it still has a stable name for struct_decls and the
+        # ``struct <name>`` spelling the alias expands to.
+        struct_name = tag if tag is not None else alias_name
+        decl = StructDecl(fields=fields, line=line, name=struct_name)
+        self.struct_decls[struct_name] = decl
+        self.typedef_aliases[alias_name] = f"struct {struct_name}"
+        return decl
 
     @staticmethod
     def _pointee_type_from_cast(*, context: str, line: int, operand: Node) -> str:
@@ -2213,6 +2272,21 @@ class Parser:
             if self.peek()[0] in ("DOT", "ARROW"):
                 arrow_token = self.eat()
                 member_token = self.eat("IDENT")
+                # ``&obj.field[i]`` / ``&ptr->field[i]`` — address of one
+                # element of an array/pointer member.  Reuses MemberIndex's
+                # element-address scaling, lea'd instead of loaded.
+                if self.peek()[0] == "LBRACKET":
+                    self.eat("LBRACKET")
+                    index = self.parse_expression()
+                    self.eat("RBRACKET")
+                    return MemberIndex(
+                        address_of=True,
+                        arrow=arrow_token[0] == "ARROW",
+                        index=index,
+                        line=line,
+                        member_name=member_token[1],
+                        object_name=name_token[1],
+                    )
                 return MemberAddressOf(
                     arrow=arrow_token[0] == "ARROW",
                     line=line,
@@ -2358,6 +2432,11 @@ class Parser:
 
         """
         token = self.peek()
+        if token[0] == "SEMI":
+            # Empty statement (``;``) — e.g. a spin loop ``while (cond);``.
+            # Modeled as an empty Compound so it lowers to no code.
+            self.eat("SEMI")
+            return Compound(body=[], line=token[2])
         if self._is_type_start():
             return self.parse_variable_declaration()
         if token[0] == "LBRACE":
@@ -2530,8 +2609,10 @@ class Parser:
         """
         line = self.peek()[2]
         if self.peek()[0] == "TYPEDEF":
-            self._parse_typedef_declaration()
-            return None
+            struct_decl = self._parse_typedef_declaration()
+            # ``typedef struct { ... } ALIAS;`` yields a StructDecl whose
+            # layout the generator must register; plain aliases yield None.
+            return [struct_decl] if struct_decl is not None else None
         if self.peek()[0] == "STRUCT" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
             return [self._parse_struct_declaration()]
         if self.peek()[0] == "ENUM" and self.peek(offset=1)[0] == "IDENT" and self.peek(offset=2)[0] == "LBRACE":
