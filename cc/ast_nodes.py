@@ -93,8 +93,8 @@ class AssignExpr(IntegerOperand, Node):
 
     Wraps an underlying ``*Assign`` AST node (``Assign``, ``DerefAssign``,
     ``IndexAssign``, ``MemberAssign``, ``PointerDereferenceAssign``,
-    ``DerefIncrementAssign``, ``IndexMemberAssign``, ``MemberIndexAssign``,
-    ``IndexMemberIndexAssign``).  The value of the expression is the
+    ``DerefIncrementAssign``, ``MemberIndexAssign``, ``PlaceStore``).
+    The value of the expression is the
     post-assignment value of the lvalue; the lvalue itself is not produced
     as an lvalue (chained ``a = b = c`` must be written ``a = (b = c)``).
     """
@@ -225,6 +225,29 @@ class DerefIncrementAssign(Node):
     expr: Node
     is_postfix: bool
     target_name: str
+
+
+@dataclass(kw_only=True, slots=True)
+class Place(Node):
+    """Base class for an addressable location ("place" / lvalue).
+
+    A recursive description of *where* a value lives.  Operation nodes say
+    *what* to do there: read it (:class:`PlaceLoad`), write it
+    (:class:`PlaceStore`), take its address (:class:`PlaceAddressOf`),
+    increment/decrement it (:class:`PlaceIncDec`), or call through the
+    function pointer it holds (:class:`PlaceCall`).
+
+    Placed before :class:`DereferencePlace` (alphabetically later) because
+    the subclass relationship requires the base to be defined first — the
+    same pattern :class:`Char` follows relative to :class:`Int`.
+    """
+
+
+@dataclass(kw_only=True, slots=True)
+class DereferencePlace(Place):
+    """The pointee of an arbitrary pointer expression: ``*pointer``."""
+
+    pointer: Node
 
 
 @dataclass(kw_only=True, slots=True)
@@ -416,50 +439,6 @@ class IndexedCall(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class IndexMemberAccess(Node):
-    """Rvalue ``arr[i].field`` or ``arr[i]->field`` (struct array element member read)."""
-
-    arrow: bool
-    index: Node
-    member_name: str
-    name: str
-
-
-@dataclass(kw_only=True, slots=True)
-class IndexMemberAssign(Node):
-    """Statement ``arr[i].field = expr;`` or ``arr[i]->field = expr;``."""
-
-    arrow: bool
-    expr: Node
-    index: Node
-    member_name: str
-    name: str
-
-
-@dataclass(kw_only=True, slots=True)
-class IndexMemberIndex(Node):
-    """Rvalue ``arr[i].field[n]`` (element of an array-typed struct member)."""
-
-    arrow: bool
-    elem_index: Node
-    index: Node
-    member_name: str
-    name: str
-
-
-@dataclass(kw_only=True, slots=True)
-class IndexMemberIndexAssign(Node):
-    """Statement ``arr[i].field[n] = expr;``."""
-
-    arrow: bool
-    elem_index: Node
-    expr: Node
-    index: Node
-    member_name: str
-    name: str
-
-
-@dataclass(kw_only=True, slots=True)
 class InlineAsm(Node):
     """File-scope ``asm("...");`` directive.
 
@@ -632,6 +611,14 @@ class MemberIndexAssign(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class MemberPlace(Place):
+    """A member ``base.member_name``; ``base->m`` is ``.m`` on a :class:`DereferencePlace`."""
+
+    base: Place
+    member_name: str
+
+
+@dataclass(kw_only=True, slots=True)
 class Param:
     """A function parameter: type, name, and whether it was declared with ``[]``.
 
@@ -688,6 +675,48 @@ class PointerDereferenceAssign(Node):
 
     address: Node
     target_type: str
+    value: Node
+
+
+@dataclass(kw_only=True, slots=True)
+class PlaceAddressOf(Node):
+    """Take the address of *place*: ``&place``."""
+
+    place: Place
+
+
+@dataclass(kw_only=True, slots=True)
+class PlaceCall(Node):
+    """Call through a function-pointer *place*: ``place(args)``."""
+
+    args: list[Node]
+    place: Place
+
+
+@dataclass(kw_only=True, slots=True)
+class PlaceIncDec(IntegerOperand, Node):
+    """``++place`` / ``place++`` / ``--place`` / ``place--``.
+
+    ``delta`` is ``+1`` or ``-1``; ``is_postfix`` selects pre- vs post-value.
+    """
+
+    delta: int
+    is_postfix: bool
+    place: Place
+
+
+@dataclass(kw_only=True, slots=True)
+class PlaceLoad(IntegerOperand, Node):
+    """Read the value at *place* (rvalue)."""
+
+    place: Place
+
+
+@dataclass(kw_only=True, slots=True)
+class PlaceStore(Node):
+    """Store *value* into *place*: ``place = value;``."""
+
+    place: Place
     value: Node
 
 
@@ -788,6 +817,14 @@ class String(Node):
     """String literal."""
 
     content: str
+
+
+@dataclass(kw_only=True, slots=True)
+class SubscriptPlace(Place):
+    """A subscript ``base[index]``; *base* recurses into another :class:`Place`."""
+
+    base: Place
+    index: Node
 
 
 @dataclass(kw_only=True, slots=True)
@@ -899,6 +936,13 @@ class VarDecl(Node):
     name: str
     pinned_register: str | None = field(default=None, kw_only=True)
     type_name: str
+
+
+@dataclass(kw_only=True, slots=True)
+class VariablePlace(Place):
+    """A named local or global: ``x``."""
+
+    name: str
 
 
 @dataclass(kw_only=True, slots=True)

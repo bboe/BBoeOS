@@ -39,10 +39,6 @@ from cc.ast_nodes import (
     Index,
     IndexAssign,
     IndexedCall,
-    IndexMemberAccess,
-    IndexMemberAssign,
-    IndexMemberIndex,
-    IndexMemberIndexAssign,
     InlineAsm,
     Int,
     Label,
@@ -54,8 +50,11 @@ from cc.ast_nodes import (
     MemberIncrementDecrement,
     MemberIndex,
     MemberIndexAssign,
+    MemberPlace,
     Node,
     Param,
+    PlaceLoad,
+    PlaceStore,
     PointerDereference,
     PointerDereferenceAssign,
     Program,
@@ -67,12 +66,14 @@ from cc.ast_nodes import (
     StructDecl,
     StructField,
     StructInitializer,
+    SubscriptPlace,
     Switch,
     SwitchCase,
     TailCall,
     VaArg,
     Var,
     VarDecl,
+    VariablePlace,
     While,
 )
 from cc.errors import CompileError
@@ -795,27 +796,31 @@ class Parser:
             index = self.parse_expression()
             self.eat("RBRACKET")
             if self.peek()[0] in ("DOT", "ARROW"):
-                arrow_token = self.eat()
-                arrow = arrow_token[0] == "ARROW"
+                self.eat()
                 member_name = self.eat("IDENT")[1]
                 if self.peek()[0] == "LBRACKET":
                     self.eat("LBRACKET")
                     elem_index = self.parse_expression()
                     self.eat("RBRACKET")
-                    return IndexMemberIndex(
-                        arrow=arrow,
-                        elem_index=elem_index,
-                        index=index,
+                    return PlaceLoad(
                         line=line,
-                        member_name=member_name,
-                        name=name,
+                        place=SubscriptPlace(
+                            line=line,
+                            base=MemberPlace(
+                                line=line,
+                                base=SubscriptPlace(line=line, base=VariablePlace(line=line, name=name), index=index),
+                                member_name=member_name,
+                            ),
+                            index=elem_index,
+                        ),
                     )
-                return IndexMemberAccess(
-                    arrow=arrow,
-                    index=index,
+                return PlaceLoad(
                     line=line,
-                    member_name=member_name,
-                    name=name,
+                    place=MemberPlace(
+                        line=line,
+                        base=SubscriptPlace(line=line, base=VariablePlace(line=line, name=name), index=index),
+                        member_name=member_name,
+                    ),
                 )
             if self.peek()[0] == "LBRACKET":
                 # Chained subscript: ``name[outer][inner]`` for an
@@ -964,7 +969,7 @@ class Parser:
             return self._parse_tail_call()
         return self.parse_call_statement()
 
-    def _parse_index_assignment_no_semi(self) -> IndexAssign | IndexMemberAssign | IndexMemberIndexAssign:
+    def _parse_index_assignment_no_semi(self) -> IndexAssign | PlaceStore:
         """Parse ``name[index] = expr`` or ``name[index].member[n] = expr`` without consuming the trailing semicolon."""
         token = self.eat("IDENT")
         name = token[1]
@@ -972,8 +977,7 @@ class Parser:
         index = self.parse_expression()
         self.eat("RBRACKET")
         if self.peek()[0] in ("DOT", "ARROW"):
-            arrow_token = self.eat()
-            arrow = arrow_token[0] == "ARROW"
+            self.eat()
             member_token = self.eat("IDENT")
             member_name = member_token[1]
             if self.peek()[0] == "LBRACKET":
@@ -982,24 +986,29 @@ class Parser:
                 self.eat("RBRACKET")
                 self.eat("ASSIGN")
                 expr = self.parse_expression()
-                return IndexMemberIndexAssign(
-                    arrow=arrow,
-                    elem_index=elem_index,
-                    expr=expr,
-                    index=index,
+                return PlaceStore(
                     line=token[2],
-                    member_name=member_name,
-                    name=name,
+                    place=SubscriptPlace(
+                        line=token[2],
+                        base=MemberPlace(
+                            line=token[2],
+                            base=SubscriptPlace(line=token[2], base=VariablePlace(line=token[2], name=name), index=index),
+                            member_name=member_name,
+                        ),
+                        index=elem_index,
+                    ),
+                    value=expr,
                 )
             self.eat("ASSIGN")
             expr = self.parse_expression()
-            return IndexMemberAssign(
-                arrow=arrow,
-                expr=expr,
-                index=index,
+            return PlaceStore(
                 line=token[2],
-                member_name=member_name,
-                name=name,
+                place=MemberPlace(
+                    line=token[2],
+                    base=SubscriptPlace(line=token[2], base=VariablePlace(line=token[2], name=name), index=index),
+                    member_name=member_name,
+                ),
+                value=expr,
             )
         self.eat("ASSIGN")
         expr = self.parse_expression()
@@ -1303,8 +1312,8 @@ class Parser:
         - ``IDENT = rhs``                         → :class:`Assign`
         - ``IDENT op= rhs``                       → :class:`Assign` (desugared)
         - ``IDENT[i] = rhs``                      → :class:`IndexAssign`
-        - ``IDENT[i].m = rhs``                    → :class:`IndexMemberAssign`
-        - ``IDENT[i].m[j] = rhs``                 → :class:`IndexMemberIndexAssign`
+        - ``IDENT[i].m = rhs``                    → :class:`PlaceStore`
+        - ``IDENT[i].m[j] = rhs``                 → :class:`PlaceStore`
         - ``IDENT.m = rhs`` / ``IDENT->m = rhs``  → :class:`MemberAssign`
         - ``IDENT.m[i] = rhs``                    → :class:`MemberIndexAssign`
         - ``*p = rhs``                             → :class:`DerefAssign`
