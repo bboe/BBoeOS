@@ -11,7 +11,27 @@ time.
 
 ## Unreleased
 
+### Added
+
+- **cc.py `--permissive` mode for third-party C.** An opt-in flag that relaxes
+  the house-style comparison strictness: integer literal `0` counts as a
+  null-pointer constant, so `if (p)`, `p == 0`, and `c != 0` compile without the
+  explicit `NULL` / character-literal spellings.  First-party code keeps the
+  strict default; the flag is for unmodified upstream sources (kilo, lua, …).
+- **kilo port scaffold (`ports/kilo/`).** A `fetch.sh` that pins antirez/kilo,
+  shim headers (`termios.h`, `time.h`, `sys/ioctl.h`) and a
+  `bboeos_kilo_compat.c` providing the handful of POSIX entry points
+  (tcgetattr/tcsetattr/isatty/ ftruncate/time) the editor expects on top of
+  libbboeos.  Work in progress — the first fully cc.py-compiled third-party
+  program.
+
 ### Changed
+
+- **`ioctl` is now variadic (`int ioctl(int fd, int cmd, ...)`).** A command
+  takes up to two unsigned-int arguments (ECX then EDX), matching POSIX's
+  request-dependent argument shape.  bboeos's own callers keep passing both
+  (e.g. `VGA_IOCTL_SET_PALETTE`); POSIX-style callers that pass a single
+  pointer/value (e.g. kilo's `ioctl(1, TIOCGWINSZ, &ws)`) now bind directly.
 
 - **cc.py recognizes hand-written init/copy loops as `rep` string ops.** A
   unit-stride `for (i=0;i<n;i++) dst[i]=V;` / `dst[i]=src[i];` now lowers to

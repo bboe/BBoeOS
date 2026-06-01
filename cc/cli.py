@@ -10,6 +10,7 @@ from cc.ccobj import pack_ccobj
 from cc.codegen import X86CodeGenerator
 from cc.errors import CompileError
 from cc.lexer import tokenize
+from cc.options import CompilerOptions
 from cc.parser import Parser
 from cc.preprocessor import apply_defines, preprocess
 from cc.utils import parse_asm_constants
@@ -19,13 +20,10 @@ SUBCOMMANDS = ("compile", "pack-ccobj")
 
 def _compile(
     *,
-    bits: int,
     extra_include_paths: tuple[Path, ...],
     input_path: Path,
-    object_mode: bool,
+    options: CompilerOptions,
     output_path: Path | None,
-    per_function_sections: bool = False,
-    target_mode: str,
 ) -> int:
     """Translate a C source file to NASM assembly.
 
@@ -34,12 +32,9 @@ def _compile(
     search_paths = _discover_include_paths(extra_include_paths=extra_include_paths, input_path=input_path)
     try:
         output = _translate(
-            bits=bits,
             input_path=input_path,
-            object_mode=object_mode,
-            per_function_sections=per_function_sections,
+            options=options,
             search_paths=search_paths,
-            target_mode=target_mode,
         )
     except CompileError as error:
         location = f"{input_path}:{error.line}" if error.line else str(input_path)
@@ -88,36 +83,30 @@ def _discover_include_paths(*, extra_include_paths: tuple[Path, ...], input_path
 
 def _translate(
     *,
-    bits: int,
     input_path: Path,
-    object_mode: bool,
-    per_function_sections: bool,
+    options: CompilerOptions,
     search_paths: tuple[Path, ...],
-    target_mode: str,
 ) -> str:
     """Run the preprocess → tokenize → parse → codegen pipeline; may raise :class:`CompileError`."""
     source = input_path.read_text(encoding="utf-8")
     source, defines, function_defines = preprocess(
         source,
-        bits=bits,
+        bits=options.bits,
         include_base=input_path.parent,
         search_paths=search_paths,
     )
     tokens = tokenize(source)
     tokens = apply_defines(defines=defines, function_defines=function_defines, tokens=tokens)
-    ast = Parser(tokens, bits=bits).parse_program()
+    ast = Parser(tokens, bits=options.bits).parse_program()
     constants_asm = next(
         (path / "constants.asm" for path in search_paths if (path / "constants.asm").is_file()),
         None,
     )
     constant_values = parse_asm_constants(constants_asm) if constants_asm is not None else {}
     return X86CodeGenerator(
-        bits=bits,
+        options,
         constant_values=constant_values,
         defines=defines,
-        object_mode=object_mode,
-        per_function_sections=per_function_sections,
-        target_mode=target_mode,
     ).generate(ast)
 
 
@@ -188,6 +177,16 @@ def main() -> int:
         ),
     )
     compile_parser.add_argument(
+        "--permissive",
+        action="store_true",
+        help=(
+            "relax bboeos house-style comparison checks so unmodified third-party"
+            " C compiles: integer literal 0 counts as a null-pointer constant,"
+            " and `if (p)` / `c != 0` style comparisons are accepted.  First-party"
+            " code keeps the strict default (explicit NULL / character literals)."
+        ),
+    )
+    compile_parser.add_argument(
         "--target",
         choices=("user", "kernel"),
         default="user",
@@ -222,12 +221,16 @@ def main() -> int:
         )
         return 0
 
-    return _compile(
+    options = CompilerOptions(
         bits=arguments.bits,
+        object_mode=arguments.object,
+        per_function_sections=arguments.per_function_sections,
+        permissive=arguments.permissive,
+        target_mode=arguments.target,
+    )
+    return _compile(
         extra_include_paths=tuple(Path(p) for p in arguments.include_paths),
         input_path=Path(arguments.input),
-        object_mode=arguments.object,
+        options=options,
         output_path=Path(arguments.output) if arguments.output is not None else None,
-        per_function_sections=arguments.per_function_sections,
-        target_mode=arguments.target,
     )
