@@ -92,6 +92,19 @@ struct ata_status {
     u8 bsy : 1;
 };
 
+/* MC146818 CMOS status register A (index 0x0A, read via port 0x71).
+ *
+ *  rate[4]:    periodic-interrupt rate selection (unused here)
+ *  divider[3]: time-base divider (unused here)
+ *  uip:        1 = update in progress; the time-of-day registers are
+ *              mid-update and must not be read until it clears.
+ */
+struct cmos_status_a {
+    u8 rate : 4;
+    u8 divider : 3;
+    u8 uip : 1;
+};
+
 /* 8237A single-channel mask register (port 0x0A for ch 0-3,
  * port 0xD4 for ch 4-7).  Writing here masks or unmasks one DMA
  * channel without disturbing the other three.
