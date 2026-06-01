@@ -15,18 +15,21 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
 - [2026-05-15 — common utilities](./2026-05-15-common-utilities-design.md)
   — sort + sys_break + supporting cc.py changes. Landed across PRs #379–#382.
 - [2026-05-16 — cc.py object files](./2026-05-16-cc-object-files-design.md)
-  — ELF emission, `extern` declarations, `ccld` / `ccar`. In progress.
+  — ELF emission, `extern` declarations, `ccld` / `ccar`.  Status:
+  shipped — object/`extern` mode in PR #379, the `ccld` / `ccar`
+  linker + archiver in PR #384.
 - [2026-05-16 — opendir / readdir](./2026-05-16-opendir-readdir-design.md)
   — POSIX directory iteration via Linux-style `getdents` + `<dirent.h>`.
   Plan: [2026-05-16-opendir-readdir-plan.md](./2026-05-16-opendir-readdir-plan.md).
-  Status: design + plan complete; implementation pending.
+  Status: shipped — kernel `getdents` (`SYS_IO_GETDENTS`) in PR #385,
+  the libc `opendir` / `readdir` / `closedir` / `rewinddir` in PR #392.
 - [2026-05-18 — blocking recvfrom](./2026-05-18-blocking-recvfrom-design.md)
   — `SO_RCVTIMEO` via a new `SYS_NET_SETSOCKOPT` syscall; kernel-side
   `hlt`-loop wait keyed on the per-fd timeout.  Replaces an earlier
   same-day design that put `timeout_ms` on the `recvfrom` argument
   list (PR #411, closed pre-merge).
   Plan: [2026-05-18-blocking-recvfrom-plan.md](./2026-05-18-blocking-recvfrom-plan.md).
-  Status: design + plan complete; implementation pending.
+  Status: shipped in PR #414.
 - [2026-05-18 — cc.py bitfields + type casts](./2026-05-18-bitfields-cc-design.md)
   — bitfield struct members (`uint8_t name : N;`), type-cast expressions
   (`(T)expr`, `(T *)expr`), and conversion of all bit-twiddly drivers
@@ -48,7 +51,7 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   init.  Enables the cleaner driver pattern and recovers the kernel
   size lost in PR #428.
   Plan: [2026-05-19-cc-local-structs-plan.md](./2026-05-19-cc-local-structs-plan.md).
-  Status: design + plan complete; implementation pending.
+  Status: shipped in PR #430.
 - [2026-05-19 — tree reorg: kernel/, user/, ports/, tools/](./2026-05-19-tree-reorg-design.md)
   — pure mechanical rename so the ring boundary is visible at the top
   level (`kernel/` vs `user/`), upstream-wrapping ports get their own
@@ -69,7 +72,9 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   multi-page blob → cc.py extern fallback → stub archive → vDSO
   retirement → cc.py-compiles-libbboeos).
   Plan: [2026-05-24-va-arg-double-sizeof-expr-plan.md](./2026-05-24-va-arg-double-sizeof-expr-plan.md).
-  Status: design + plan complete; implementation pending.
+  Status: shipped — the seven-phase migration completed across PRs
+  #503–#507, dropping clang from the build (core now needs only nasm
+  + python3).
 - [2026-05-24 — cc.py assignment as expression (parens required)](./2026-05-24-cc-assignment-as-expression-design.md)
   — accept assignments as expressions when wrapped in a dedicated
   pair of parentheses (`while ((p = next))`, `f((x = y))`).  Covers
@@ -96,7 +101,7 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   (`arr[i] = fn`); (3) call through indexed elements
   (`arr[i]()`), via a new `IndexedCall` AST node.
   Plan: [2026-05-25-cc-array-of-function-pointers-plan.md](./2026-05-25-cc-array-of-function-pointers-plan.md).
-  Status: design + plan complete; implementation pending.
+  Status: shipped in PR #499.
 - [2026-05-25 — cc.py GCC extended inline asm](./2026-05-25-cc-extended-inline-asm-design.md)
   — statement-level `__asm__ volatile("..." : outputs : inputs :
   clobbers)` with the full constraint set used by signal.c,
@@ -106,7 +111,7 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   (`%[name]`/`%b`/`%%`), and clobber lists.  Unblocks both
   remaining libbboeos files.
   Plan: [2026-05-25-cc-extended-inline-asm-plan.md](./2026-05-25-cc-extended-inline-asm-plan.md).
-  Status: design + plan complete; implementation pending.
+  Status: shipped in PR #500.
 - [2026-05-27 — shell tab completion](./2026-05-27-shell-tab-completion-design.md)
   — Tab key in the shell line editor completes builtins + `bin/`
   entries in command position and files/directories (with trailing
