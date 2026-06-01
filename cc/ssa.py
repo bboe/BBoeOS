@@ -335,6 +335,21 @@ def _iter_ast_var_names(node: object, /) -> Iterator[str]:
     if isinstance(node, ast_nodes.Var):
         yield node.name
         return
+    # Lvalue targets and member/deref bases the AST stores as a bare string
+    # rather than a Var node: ``target_name`` (IncrementDecrement /
+    # DerefIncrement{,Assign}) and ``object_name`` (the Member* family).
+    # The Var-only recursion below cannot see these, so a variable
+    # referenced *only* through one of them is invisible to callers that
+    # must enumerate every name an opaque region touches.  The canonical
+    # failure is a for-loop's ``i++`` step, whose sole mention of ``i`` is
+    # ``target_name``: missing it lets the SSA eligibility filter version
+    # ``i`` as loop-invariant and fold the guard to ``cmp 0, n``.  Both
+    # field names appear only on variable-bearing nodes, so reading them by
+    # attribute is unambiguous.
+    for bare_name_field in ("target_name", "object_name"):
+        bare_name = getattr(node, bare_name_field, None)
+        if isinstance(bare_name, str):
+            yield bare_name
     if dataclasses.is_dataclass(node):
         for declared_field in dataclasses.fields(node):
             yield from _iter_ast_var_names(getattr(node, declared_field.name))
