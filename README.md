@@ -106,3 +106,11 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   remaining libbboeos files.
   Plan: [2026-05-25-cc-extended-inline-asm-plan.md](./2026-05-25-cc-extended-inline-asm-plan.md).
   Status: design + plan complete; implementation pending.
+- [2026-05-27 — shell tab completion](./2026-05-27-shell-tab-completion-design.md)
+  — Tab key in the shell line editor completes builtins + `bin/`
+  entries in command position and files/directories (with trailing
+  `/` on dirs) in argument position.  Single match inserts inline;
+  multiple matches list bash-style under the prompt.  All logic
+  lives in `user/programs/shell.c` using `open()` + `getdents()`.
+  Plan: [2026-05-27-shell-tab-completion-plan.md](./2026-05-27-shell-tab-completion-plan.md).
+  Status: shipped on branch `bboe/shell-tab-completion`.
