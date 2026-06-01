@@ -34,12 +34,13 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   Plan: [2026-05-18-bitfields-cc-plan.md](./2026-05-18-bitfields-cc-plan.md).
   Phase 2 plan revised after Phase 1 cc.py reconnaissance:
   [2026-05-18-bitfields-cc-plan-phase2.md](./2026-05-18-bitfields-cc-plan-phase2.md).
-  Status: Phase 1 (casts) shipped in PR #422.  Phase 2 (bitfields)
-  shipped in PR #425.  Phase 3 (driver conversions, batch 1): PR #428
-  (ready for review) covers PIC IMR + NE2000.  Remaining drivers
-  (FDC, RTC, DMA mode, SB16, PS/2) paused on the
-  [stack-local structs](./2026-05-19-cc-local-structs-design.md) work
-  to avoid retroactive rewrites.
+  Status: complete.  Phase 1 (casts) shipped in PR #422.  Phase 2
+  (bitfields) shipped in PR #425.  Phase 3 (driver conversions): PR
+  #428 covered PIC IMR + NE2000; FDC, DMA mode, SB16, and PS/2 followed
+  once the [stack-local structs](./2026-05-19-cc-local-structs-design.md)
+  work landed.  RTC was the last holdout — its lone update-in-progress
+  poll now reads through `struct cmos_status_a` instead of a bare 0x80
+  mask.
 - [2026-05-19 — cc.py stack-local struct values](./2026-05-19-cc-local-structs-design.md)
   — stack-local struct value declarations, arrays of struct locals,
   designated-field initializers (`= { .field = X }`), and a
