@@ -37,10 +37,6 @@ from cc.ast_nodes import (
     If,
     Index,
     IndexAssign,
-    IndexMemberAccess,
-    IndexMemberAssign,
-    IndexMemberIndex,
-    IndexMemberIndexAssign,
     InlineAsm,
     Int,
     LogicalAnd,
@@ -50,8 +46,11 @@ from cc.ast_nodes import (
     MemberAssign,
     MemberIndex,
     MemberIndexAssign,
+    MemberPlace,
     Node,
     Param,
+    Place,
+    PlaceLoad,
     PointerDereference,
     SizeofExpr,
     SizeofType,
@@ -59,9 +58,11 @@ from cc.ast_nodes import (
     String,
     StructDecl,
     StructInitializer,
+    SubscriptPlace,
     Switch,
     Var,
     VarDecl,
+    VariablePlace,
     While,
 )
 from cc.codegen.base import CodeGeneratorBase
@@ -129,6 +130,24 @@ class FieldInfo(NamedTuple):
     element_size: int
     field_size: int
     type_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlaceAddress:
+    """Symbolic address of a Place: ``[const_base + offset (+ BX)]``.
+
+    The struct-array access codegen builds an address as a symbolic triple
+    rather than materializing a pointer in a register: *const_base* is a label
+    or frame-relative base string, *offset* a static displacement folded into
+    the operand, and *indexed* True when BX holds a dynamic byte offset.
+    *field_size* / *element_size* size the terminal load/store.
+    """
+
+    const_base: str
+    element_size: int
+    field_size: int
+    indexed: bool
+    offset: int
 
 
 class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
@@ -500,8 +519,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         to a base operand (frame slot, register, label) goes through
         here so the ``[base+0]`` case stays out of the emitted text.
         ``index`` is appended after ``offset`` for the constant-base /
-        register-index addresses emitted by the ``index_member_*``
-        lowerers (``[label+12+bx]``).
+        register-index addresses emitted by the ``_resolve_place`` /
+        ``_emit_place_*`` struct-array path (``[label+12+bx]``).
         """
         parts = [base]
         if offset:
@@ -1734,6 +1753,46 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
         self.emit(f"        mov {register}, {source}")
 
+    def _emit_place_load(self, place: Place, /) -> None:
+        """Load the value at *place* into the accumulator (rvalue)."""
+        self.ax_clear()
+        protect_bx = self._bx_holds_pinned_var()
+        if protect_bx:
+            self.emit(f"        push {self.target.bx_register}")
+        address = self._resolve_place(place)
+        index = self.target.bx_register if address.indexed else ""
+        addr = self._build_address(address.const_base, address.offset, index=index)
+        is_array_member = address.field_size != address.element_size
+        if is_array_member:
+            # Bare array-typed member yields its address (matches legacy lea path).
+            self.emit(f"        lea {self.target.acc}, {addr}")
+        else:
+            self._emit_field_load(addr=addr, field_size=address.field_size)
+        if protect_bx:
+            self.emit(f"        pop {self.target.bx_register}")
+        self.ax_clear()
+
+    def _emit_place_store(self, place: Place, value: Node, /) -> None:
+        """Store the result of *value* into *place*."""
+        allowed = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        self.ax_clear()
+        protect_bx = self._bx_holds_pinned_var()
+        if protect_bx:
+            self.emit(f"        push {self.target.bx_register}")
+        self.generate_expression(value)  # AX = value
+        self.emit(f"        push {self.target.acc}")  # save value on top of stack
+        address = self._resolve_place(place)  # may use BX/AX as scratch
+        if address.field_size not in allowed:
+            message = f"writing field (size {address.field_size}) not yet supported; use asm()"
+            raise CompileError(message, line=place.line)
+        self.emit(f"        pop {self.target.acc}")  # AX = value
+        self.ax_clear()
+        index = self.target.bx_register if address.indexed else ""
+        addr = self._build_address(address.const_base, address.offset, index=index)
+        self._emit_field_store(addr=addr, field_size=address.field_size)
+        if protect_bx:
+            self.emit(f"        pop {self.target.bx_register}")
+
     def _emit_push_arg(self, arg: Node, /) -> None:
         """Push a single argument onto the stack, preferring compact forms.
 
@@ -1991,12 +2050,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         compile-time constant.  Walks the AST shape to produce a type
         string in the same form as :attr:`variable_types` entries.
         """
-        if isinstance(node, Var):
-            variable_type = self.variable_types.get(node.name)
-            if variable_type is None:
-                message = f"sizeof: unknown variable '{node.name}'"
-                raise CompileError(message, line=node.line)
-            return variable_type
+        if isinstance(node, AddressOf):
+            variable_type = self._expression_type(node.var)
+            return f"{variable_type} *"
+        if isinstance(node, BinaryOperation):
+            return "int"
+        if isinstance(node, Cast):
+            return node.target_type
         if isinstance(node, Index):
             array_type = self._expression_type(node.array)
             if array_type.endswith("*"):
@@ -2006,18 +2066,20 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 return array_type[: array_type.index("[")].rstrip()
             message = f"sizeof: cannot dereference non-pointer type '{array_type}'"
             raise CompileError(message, line=node.line)
-        if isinstance(node, (MemberAccess, IndexMemberAccess)):
-            # p->field or arr[i].field — look up the field's declared type.
-            if isinstance(node, MemberAccess):
-                if node.object_name:
-                    base_type = self.variable_types.get(node.object_name, "")
-                elif node.base_expr is not None:
-                    base_type = self._expression_type(node.base_expr)
-                else:
-                    message = "sizeof: cannot determine struct type for member access"
-                    raise CompileError(message, line=node.line)
-            else:  # IndexMemberAccess
-                base_type = self.variable_types.get(node.name, "")
+        if isinstance(node, Int):
+            # Char subclasses Int and a C character constant has type int
+            # (sizeof('a') == sizeof(int)), so both flow through here — there
+            # is deliberately no separate Char branch.
+            return "int"
+        if isinstance(node, MemberAccess):
+            # p->field — look up the field's declared type.
+            if node.object_name:
+                base_type = self.variable_types.get(node.object_name, "")
+            elif node.base_expr is not None:
+                base_type = self._expression_type(node.base_expr)
+            else:
+                message = "sizeof: cannot determine struct type for member access"
+                raise CompileError(message, line=node.line)
             if node.arrow:
                 if not base_type.endswith("*"):
                     message = f"sizeof: arrow on non-pointer type '{base_type}'"
@@ -2034,23 +2096,37 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 message = f"sizeof: unknown field '{node.member_name}' in struct '{tag}'"
                 raise CompileError(message, line=node.line)
             return field_info.type_name
-        if isinstance(node, Cast):
-            return node.target_type
-        if isinstance(node, Int):
-            return "int"
-        if isinstance(node, Char):
-            return "char"
-        if isinstance(node, String):
-            return "char *"
-        if isinstance(node, AddressOf):
-            variable_type = self._expression_type(node.var)
-            return f"{variable_type} *"
+        if isinstance(node, PlaceLoad):
+            # arr[i].field rvalue — look up the field's declared type (dot form;
+            # this codegen path treats arr[i] as an array of struct values).
+            matched = self._match_struct_array_member(node.place)
+            if matched is None:
+                message = f"sizeof: cannot determine type of {type(node.place).__name__}"
+                raise CompileError(message, line=node.line)
+            array_name, _index, member_name = matched
+            base_type = self.variable_types.get(array_name, "")
+            tag = base_type[7:] if base_type.startswith("struct ") else ""
+            layout = self.struct_layouts.get(tag)
+            if layout is None:
+                message = f"sizeof: unknown struct tag '{tag}'"
+                raise CompileError(message, line=node.line)
+            field_info = layout.get(member_name)
+            if field_info is None:
+                message = f"sizeof: unknown field '{member_name}' in struct '{tag}'"
+                raise CompileError(message, line=node.line)
+            return field_info.type_name
         if isinstance(node, PointerDereference):
             return node.target_type
-        if isinstance(node, BinaryOperation):
-            return "int"
         if isinstance(node, (SizeofType, SizeofVar, SizeofExpr)):
             return "int"
+        if isinstance(node, String):
+            return "char *"
+        if isinstance(node, Var):
+            variable_type = self.variable_types.get(node.name)
+            if variable_type is None:
+                message = f"sizeof: unknown variable '{node.name}'"
+                raise CompileError(message, line=node.line)
+            return variable_type
         message = f"sizeof: cannot determine type of {type(node).__name__}"
         raise CompileError(message, line=node.line)
 
@@ -2369,6 +2445,20 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 for case in statement.cases:
                     found |= X86CodeGenerator._loop_assigned_names(case.body)
         return found
+
+    @staticmethod
+    def _match_struct_array_member(place: Place, /) -> tuple[str, Node, str] | None:
+        """Recognize the one struct-array access shape the Place codegen handles.
+
+        If *place* is ``arr[i].member`` — a :class:`MemberPlace` whose base is a
+        :class:`SubscriptPlace` of a :class:`VariablePlace` — return
+        ``(array_name, index, member_name)``; otherwise ``None``.  The
+        ``arr[i].member[j]`` element shape is this same match applied to the
+        outer subscript's base.
+        """
+        if isinstance(place, MemberPlace) and isinstance(place.base, SubscriptPlace) and isinstance(place.base.base, VariablePlace):
+            return place.base.base.name, place.base.index, place.member_name
+        return None
 
     def _maybe_emit_data_header(self) -> None:
         """Emit the ``section .data`` (or flat-mode comment) header at most once per call to :meth:`_emit_global_storage`."""
@@ -2867,6 +2957,55 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"struct '{tag}' has no field '{member_name}'"
             raise CompileError(message, line=line)
         return layout[member_name]
+
+    def _resolve_place(self, place: Place, /) -> PlaceAddress:
+        """Emit dynamic-offset code (into BX when needed); return a PlaceAddress.
+
+        Plan 1 scope: MemberPlace over SubscriptPlace(VariablePlace) for struct
+        arrays, optionally wrapped in one more SubscriptPlace for an array-typed
+        member.  Other Place shapes raise (later plans extend this).
+        """
+        acc = self.target.acc
+        bx = self.target.bx_register
+        # Shape A: arr[i].member   (scalar or array-typed member, no element index)
+        if (matched := self._match_struct_array_member(place)) is not None:
+            name, index, member_name = matched
+            const_base, struct_size, field_offset, field_size, element_size = self._resolve_index_member_layout(
+                name, member_name, place.line
+            )
+            self._emit_struct_element_offset(index, struct_size)  # BX = i*stride
+            return PlaceAddress(
+                const_base=const_base,
+                element_size=element_size,
+                field_size=field_size,
+                indexed=True,
+                offset=field_offset,
+            )
+        # Shape B: arr[i].member[j]   (element of an array-typed member)
+        if isinstance(place, SubscriptPlace) and (inner := self._match_struct_array_member(place.base)) is not None:
+            name, index, member_name = inner
+            const_base, struct_size, field_offset, _field_size, element_size = self._resolve_index_member_layout(
+                name, member_name, place.line
+            )
+            if element_size not in (1, 2):
+                message = f"indexing '{member_name}' (element size {element_size}) not supported"
+                raise CompileError(message, line=place.line)
+            self._emit_struct_element_offset(index, struct_size)  # BX = i*stride
+            self.emit(f"        push {bx}")
+            self.generate_expression(place.index)  # AX = j
+            if element_size == 2:
+                self.emit(f"        shl {acc}, 1")
+            self.emit(f"        pop {bx}")
+            self.emit(f"        add {bx}, {acc}")  # BX = i*stride + j*element_size
+            return PlaceAddress(
+                const_base=const_base,
+                element_size=element_size,
+                field_size=element_size,
+                indexed=True,
+                offset=field_offset,
+            )
+        message = "unsupported Place shape in _resolve_place"
+        raise CompileError(message, line=place.line)
 
     def _resolve_struct_value_base(self, name: str, /, *, line: int) -> str:
         """Return the memory operand naming the base of struct-value *name*.
@@ -4416,134 +4555,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # reload happens naturally.
         if self._peephole_will_strand_ax():
             self.ax_local = None
-
-    def generate_index_member_access(self, expression: IndexMemberAccess, /) -> None:
-        """Generate code for ``arr[i].field`` as an rvalue.
-
-        Computes the struct element byte offset (``i * struct_size``) into BX,
-        then loads the field from ``[const_base + BX + field_offset]``.
-        Array-typed fields yield the field address (as for ``ptr->arr_field``).
-        """
-        const_base, struct_size, field_offset, field_size, element_size = self._resolve_index_member_layout(
-            expression.name, expression.member_name, expression.line
-        )
-        acc = self.target.acc
-        bx = self.target.bx_register
-        self.ax_clear()
-        protect_bx = self._bx_holds_pinned_var()
-        if protect_bx:
-            self.emit(f"        push {bx}")
-        self._emit_struct_element_offset(expression.index, struct_size)  # BX = i*stride
-        is_array_field = field_size != element_size
-        if is_array_field:
-            # Yield the address of the array member.
-            self.emit(f"        lea {acc}, {self._build_address(const_base, field_offset, index=bx)}")
-            if protect_bx:
-                self.emit(f"        pop {bx}")
-            self.ax_clear()
-            return
-        addr = self._build_address(const_base, field_offset, index=bx)
-        self._emit_field_load(addr=addr, field_size=field_size)
-        if protect_bx:
-            self.emit(f"        pop {bx}")
-        self.ax_clear()
-
-    def generate_index_member_assign(self, statement: IndexMemberAssign, /) -> None:
-        """Generate code for ``arr[i].field = expr;``.
-
-        Evaluates the rhs into AX and saves it; computes the struct element
-        offset into BX; restores AX; stores at ``[const_base + BX + field_offset]``.
-        """
-        const_base, struct_size, field_offset, field_size, _element_size = self._resolve_index_member_layout(
-            statement.name, statement.member_name, statement.line
-        )
-        allowed = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
-        if field_size not in allowed:
-            message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
-            raise CompileError(message, line=statement.line)
-        acc = self.target.acc
-        bx = self.target.bx_register
-        self.ax_clear()
-        protect_bx = self._bx_holds_pinned_var()
-        # When BX holds a pinned variable, push the live BX *before* the
-        # rhs.  Rhs sits on top of the stack so the post-offset pop
-        # restores it directly into AX without addressing tricks (SP
-        # isn't a base register in 16-bit mode, ruling out
-        # ``[sp+N]``-style indexed loads).
-        if protect_bx:
-            self.emit(f"        push {bx}")
-        self.generate_expression(statement.expr)  # AX = value
-        self.emit(f"        push {acc}")  # save value (top of stack)
-        self._emit_struct_element_offset(statement.index, struct_size)  # BX = i*stride
-        self.emit(f"        pop {acc}")  # AX = value
-        self.ax_clear()
-        addr = self._build_address(const_base, field_offset, index=bx)
-        self._emit_field_store(addr=addr, field_size=field_size)
-        if protect_bx:
-            self.emit(f"        pop {bx}")  # restore pinned var
-
-    def generate_index_member_index(self, expression: IndexMemberIndex, /) -> None:
-        """Generate code for ``arr[i].field[n]`` as an rvalue.
-
-        Computes the struct element offset in BX, scales the element index by
-        element_size, adds them, then loads from
-        ``[const_base + BX + field_offset]``.
-        """
-        const_base, struct_size, field_offset, _field_size, element_size = self._resolve_index_member_layout(
-            expression.name, expression.member_name, expression.line
-        )
-        if element_size not in (1, 2):
-            message = f"indexing '{expression.member_name}' (element size {element_size}) not supported"
-            raise CompileError(message, line=expression.line)
-        acc = self.target.acc
-        bx = self.target.bx_register
-        self.ax_clear()
-        self._emit_struct_element_offset(expression.index, struct_size)  # BX = i*stride
-        self.emit(f"        push {bx}")  # save struct element offset
-        self.generate_expression(expression.elem_index)  # AX = n
-        if element_size == 2:
-            self.emit(f"        shl {acc}, 1")  # AX = n*2
-        self.emit(f"        pop {bx}")  # BX = i*stride
-        self.emit(f"        add {bx}, {acc}")  # BX = i*stride + n*element_size
-        addr = self._build_address(const_base, field_offset, index=bx)
-        if element_size == 1:
-            self.emit_byte_load_zx(addr)
-        else:
-            self.emit(f"        mov {acc}, {addr}")
-        self.ax_clear()
-
-    def generate_index_member_index_assign(self, statement: IndexMemberIndexAssign, /) -> None:
-        """Generate code for ``arr[i].field[n] = expr;``.
-
-        Saves the rhs; computes ``i*struct_size`` into BX; saves BX;
-        computes ``n*element_size`` into AX; adds to BX; restores rhs;
-        stores at ``[const_base + BX + field_offset]``.
-        """
-        const_base, struct_size, field_offset, _field_size, element_size = self._resolve_index_member_layout(
-            statement.name, statement.member_name, statement.line
-        )
-        if element_size not in (1, 2):
-            message = f"indexing '{statement.member_name}' (element size {element_size}) not supported"
-            raise CompileError(message, line=statement.line)
-        acc = self.target.acc
-        bx = self.target.bx_register
-        self.ax_clear()
-        self.generate_expression(statement.expr)  # AX = value
-        self.emit(f"        push {acc}")  # save value
-        self._emit_struct_element_offset(statement.index, struct_size)  # BX = i*stride
-        self.emit(f"        push {bx}")  # save struct element offset
-        self.generate_expression(statement.elem_index)  # AX = n
-        if element_size == 2:
-            self.emit(f"        shl {acc}, 1")  # AX = n*2
-        self.emit(f"        pop {bx}")  # BX = i*stride
-        self.emit(f"        add {bx}, {acc}")  # BX = i*stride + n*element_size
-        self.emit(f"        pop {acc}")  # AX = value
-        self.ax_clear()
-        addr = self._build_address(const_base, field_offset, index=bx)
-        if element_size == 1:
-            self.emit(f"        mov byte {addr}, al")
-        else:
-            self.emit(f"        mov word {addr}, ax")
 
     def generate_member_access(self, expression: MemberAccess, /) -> None:
         """Generate code for ``ptr->field`` or ``obj.field`` as an rvalue.

@@ -56,10 +56,6 @@ from cc.ast_nodes import (
     Index,
     IndexAssign,
     IndexedCall,
-    IndexMemberAccess,
-    IndexMemberAssign,
-    IndexMemberIndex,
-    IndexMemberIndexAssign,
     InlineAsm,
     Int,
     Label,
@@ -73,6 +69,8 @@ from cc.ast_nodes import (
     MemberIndexAssign,
     Node,
     Param,
+    PlaceLoad,
+    PlaceStore,
     PointerDereference,
     PointerDereferenceAssign,
     Return,
@@ -914,10 +912,6 @@ class EmissionMixin:
             self.generate_statement(inner)
         elif isinstance(inner, IndexAssign):
             self.generate_index_assign(inner)
-        elif isinstance(inner, IndexMemberAssign):
-            self.generate_index_member_assign(inner)
-        elif isinstance(inner, IndexMemberIndexAssign):
-            self.generate_index_member_index_assign(inner)
         elif isinstance(inner, MemberAssign):
             if self._member_assign_targets_bitfield(inner):
                 message = "assignment-as-expression to bitfield fields is not supported"
@@ -925,6 +919,8 @@ class EmissionMixin:
             self.generate_member_assign(inner)
         elif isinstance(inner, MemberIndexAssign):
             self.generate_member_index_assign(inner)
+        elif isinstance(inner, PlaceStore):
+            self._emit_place_store(inner.place, inner.value)
         elif isinstance(inner, PointerDereferenceAssign):
             self._emit_pointer_dereference_assign(inner)
         else:
@@ -1635,7 +1631,9 @@ class EmissionMixin:
             # ``arr[i]`` reads from memory but doesn't write; the index
             # itself must also be pure.
             return self._is_pure_expression(node.index)
-        if isinstance(node, (MemberAccess, MemberIndex, IndexMemberAccess, IndexMemberIndex)):
+        if isinstance(node, (MemberAccess, MemberIndex)):
+            return True
+        if isinstance(node, PlaceLoad):
             return True
         if isinstance(node, Conditional):
             return (
@@ -1824,9 +1822,9 @@ class EmissionMixin:
         """Return True if node or any descendant is Var(name).
 
         Conservative: any str field equal to name is treated as a possible
-        variable read so that nodes like Assign, MemberAssign, and the
-        IndexMember* family (which still store the target's name as a plain
-        str rather than a Var) are not silently missed.
+        variable read so that nodes like Assign and MemberAssign (which store
+        the target's name as a plain str rather than a Var) are not silently
+        missed.
         """
         if isinstance(node, Var):
             return node.name == name
@@ -2859,10 +2857,6 @@ class EmissionMixin:
                 self.ax_clear()
         elif isinstance(expression, Index):
             self._generate_index_expression(expression)
-        elif isinstance(expression, IndexMemberAccess):
-            self.generate_index_member_access(expression)
-        elif isinstance(expression, IndexMemberIndex):
-            self.generate_index_member_index(expression)
         elif isinstance(expression, IndexedCall):
             self.generate_indexed_call(expression)
         elif isinstance(expression, Int):
@@ -2920,6 +2914,8 @@ class EmissionMixin:
                 self.ax_clear()
         elif isinstance(expression, MemberIndex):
             self.generate_member_index(expression)
+        elif isinstance(expression, PlaceLoad):
+            self._emit_place_load(expression.place)
         elif isinstance(expression, PointerDereference):
             self._emit_pointer_dereference(expression)
         elif isinstance(expression, SizeofExpr):
@@ -4306,12 +4302,6 @@ class EmissionMixin:
             self.ax_clear()
         elif isinstance(statement, IndexAssign):
             self.generate_index_assign(statement)
-        elif isinstance(statement, IndexMemberAssign):
-            self.generate_index_member_assign(statement)
-            self.ax_clear()
-        elif isinstance(statement, IndexMemberIndexAssign):
-            self.generate_index_member_index_assign(statement)
-            self.ax_clear()
         elif isinstance(statement, IndexedCall):
             self.generate_indexed_call(statement, discard_return=True)
             self.ax_clear()
@@ -4342,6 +4332,9 @@ class EmissionMixin:
             self.ax_clear()
         elif isinstance(statement, MemberIndexAssign):
             self.generate_member_index_assign(statement)
+            self.ax_clear()
+        elif isinstance(statement, PlaceStore):
+            self._emit_place_store(statement.place, statement.value)
             self.ax_clear()
         elif isinstance(statement, PointerDereferenceAssign):
             self._emit_pointer_dereference_assign(statement)
