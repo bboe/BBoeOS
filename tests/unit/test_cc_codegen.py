@@ -41,6 +41,7 @@ from cc import ast_nodes, ir  # noqa: E402
 from cc.codegen.x86.generator import X86CodeGenerator  # noqa: E402
 from cc.codegen.x86.peephole import Peepholer  # noqa: E402
 from cc.lexer import tokenize  # noqa: E402
+from cc.options import CompilerOptions  # noqa: E402
 from cc.parser import Parser  # noqa: E402
 from cc.preprocessor import apply_defines, preprocess  # noqa: E402
 from cc.target import X86CodegenTarget16  # noqa: E402
@@ -6957,7 +6958,7 @@ def _rep_string_asm(instruction: ir.RepString, /) -> str:
     memory-resident locals so the value-load helper resolves them through
     the frame-slot path rather than tripping the undefined-variable check.
     """
-    generator = X86CodeGenerator(bits=32)
+    generator = X86CodeGenerator(CompilerOptions(bits=32))
     for offset, name in enumerate(("dst", "src", "n", "iv"), start=1):
         generator.locals[name] = offset * 4
         generator.visible_vars.add(name)

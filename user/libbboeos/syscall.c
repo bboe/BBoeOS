@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdarg.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <syscalls.h>
@@ -135,12 +136,26 @@ int gettimeofday(struct timeval *tv, struct timezone *tz) {
 }
 
 /* Generic ioctl: AH=SYS_IO_IOCTL, BX=fd, AL=cmd, ECX/EDX=args.
+ *
+ * Variadic in the POSIX spirit: a command takes up to two unsigned-int
+ * arguments (ECX then EDX), and each command documents how many it
+ * consumes.  bboeos's own callers pass both (e.g. VGA_IOCTL_SET_PALETTE
+ * uses CL/CH in ECX and DL/DH in EDX); POSIX-style callers that pass a
+ * single pointer/value (e.g. kilo's `ioctl(1, TIOCGWINSZ, &ws)`) leave
+ * the EDX slot unread by the kernel, which ignores arguments a command
+ * doesn't use.
+ *
  * Bind inputs directly to the kernel's expected registers to keep the
  * extended-asm constraint count low — the alternative ("g" everywhere
- * + clobbers) trips clang's "inline assembly requires more registers
- * than available" under -O2 because EAX/EBX/ECX/EDX are all spoken
- * for as both inputs and outputs/clobbers. */
-int ioctl(int fd, int cmd, unsigned int ecx_arg, unsigned int edx_arg) {
+ * + clobbers) trips "inline assembly requires more registers than
+ * available" under -O2 because EAX/EBX/ECX/EDX are all spoken for as
+ * both inputs and outputs/clobbers. */
+int ioctl(int fd, int cmd, ...) {
+    va_list arguments;
+    va_start(arguments, cmd);
+    unsigned int ecx_arg = va_arg(arguments, unsigned int);
+    unsigned int edx_arg = va_arg(arguments, unsigned int);
+    va_end(arguments);
     /* Pack AH=SYS_IO_IOCTL, AL=cmd into the EAX seed.  cmd is masked
      * to 8 bits so the low byte ends up in AL after the int. */
     unsigned int eax_in_out =

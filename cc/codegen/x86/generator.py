@@ -75,6 +75,7 @@ from cc.codegen.x86.jumps import (
     JUMP_WHEN_TRUE_UNSIGNED,
 )
 from cc.errors import CompileError
+from cc.options import CompilerOptions
 from cc.target import CodegenTarget, X86CodegenTarget16, X86CodegenTarget32
 from cc.tokens import COMPARISON_OPERATIONS
 from cc.utils import decode_string_escapes, string_byte_length
@@ -216,17 +217,20 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
     def __init__(
         self,
+        options: CompilerOptions | None = None,
         *,
-        bits: int = 16,
         constant_values: dict[str, int] | None = None,
         defines: dict[str, str] | None = None,
-        object_mode: bool = False,
-        per_function_sections: bool = False,
-        target_mode: str = "user",
     ) -> None:
         """Initialize code generator state.
 
-        ``bits`` selects the target: 16 → ``X86CodegenTarget16``,
+        ``options`` (:class:`CompilerOptions`) carries the compiler knobs
+        — ``bits``, ``object_mode``, ``per_function_sections``,
+        ``permissive``, ``target_mode`` — that flow together from the
+        CLI; they are unpacked into locals below so the body reads them
+        by their bare names.  ``None`` falls back to the defaults.
+
+        ``options.bits`` selects the target: 16 → ``X86CodegenTarget16``,
         32 → ``X86CodegenTarget32``.  All mode-dependent decisions
         (register names, operand widths, type sizes, kernel ABI) live
         in the target object.  The arch-agnostic state
@@ -253,6 +257,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         into the kernel blob: no ``org``, no ``_program_end``, no BSS
         trailer, no ``int 30h`` self-call builtins).
         """
+        if options is None:
+            options = CompilerOptions()
+        # Unpack the knobs into the same local names the body already
+        # uses, so threading them as one object changes only this line
+        # block — not the dozens of `self.<knob>` reads below.
+        bits = options.bits
+        object_mode = options.object_mode
+        per_function_sections = options.per_function_sections
+        permissive = options.permissive
+        target_mode = options.target_mode
         if bits not in (16, 32):
             message = f"unsupported bits={bits}; expected 16 or 32"
             raise ValueError(message)
@@ -304,6 +318,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.in_register_params: dict[str, dict[int, str]] = {}
         self.object_mode: bool = object_mode
         self.per_function_sections: bool = per_function_sections
+        # permissive: relax bboeos house-style comparison strictness so
+        # unmodified third-party C (kilo, lua, Doom) compiles — integer 0
+        # counts as a null-pointer constant, `if (p)` and `c != 0` are
+        # accepted.  See validate_comparison_types.  Set via --permissive.
+        self.permissive: bool = permissive
         self.out_register_params: dict[str, dict[int, str]] = {}
         self.param_in_register: dict[str, str] = {}
         self.pinned_register: dict[str, str] = {}
@@ -5088,7 +5107,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         ``Char`` literal may appear opposite a ``unsigned char`` / ``int``
         operand — it's just a small integer, and forcing hex spelling
         there hurts readability (``byte >= '\xC0'`` stays legal).
+
+        Under ``--permissive`` (``self.permissive``) every check here is
+        skipped: third-party C (kilo, lua, Doom) treats integer ``0`` as a
+        null-pointer constant, writes ``if (p)`` and ``c != 0`` freely, and
+        we accept those forms verbatim rather than rewrite upstream source.
+        The strictness is bboeos house style for first-party code only.
         """
+        if self.permissive:
+            return
         left_type = self._type_of_operand(left)
         right_type = self._type_of_operand(right)
         line = left.line or right.line

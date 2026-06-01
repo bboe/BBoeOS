@@ -22,7 +22,11 @@ unsigned int alarm(unsigned int seconds);
 unsigned int alarm_ms(unsigned int delay_ms, unsigned int interval_ms);
 int brk(void *addr);
 int close(int fd);
-int ioctl(int fd, int cmd, unsigned int ecx_arg, unsigned int edx_arg);
+/* Variadic in the POSIX spirit: a command takes up to two unsigned-int
+ * arguments, passed through to the kernel in ECX then EDX.  Each command
+ * documents how many it consumes; callers passing fewer (e.g. a single
+ * pointer) leave the unused slots untouched by the kernel. */
+int ioctl(int fd, int cmd, ...);
 off_t lseek(int fd, off_t offset,
             int whence); /* stub: returns -1, sets errno=ESPIPE */
 int open(const char *path, int flags, ...);
