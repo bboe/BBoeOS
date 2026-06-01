@@ -916,6 +916,19 @@ void emit_sib_mem(int reg_field, int base, int index, int scale, int disp) {
         scale_bits = 3;
     }
     int reg_bits = (reg_field & 0x7) << 3;
+    /* No-base form: base == 0xFF means encode as ``[disp32 + index*scale]``
+       (mod=00, SIB.base=101, disp32).  The 101 base encoding under mod=00
+       is the architectural "no base register" form — the same bits that
+       force EBP into mod=01 disp8=0 below.  Used by cc.py for accessing
+       file-scope arrays like ``[_g_arr + edx*4]`` without staging the
+       index through ESI. */
+    if (base == 0xFF) {
+        int sib = (scale_bits << 6) | ((index & 0x7) << 3) | 5;
+        emit_byte(reg_bits | 0x04);
+        emit_byte(sib);
+        emit_dword(disp);
+        return;
+    }
     int sib = (scale_bits << 6) | ((index & 0x7) << 3) | (base & 0x7);
     if (base == 5 && disp == 0) {
         /* [ebp + index*scale] with mod=00 means disp32 with no base;
@@ -2259,6 +2272,8 @@ void inc_dec_handler(int rfield) {
     int value = parse_operand_value;
     int size = op1_size;
     int reg_shift = rfield << 3;
+    int op1_index_reg = parse_operand_index_reg;
+    int op1_scale = parse_operand_scale;
     if (type == 0) {
         if (size == 8) {
             emit_byte(0xFE);
@@ -2271,6 +2286,8 @@ void inc_dec_handler(int rfield) {
         emit_sized_mem(0xFE, size);
         if (type == 2) {
             emit_modrm_direct(rfield, value);
+        } else if (type == 4) {
+            emit_sib_mem(rfield, register_id, op1_index_reg, op1_scale, value);
         } else {
             emit_indexed_mem(rfield, register_id, value);
         }
@@ -3164,7 +3181,8 @@ int parse_operand() {
         parse_operand_value = disp;
         return (3 << 8) | register_id; /* type=3 (reg+disp) */
     }
-    /* Not ``[reg...]``: could be ``[disp]`` or ``[disp+reg]``.
+    /* Not ``[reg...]``: could be ``[disp]``, ``[disp+reg]``, or
+       ``[disp + reg*scale (+ disp2)]`` (SIB no-base form).
        Scan forward to ``]`` (or NUL), then scan backwards over
        trailing whitespace to find the end of the bracket contents. */
     char *bracket_start = source_cursor;
@@ -3179,6 +3197,82 @@ int parse_operand() {
             break;
         }
         end = prev;
+    }
+    /* Try ``[disp + reg*scale (+ disp2)]`` (SIB no-base) first.  Look
+       for a ``*`` inside the brackets; if found, the register sits just
+       before it and the scale literal just after.  An optional ``+
+       disp2`` may follow.  ``disp`` (the leading expression) is
+       everything before the ``+`` that immediately precedes the
+       register identifier.  Used by cc.py for indexed access to
+       file-scope arrays under ``--bits 32``: ``[_g_arr + edx*4]``. */
+    char *star_pos = bracket_start;
+    while (star_pos < close && star_pos[0] != '*') {
+        star_pos += 1;
+    }
+    if (star_pos < close) {
+        /* Found ``*``.  Walk back from it over whitespace, then over
+           identifier chars to find the register name. */
+        char *idx_end = star_pos;
+        while (idx_end > bracket_start && idx_end[-1] == ' ') {
+            idx_end -= 1;
+        }
+        char *idx_start = idx_end;
+        while (idx_start > bracket_start && is_ident_char(idx_start[-1])) {
+            idx_start -= 1;
+        }
+        if (idx_start < idx_end) {
+            /* Try parse_register over [idx_start, idx_end). */
+            char *saved = source_cursor;
+            source_cursor = idx_start;
+            int packed_index = parse_register();
+            int reg_consumed_to_end = (source_cursor == idx_end);
+            source_cursor = saved;
+            if (packed_index >= 0 && reg_consumed_to_end &&
+                ((packed_index >> 8) & 0xFF) == 32) {
+                /* Found a 32-bit register before ``*``.  Look for ``+``
+                   right before idx_start to confirm the leading disp. */
+                char *plus_pos = idx_start;
+                while (plus_pos > bracket_start && plus_pos[-1] == ' ') {
+                    plus_pos -= 1;
+                }
+                if (plus_pos > bracket_start && plus_pos[-1] == '+') {
+                    /* Parse the scale literal after ``*``. */
+                    saved = source_cursor;
+                    source_cursor = star_pos + 1;
+                    skip_ws();
+                    int scale = parse_number();
+                    /* Optional trailing ``+ disp2``. */
+                    skip_ws();
+                    int trailing_disp = 0;
+                    if (source_cursor[0] == '+') {
+                        source_cursor += 1;
+                        skip_ws();
+                        trailing_disp = resolve_value();
+                    } else if (source_cursor[0] == '-') {
+                        trailing_disp = resolve_value();
+                    }
+                    /* Parse leading disp.  Null-terminate at the ``+``
+                       between disp and register so resolve_value sees
+                       only the leading expression. */
+                    char *plus_char = plus_pos - 1;
+                    plus_char[0] = '\0';
+                    source_cursor = bracket_start;
+                    int label_disp = resolve_value();
+                    plus_char[0] = '+';
+                    source_cursor = close;
+                    if (source_cursor[0] == ']') {
+                        source_cursor += 1;
+                    }
+                    parse_operand_address_size = 32;
+                    parse_operand_value = label_disp + trailing_disp;
+                    parse_operand_index_reg = packed_index & 0xFF;
+                    parse_operand_scale = scale;
+                    return (4 << 8) |
+                           0xFF; /* type=4 (SIB), base=0xFF (no base) */
+                }
+                (void)saved;
+            }
+        }
     }
     /* Try to parse a register at the trailing position to catch the
        ``[disp + reg]`` NASM dialect.  The register name is the run
