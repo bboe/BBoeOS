@@ -89,6 +89,21 @@ int last_exec_status;
 char saved_line[MAX_INPUT];
 int saved_line_length;
 
+/* Tab-completion scratch.  complete_arena holds copies of matched entry
+   names (packed, NUL-terminated); complete_matches points into the arena.
+   The getdents I/O buffer borrows expanded_buffer (only live during command
+   execution, never during the line-edit press of Tab) to avoid carrying a
+   dedicated page of BSS just for completion. */
+#define COMPLETE_ARENA_BYTES 1024
+#define COMPLETE_MAX_MATCHES 64
+
+char complete_arena[COMPLETE_ARENA_BYTES];
+int complete_arena_used;
+char *complete_matches[COMPLETE_MAX_MATCHES];
+int complete_cursor_out;
+int complete_end_out;
+int complete_match_count;
+
 /* Scratch buffers for the pipeline parser (`cmd1 | cmd2`).  File-scope
    so that (a) cc.py passes their addresses correctly on function calls
    and (b) they live in BSS without consuming additional user stack.
@@ -311,6 +326,69 @@ int build_command_argv(int start, int end, char **argv_out, int *argc_out,
     argv_out[argc] = 0;
     *argc_out = argc;
     return write;
+}
+
+int add_match(char *name, int name_length, char *prefix, int prefix_length,
+              int type) {
+    /* If *name* starts with *prefix*, copy it into complete_arena and
+       record a pointer in complete_matches[].  Stores the d_type
+       (DT_DIR=4 or DT_REG=8) in the byte immediately before each name so
+       the caller can append '/' for directories.  Updates the two file-
+       scope cursors complete_arena_used and complete_match_count.
+       Returns 1 if appended, 0 if it didn't fit or didn't match. */
+    if (name_length < prefix_length) {
+        return 0;
+    }
+    int i = 0;
+    while (i < prefix_length) {
+        if (name[i] != prefix[i]) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    if (complete_match_count >= COMPLETE_MAX_MATCHES) {
+        return 0;
+    }
+    if (complete_arena_used + 1 + name_length + 1 > COMPLETE_ARENA_BYTES) {
+        return 0;
+    }
+    complete_arena[complete_arena_used] = type;
+    complete_arena_used = complete_arena_used + 1;
+    complete_matches[complete_match_count] =
+        complete_arena + complete_arena_used;
+    memcpy(complete_arena + complete_arena_used, name, name_length + 1);
+    complete_arena_used = complete_arena_used + name_length + 1;
+    complete_match_count = complete_match_count + 1;
+    return 1;
+}
+
+int collect_matches(char *directory, char *prefix, int prefix_length) {
+    /* Open *directory*, enumerate entries via getdents, and append every
+       entry whose name starts with *prefix* via add_match.  Appends to
+       the existing complete_matches[] / complete_arena state — the
+       caller must reset complete_arena_used and complete_match_count
+       before the first collector call.  Returns the final match count. */
+    int fd = open(directory, O_RDONLY);
+    if (fd < 0) {
+        return complete_match_count;
+    }
+    while (1) {
+        int bytes = getdents(fd, expanded_buffer, sizeof(expanded_buffer));
+        if (bytes <= 0) {
+            break;
+        }
+        int cursor = 0;
+        while (cursor < bytes) {
+            int reclen = expanded_buffer[cursor + 4] +
+                         (expanded_buffer[cursor + 5] << 8);
+            int type = expanded_buffer[cursor + 6];
+            char *name = expanded_buffer + cursor + 7;
+            add_match(name, strlen(name), prefix, prefix_length, type);
+            cursor = cursor + reclen;
+        }
+    }
+    close(fd);
+    return complete_match_count;
 }
 
 int cursor_back(int count) {
@@ -600,6 +678,7 @@ int expand_word(char *src, char *dst, int max_len) {
    explicit declarations. */
 int replace_line(char *buf, int cursor, int end, char *new_content,
                  int new_length);
+void tab_complete(char *buf, int cursor, int end);
 int visual_bell();
 
 int history_down(char *buf, int cursor, int end) {
@@ -658,6 +737,29 @@ int insert_char(char *buf, int cursor, int end, char character) {
     return end;
 }
 
+int longest_common_prefix() {
+    /* Compute the length of the longest common prefix among all entries
+       in complete_matches[0..complete_match_count).  Returns 0 if count
+       is 0. */
+    if (complete_match_count == 0) {
+        return 0;
+    }
+    int length = strlen(complete_matches[0]);
+    int i = 1;
+    while (i < complete_match_count) {
+        int j = 0;
+        while (j < length) {
+            if (complete_matches[i][j] != complete_matches[0][j]) {
+                length = j;
+                break;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return length;
+}
+
 int replace_line(char *buf, int cursor, int end, char *new_content,
                  int new_length) {
     /* Erase the current input area on screen by stepping cursor back
@@ -693,6 +795,148 @@ int restore_redirections() {
         index = index + 1;
     }
     return 0;
+}
+
+void tab_complete(char *buf, int cursor, int end) {
+    /* Determine if we're completing a command (first word) or an argument
+       (subsequent word).  Extract the partial word, collect matches, and
+       either insert or display them.  Updates complete_cursor_out and
+       complete_end_out for the caller. */
+    complete_cursor_out = cursor;
+    complete_end_out = end;
+
+    /* Find the start of the current word by scanning backward. */
+    int word_start = cursor;
+    while (word_start > 0 && buf[word_start - 1] != ' ') {
+        word_start = word_start - 1;
+    }
+    int word_length = cursor - word_start;
+
+    /* Determine position: command if no space precedes the word start. */
+    int is_command = 1;
+    int scan = 0;
+    while (scan < word_start) {
+        if (buf[scan] != ' ') {
+            is_command = 0;
+            break;
+        }
+        scan = scan + 1;
+    }
+
+    /* Null-terminate the partial word for prefix matching. */
+    char partial[MAX_INPUT];
+    memcpy(partial, buf + word_start, word_length);
+    partial[word_length] = '\0';
+
+    complete_arena_used = 0;
+    complete_match_count = 0;
+    int count;
+    int dir_prefix_length = 0;
+    if (is_command) {
+        /* Command completion: hand-coded builtins + bin/ entries.
+           Builtin names live as string literals so add_match can compute
+           length on the fly; DT_REG type (8) so the multi-match printer
+           treats them as files (no trailing '/'). */
+        add_match("help", 4, partial, word_length, 8);
+        add_match("reboot", 6, partial, word_length, 8);
+        add_match("shutdown", 8, partial, word_length, 8);
+        count = collect_matches("bin", partial, word_length);
+    } else {
+        /* Argument completion: split partial at last '/' for dir + prefix. */
+        char directory[MAX_PATH];
+        char prefix[MAX_INPUT];
+        int last_slash = -1;
+        int pi = 0;
+        while (pi < word_length) {
+            if (partial[pi] == '/') {
+                last_slash = pi;
+            }
+            pi = pi + 1;
+        }
+        if (last_slash < 0) {
+            directory[0] = '.';
+            directory[1] = '\0';
+            memcpy(prefix, partial, word_length + 1);
+            dir_prefix_length = 0;
+        } else {
+            memcpy(directory, partial, last_slash + 1);
+            directory[last_slash + 1] = '\0';
+            int plen = word_length - last_slash - 1;
+            memcpy(prefix, partial + last_slash + 1, plen + 1);
+            word_length = plen;
+            dir_prefix_length = last_slash + 1;
+        }
+        count = collect_matches(directory, prefix, word_length);
+    }
+
+    if (count == 0) {
+        visual_bell();
+        return;
+    }
+
+    /* Compute longest common prefix of matches. */
+    int lcp = longest_common_prefix();
+
+    if (lcp > word_length) {
+        /* We can extend the typed word.  Replace the partial with the
+           LCP.  If there's exactly one match, also append '/' for dirs. */
+        int suffix_length = lcp - word_length;
+        int insert_extra = 0;
+        if (count == 1) {
+            /* Check d_type stored one byte before the name. */
+            char *type_ptr = complete_matches[0] - 1;
+            if (type_ptr[0] == '\x04') { /* DT_DIR */
+                insert_extra = 1;
+            }
+        }
+        /* Insert the new characters at cursor. */
+        int total_insert = suffix_length + insert_extra;
+        char insertion[MAX_INPUT];
+        memcpy(insertion, complete_matches[0] + word_length, suffix_length);
+        if (insert_extra) {
+            insertion[suffix_length] = '/';
+        }
+        int ii = 0;
+        while (ii < total_insert && end < MAX_INPUT) {
+            end = insert_char(buf, cursor, end, insertion[ii]);
+            cursor = cursor + 1;
+            ii = ii + 1;
+        }
+        complete_cursor_out = cursor;
+        complete_end_out = end;
+        return;
+    }
+
+    /* Multiple matches and LCP == what's typed: display all. */
+    putchar('\n');
+    int mi = 0;
+    while (mi < count) {
+        if (mi > 0) {
+            write(STDOUT, "  ", 2);
+        }
+        char *name = complete_matches[mi];
+        int nlen = strlen(name);
+        if (dir_prefix_length > 0) {
+            write(STDOUT, partial, dir_prefix_length);
+        }
+        write(STDOUT, name, nlen);
+        char *type_ptr = name - 1;
+        if (type_ptr[0] == '\x04') { /* DT_DIR */
+            putchar('/');
+        }
+        mi = mi + 1;
+    }
+    putchar('\n');
+    /* Reprint prompt + current input. */
+    write(STDOUT, "$ ", 2);
+    if (end > 0) {
+        write(STDOUT, buf, end);
+    }
+    if (cursor < end) {
+        cursor_back(end - cursor);
+    }
+    complete_cursor_out = cursor;
+    complete_end_out = end;
 }
 
 int try_exec(char *name, char **argv) {
@@ -785,6 +1029,12 @@ int main() {
                     putchar(buf[cursor]);
                     cursor += 1;
                 }
+                break;
+            case '\t':
+                /* Tab: trigger completion */
+                tab_complete(buf, cursor, end);
+                cursor = complete_cursor_out;
+                end = complete_end_out;
                 break;
             case '\b':
             case '\x7F':

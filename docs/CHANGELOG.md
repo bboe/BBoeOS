@@ -13,6 +13,11 @@ time.
 
 ### Changed
 
+- **Shell: tab completion.** Press Tab to complete command names (builtins and
+  executables in `bin/`) in first-word position, or files and directories in
+  argument position.  Single matches are inserted in-place (directories get a
+  trailing `/`); ambiguous matches insert the longest common prefix, then list
+  all candidates bash-style on a second Tab; no matches flash a visual bell.
 - **Every user program now builds through the object-file pipeline; the flat
   path is gone.** `shell`, `arp`, and `dns` came off `make_os.sh`'s
   `FLAT_PROGRAMS` as their object-pipeline failures were fixed (see below):
