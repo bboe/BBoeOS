@@ -114,3 +114,11 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   lives in `user/programs/shell.c` using `open()` + `getdents()`.
   Plan: [2026-05-27-shell-tab-completion-plan.md](./2026-05-27-shell-tab-completion-plan.md).
   Status: shipped on branch `bboe/shell-tab-completion`.
+- [2026-06-01 — cc.py rep-string loop recognition](./2026-06-01-cc-rep-string-loops-design.md)
+  — recognize hand-written element-wise init/copy loops
+  (`for (i=0;i<n;i++) dst[i]=0;` / `dst[i]=src[i];`) and rewrite them
+  into `rep stos{b,w,d}` / `rep movs{b,w,d}` via a new IR pass over
+  natural loops (reusing the strength-reduction induction-variable
+  analysis) plus a `RepString` IR node.  Adds `movsd` / `stosd` to the
+  self-hosted assembler.  Backlog item #3.
+  Status: design complete; plan + implementation pending.
