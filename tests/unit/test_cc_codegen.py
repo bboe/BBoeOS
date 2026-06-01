@@ -2255,6 +2255,38 @@ def test_indexed_load_with_pinned_index_uses_sib_addressing() -> None:
     assert "shl eax, 2" not in asm or "add esi, eax" not in asm, f"manual scale+add survived in:\n{asm}"
 
 
+def test_indexed_in_place_increment_fuses_to_inc_dword_sib() -> None:
+    """``p[i] = p[i] + 1`` through a pinned-index pointer fuses to ``inc dword [base+idx*k]``.
+
+    The codegen lowers the indexed update to ``mov acc, [base+idx*k] /
+    inc acc / mov [base+idx*k], acc`` after the SIB load/store paths
+    fire.  ``peephole_memory_arithmetic`` then collapses that triple
+    into a single ``inc dword [base+idx*k]``.  Requires the
+    SI-dedup-before-memory-arithmetic ordering in the second peephole
+    pass so the redundant base reload between the increment and the
+    store doesn't hide the pattern.
+    """
+    asm = _kernel(
+        """
+        void bump(int *p, int n) {
+            int i;
+            i = 0;
+            while (i < n) {
+                p[i] = p[i] + 1;
+                i = i + 1;
+            }
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("bump:", 1)[1]
+    assert any(line.strip().startswith("inc dword [esi+") and "*4]" in line for line in body.splitlines()), (
+        f"expected fused ``inc dword [esi+idx*4]`` in:\n{asm}"
+    )
+    # And the pre-fuse 3-instruction sequence should be gone.
+    assert "mov eax, [esi+" not in body, f"unfused SIB load survived in:\n{asm}"
+
+
 def test_pointer_plus_pinned_index_uses_lea_sib() -> None:
     """``&buf[i]`` / ``buf + i`` collapses to one ``lea`` when the index is pinned.
 
