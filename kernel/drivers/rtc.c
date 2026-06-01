@@ -21,9 +21,11 @@
 //   CMOS_SECONDS = 0x00, CMOS_MINUTES = 0x02, CMOS_HOURS = 0x04
 //   CMOS_DAY = 0x07, CMOS_MONTH = 0x08, CMOS_YEAR = 0x09
 //   CMOS_STATUS_A = 0x0A, CMOS_CENTURY = 0x32
-//   CMOS_UPDATE_IN_PROGRESS = 0x80
+// The status-A update-in-progress bit is named via `struct
+// cmos_status_a` (registers.h) rather than a bare 0x80 mask.
 
 #include "program_state.h"
+#include "registers.h"
 
 u8 epoch_day;
 u8 epoch_hours;
@@ -253,9 +255,11 @@ asm("rtc_tick_read:\n"
 // Spin until the CMOS UIP bit clears — gives the ~244 µs window in
 // which all time-of-day registers are guaranteed stable.
 void rtc_wait_steady() {
+    u8 raw;
     while (1) {
         kernel_outb(0x70, 0x0A);
-        if ((kernel_inb(0x71) & 0x80) == 0) {
+        raw = kernel_inb(0x71);
+        if (((struct cmos_status_a *)&raw)->uip == 0) {
             return;
         }
     }
