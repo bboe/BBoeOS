@@ -936,6 +936,33 @@ class EmissionMixin:
             self.ax_clear()
             return
         operator, left, right = expression.operation, expression.left, expression.right
+        # x86 SIB-addressing fast path for ``ptr + i`` / ``&arr[i]``:
+        # when the index is a Var pinned to a non-acc register and the
+        # element size is x86-encodable (1, 2, 4, 8), one ``lea`` collapses
+        # the whole base-plus-scaled-index computation.  Without this the
+        # codegen builds the address through ``generate_expression(left) /
+        # push acc / generate_expression(right) / shl acc, k / mov cx, acc /
+        # pop acc / add acc, cx`` — 7 instructions where ``mov acc, base /
+        # lea acc, [acc + idx*k]`` does the same in 2.  Gated on 32-bit-or-
+        # wider (16-bit addressing forms reject SIB).
+        if (
+            operator == "+"
+            and isinstance(left, Var)
+            and isinstance(right, Var)
+            and right.name in self.pinned_register
+            and self.pinned_register[right.name] != self.target.acc
+            and self.target.int_size >= 4
+        ):
+            # Restrict to element_size >= 2: the element_size == 1 case
+            # already lowers to ``add acc, idx`` (2 bytes) via the pinned-
+            # register fast path below, which beats lea's 3-byte SIB encoding.
+            element_size = self._arithmetic_element_size(left.name)
+            if element_size in (2, 4, 8):
+                self.generate_expression(left)
+                idx_reg = self.pinned_register[right.name]
+                self.emit(f"        lea {self.target.acc}, [{self.target.acc}+{idx_reg}*{element_size}]")
+                self.ax_clear()
+                return
         # Pointer arithmetic: scale the right operand by the element size when
         # the left side is a pointer or array variable.  ptr + N → ptr + N*sizeof(*ptr).
         # For byte pointers (char*, unsigned char*) element_size is 1 so nothing changes.
