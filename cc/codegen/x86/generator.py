@@ -1188,6 +1188,31 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             index = index.left
         si = self.target.si_register
         base_register = si
+        # No-base SIB fast path: when the index is a Var pinned to a
+        # register and the element size is x86-encodable as a SIB scale
+        # (4 or 8), return ``[const_base + disp + idx*scale]`` directly
+        # without staging the scaled index through SI.  Saves the
+        # ``mov si, idx_reg / shl si, k`` sequence at every use site.
+        # Restricted to scales 4 and 8: NASM canonicalizes scale 1 and
+        # 2 to non-SIB / ``[base+base]`` encodings, and matching its
+        # byte stream means avoiding those scales (PR #559 asm.c
+        # fixture sib_no_base.asm documents the same restriction).
+        # Gated on 32-bit-or-wider since 16-bit addressing forms reject
+        # general SIB.
+        sib_no_base_eligible = (
+            isinstance(index, Var)
+            and index.name in self.pinned_register
+            and element_size in (4, 8)
+            and self.pinned_register[index.name] != si
+            and self.target.int_size >= 4
+        )
+        if sib_no_base_eligible:
+            pinned_index_reg = self.pinned_register[index.name]
+            addr = const_base
+            if displacement != 0:
+                addr += f"{displacement:+d}"
+            addr += f"+{pinned_index_reg}*{element_size}"
+            return addr
         if isinstance(index, Int):
             displacement += index.value * element_size
             self.emit(f"        xor {si}, {si}")

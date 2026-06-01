@@ -2255,6 +2255,44 @@ def test_indexed_load_with_pinned_index_uses_sib_addressing() -> None:
     assert "shl eax, 2" not in asm or "add esi, eax" not in asm, f"manual scale+add survived in:\n{asm}"
 
 
+def test_constant_base_pinned_index_uses_no_base_sib() -> None:
+    """``arr[i]`` on a file-scope array collapses to ``[_g_arr + idx*4]`` when the index is pinned.
+
+    Without the no-base SIB form ``_emit_constant_base_index_addr``
+    stages the scaled index through SI:
+    ``mov si, idx_reg / shl si, 2 / mov acc, [_g_arr + si]`` — 3
+    instructions for the address.  With the no-base SIB the load
+    becomes ``mov acc, [_g_arr + idx_reg*4]`` — 1 instruction.  Same
+    win on the store side.  Restricted to scales 4 and 8 because
+    NASM (the production assembler) canonicalizes scales 1 and 2 to
+    different encodings; cc.py's self-host roundtrip would break for
+    those scales.
+    """
+    asm = _kernel(
+        """
+        int arr[8];
+        int sum(void) {
+            int i, total;
+            i = 0;
+            total = 0;
+            while (i < 8) {
+                total = total + arr[i];
+                i = i + 1;
+            }
+            return total;
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("sum:", 1)[1].split("\n;", 1)[0]
+    assert any(line.strip().startswith("mov eax, [_g_arr+") and "*4]" in line for line in body.splitlines()), (
+        f"expected no-base SIB load ``mov eax, [_g_arr+idx*4]`` in:\n{asm}"
+    )
+    # And the pre-optimization manual scale-through-SI sequence
+    # should be gone.
+    assert "shl esi, 2" not in body, f"manual scale-through-SI survived in:\n{asm}"
+
+
 def test_indexed_in_place_increment_fuses_to_inc_dword_sib() -> None:
     """``p[i] = p[i] + 1`` through a pinned-index pointer fuses to ``inc dword [base+idx*k]``.
 
