@@ -8,7 +8,7 @@ matches what a hand-trace would predict.
 from __future__ import annotations
 
 from cc import ast_nodes, ir
-from cc.ir_optimize import Optimizer
+from cc.ir_optimize import Optimizer, _instruction_value_operands  # noqa: PLC2701
 
 
 def _function(body: list[ir.Instruction], /, *, carry_return: bool = False) -> ir.Function:
@@ -449,6 +449,40 @@ def test_propagation_into_branch_condition() -> None:
         ir.BranchFalse(left=42, operation="<", right="bound", target=".L1"),
         ir.Label(name=".L1"),
     ]
+
+
+def test_rep_string_is_not_dead_code_eliminated() -> None:
+    """RepString is side-effecting: DCE must keep it even with no dest."""
+    body = [
+        ir.RepString(
+            operation="fill",
+            element_size=1,
+            dest="buffer",
+            source=None,
+            count="n",
+            fill_value=0,
+            counter_signed=False,
+            final_iv=None,
+        ),
+        ir.Return(value=None),
+    ]
+    optimized = _optimize(body)
+    assert any(isinstance(instruction, ir.RepString) for instruction in optimized)
+
+
+def test_rep_string_value_operands_keep_count_live() -> None:
+    """``RepString`` exposes ``count`` (and ``fill_value`` when set) as value operands."""
+    node = ir.RepString(
+        operation="copy",
+        element_size=4,
+        dest="d",
+        source="s",
+        count="n",
+        fill_value=None,
+        counter_signed=True,
+        final_iv=None,
+    )
+    assert "n" in _instruction_value_operands(node)
 
 
 def test_self_loop_label_is_not_treated_as_trampoline() -> None:

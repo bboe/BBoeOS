@@ -167,6 +167,7 @@ def _has_side_effects(instruction: ir.Instruction, /) -> bool:
             ir.Jump,
             ir.Label,
             ir.LoopBoundary,
+            ir.RepString,
             ir.Return,
             ir.TailCall,
         ),
@@ -205,6 +206,11 @@ def _instruction_value_operands(instruction: ir.Instruction, /) -> tuple[ir.Valu
         return (instruction.index, instruction.source)
     if isinstance(instruction, ir.BranchFalse):
         return (instruction.left, instruction.right)
+    if isinstance(instruction, ir.RepString):
+        operands = [instruction.count]
+        if instruction.fill_value is not None:
+            operands.append(instruction.fill_value)
+        return tuple(operands)
     if isinstance(instruction, ir.Return):
         return () if instruction.value is None else (instruction.value,)
     return ()
