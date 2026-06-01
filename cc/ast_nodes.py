@@ -601,8 +601,13 @@ class MemberIndex(Node):
     ``base + field_offset + index * element_size``.  ``ptr->field`` (no
     index) is :class:`MemberAccess`, which yields the field's address for
     array fields.
+
+    ``address_of=True`` is the ``&ptr->field[i]`` / ``&obj.field[i]``
+    form: codegen computes the same element address but emits a ``lea``
+    into the accumulator instead of loading the element value.
     """
 
+    address_of: bool = False
     arrow: bool
     index: Node
     member_name: str

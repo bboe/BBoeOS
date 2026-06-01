@@ -4842,14 +4842,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             raise CompileError(message, line=expression.line)
         object_name = expression.object_name
         element_size, is_pointer_field = self._member_index_element_size(info)
+        # The element-size restriction only constrains the value *load*
+        # (emit_byte_load_zx / a word/dword mov).  The ``&obj.field[i]``
+        # address-of form just lea's the element address, so any element
+        # size is fine there — the index is scaled with a general imul.
         allowed_sizes = (1, 2, 4) if is_pointer_field else (1, 2)
-        if element_size not in allowed_sizes:
+        if not expression.address_of and element_size not in allowed_sizes:
             message = f"indexing '{expression.member_name}' (element size {element_size}) not supported"
             raise CompileError(message, line=expression.line)
         field_offset = info.byte_offset
 
         def emit_load(addr: str) -> None:
-            if element_size == 1:
+            # ``&obj.field[i]`` wants the element address, not its value.
+            if expression.address_of:
+                self.emit(f"        lea {self.target.acc}, {addr}")
+            elif element_size == 1:
                 self.emit_byte_load_zx(addr)
             else:
                 self.emit(f"        mov {self.target.acc}, {addr}")
@@ -4881,6 +4888,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if element_size in (2, 4):
             shift = 1 if element_size == 2 else 2
             self.emit(f"        shl {self.target.acc}, {shift}")
+        elif element_size != 1:
+            # Arbitrary element size — only reachable for the address-of
+            # form (a struct-sized element); scale with a general multiply.
+            self.emit(f"        imul {self.target.acc}, {element_size}")
         # Save scaled index, load base.
         self.emit(f"        push {self.target.acc}")
         if expression.arrow and self.si_local == object_name:

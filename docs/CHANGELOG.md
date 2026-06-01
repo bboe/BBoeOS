@@ -13,6 +13,13 @@ time.
 
 ### Added
 
+- **cc.py parser/codegen extensions for third-party C (kilo).** Four constructs
+  upstream C uses freely that cc.py previously rejected now compile: `typedef
+  struct [TAG] { ... } ALIAS;` (a struct definition bundled with a typedef,
+  tagged and anonymous); comma-separated struct members sharing one base type
+  (`int cx, cy;`); the empty statement (`;`, e.g. a `while (cond);` spin loop);
+  and `&obj.field[i]` / `&ptr->field[i]` (address of an indexed array/pointer
+  member, scaled by a general `imul` for struct-sized elements).
 - **cc.py `--permissive` mode for third-party C.** An opt-in flag that relaxes
   the house-style comparison strictness: integer literal `0` counts as a
   null-pointer constant, so `if (p)`, `p == 0`, and `c != 0` compile without the
