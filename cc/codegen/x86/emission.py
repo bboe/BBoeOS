@@ -1287,10 +1287,7 @@ class EmissionMixin:
             # Var load doesn't touch SI, so no push/pop round-trip.
             self.generate_expression(inner)
             if not is_byte_inner:
-                if inner_size == self.target.int_size:
-                    self._emit_scale_int_index(self.target.acc)
-                else:
-                    self.emit(f"        imul {self.target.acc}, {self.target.acc}, {inner_size}")
+                self._emit_scale_index(self.target.acc, scale=inner_size)
             self.emit(f"        add {si}, {self.target.acc}")
             if is_byte_inner:
                 self.emit_byte_load_zx(f"[{si}]")
@@ -1301,10 +1298,7 @@ class EmissionMixin:
             self.emit(f"        push {si}")
             self.generate_expression(inner)
             if not is_byte_inner:
-                if inner_size == self.target.int_size:
-                    self._emit_scale_int_index(self.target.acc)
-                else:
-                    self.emit(f"        imul {self.target.acc}, {self.target.acc}, {inner_size}")
+                self._emit_scale_index(self.target.acc, scale=inner_size)
             self.emit(f"        pop {si}")
             self.emit(f"        add {si}, {self.target.acc}")
             if is_byte_inner:
