@@ -2255,6 +2255,42 @@ def test_indexed_load_with_pinned_index_uses_sib_addressing() -> None:
     assert "shl eax, 2" not in asm or "add esi, eax" not in asm, f"manual scale+add survived in:\n{asm}"
 
 
+def test_ternary_with_pinned_branch_uses_cmov() -> None:
+    """``cond ? pinned_a : pinned_b`` collapses to ``mov acc, b / cmp / cmov<cc> acc, a``.
+
+    The cmov fast path fires only when the diamond would be at least
+    one byte longer: at least one branch must be a Var pinned to a
+    non-acc register, so cmov can use that register directly without
+    staging it through CX.  With two memory-resident branches the
+    cmov sequence's ``mov cx, acc`` overhead matches the diamond's
+    ``jcc + jmp`` and no win is available — the guard bails to the
+    legacy diamond in that case.
+    """
+    asm = _kernel(
+        """
+        int sum(int n) {
+            int counter, a, b, result;
+            counter = 0;
+            a = 3;
+            b = 7;
+            result = 0;
+            while (counter < n) {
+                result = result + (counter < 5 ? a : b);
+                counter = counter + 1;
+            }
+            return result;
+        }
+        """,
+        bits=32,
+    )
+    body = asm.split("sum:", 1)[1]
+    assert "cmovl" in body or "cmovge" in body, f"expected cmov<l|ge> in:\n{asm}"
+    # And no jcc-then-jmp diamond around the ternary.  ``.cond_else``
+    # is the existing diamond's else label; presence means we fell
+    # through to the slow path.
+    assert ".cond_else_" not in body, f"diamond survived alongside cmov in:\n{asm}"
+
+
 def test_constant_base_pinned_index_uses_no_base_sib() -> None:
     """``arr[i]`` on a file-scope array collapses to ``[_g_arr + idx*4]`` when the index is pinned.
 

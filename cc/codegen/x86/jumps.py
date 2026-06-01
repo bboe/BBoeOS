@@ -39,6 +39,24 @@ JUMP_WHEN_FALSE = {
     "not_carry": "jnc",
 }
 
+CMOV_WHEN_TRUE = {
+    "!=": "cmovne",
+    "<": "cmovl",
+    "<=": "cmovle",
+    ">": "cmovg",
+    ">=": "cmovge",
+    "==": "cmove",
+}
+
+CMOV_WHEN_FALSE = {
+    "!=": "cmove",
+    "<": "cmovge",
+    "<=": "cmovg",
+    ">": "cmovle",
+    ">=": "cmovl",
+    "==": "cmovne",
+}
+
 JUMP_WHEN_TRUE = {
     "!=": "jne",
     "<": "jl",

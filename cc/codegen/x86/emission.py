@@ -89,7 +89,14 @@ from cc.ast_nodes import (
     VarDecl,
     While,
 )
-from cc.codegen.x86.jumps import JUMP_WHEN_FALSE, JUMP_WHEN_FALSE_UNSIGNED, JUMP_WHEN_TRUE, JUMP_WHEN_TRUE_UNSIGNED
+from cc.codegen.x86.jumps import (
+    CMOV_WHEN_FALSE,
+    CMOV_WHEN_TRUE,
+    JUMP_WHEN_FALSE,
+    JUMP_WHEN_FALSE_UNSIGNED,
+    JUMP_WHEN_TRUE,
+    JUMP_WHEN_TRUE_UNSIGNED,
+)
 from cc.codegen.x86.peephole import Peepholer
 from cc.errors import CompileError
 from cc.ir_optimize import Optimizer
@@ -1216,6 +1223,8 @@ class EmissionMixin:
         condition = self._normalise_ternary_condition(expression.condition)
         if self._try_emit_conditional_via_cond_value(condition=condition, expression=expression):
             return
+        if self._try_emit_conditional_via_cmov(condition=condition, expression=expression):
+            return
         label_index = self.new_label()
         else_label = f".cond_else_{label_index}"
         end_label = f".cond_end_{label_index}"
@@ -2021,6 +2030,91 @@ class EmissionMixin:
         self.emit(f"{end_label}:")
         # Merge: AX holds whichever branch's value ran, but the
         # cross-path variable tracking is no longer guaranteed.
+        self.ax_clear()
+        return True
+
+    def _try_emit_conditional_via_cmov(self, *, condition: Node, expression: Conditional) -> bool:
+        """Lower a ternary to ``cmov`` when at least one branch is a pinned register.
+
+        Returns True when the lowering matched and was emitted.  Fires
+        only when the cmov sequence is *strictly shorter* than the
+        diamond — i.e. when at least one branch is a ``Var`` pinned to
+        a non-acc register, so cmov can use that register directly and
+        skip the ``mov cx, acc`` staging that would otherwise burn the
+        cmov's 1-byte advantage over ``jcc + jmp``.
+
+        Two shapes emit::
+
+            # then is pinned: load else first, cmov<cc> picks then
+            mov acc, else_expr
+            cmp X, Y
+            cmov<cc-true> acc, then_reg
+
+            # else is pinned: load then first, cmov<inverted-cc> picks else
+            mov acc, then_expr
+            cmp X, Y
+            cmov<cc-false> acc, else_reg
+
+        Either way: 3-byte ``cmov`` replaces 4-byte ``jcc + jmp``,
+        saving 1 byte per ternary.  No branch in the output.
+
+        Restrictions:
+          - 32-bit target only (cmov is i686+).
+          - Condition must be a comparison with ``Var`` / ``Int``
+            operands (complex sub-expressions like ``arr[i]`` would
+            need ECX as scratch and clobber our register-tracking).
+          - Both branches must be ``Var`` / ``Int`` (single-mov loads).
+          - At least one branch must be a ``Var`` pinned to a register
+            other than the accumulator.
+          - Unsigned ``<`` / ``<=`` / ``>`` / ``>=`` are bailed: the
+            unsigned cmov mnemonics (``cmovb`` / ``cmova`` / ``cmovbe``
+            / ``cmovae``) are not yet wired up in the self-host
+            assembler.  ``==`` / ``!=`` work for both signs.
+        """
+        if self.target.int_size < 4:
+            return False
+        if not isinstance(condition, BinaryOperation) or condition.operation not in COMPARISON_OPERATIONS:
+            return False
+        if not isinstance(condition.left, (Var, Int)) or not isinstance(condition.right, (Var, Int)):
+            return False
+        if not isinstance(expression.then_expr, (Var, Int)) or not isinstance(expression.else_expr, (Var, Int)):
+            return False
+        if condition.operation not in ("==", "!=") and self._is_unsigned_comparison(condition.left, condition.right):
+            return False
+        acc = self.target.acc
+
+        def pinned_reg(expr: Node) -> str | None:
+            if not isinstance(expr, Var):
+                return None
+            register = self.pinned_register.get(expr.name)
+            if register is None or register == acc:
+                return None
+            return register
+
+        then_reg = pinned_reg(expression.then_expr)
+        else_reg = pinned_reg(expression.else_expr)
+        if then_reg is None and else_reg is None:
+            # Neither branch is pinned — diamond is at least as short.
+            return False
+        # Prefer the ``then is pinned`` shape (more natural reading
+        # order).  Either shape saves the same 1 byte vs. the diamond.
+        self.validate_comparison_types(condition.left, condition.right)
+        if then_reg is not None:
+            # Load else into acc, then cmov<true> from then_reg.
+            self.generate_expression(expression.else_expr)
+            operator, _unsigned = self.emit_condition(condition=condition, context="ast")
+            if operator not in CMOV_WHEN_TRUE:
+                return False  # carry_return / other — already emitted else, can't bail cleanly
+            self.emit(f"        {CMOV_WHEN_TRUE[operator]} {acc}, {then_reg}")
+        else:
+            # else is pinned (else_reg != None).  Load then into acc,
+            # then cmov<inverted-cc> from else_reg — inverted so the
+            # cmov fires when the original condition would be FALSE.
+            self.generate_expression(expression.then_expr)
+            operator, _unsigned = self.emit_condition(condition=condition, context="ast")
+            if operator not in CMOV_WHEN_FALSE:
+                return False
+            self.emit(f"        {CMOV_WHEN_FALSE[operator]} {acc}, {else_reg}")
         self.ax_clear()
         return True
 
