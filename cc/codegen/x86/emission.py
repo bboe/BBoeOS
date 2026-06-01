@@ -68,6 +68,7 @@ from cc.ast_nodes import (
     MemberAccess,
     MemberAddressOf,
     MemberAssign,
+    MemberDoubleIndex,
     MemberIncrementDecrement,
     MemberIndex,
     MemberIndexAssign,
@@ -1305,6 +1306,62 @@ class EmissionMixin:
                 self.emit(f"        mov {self.target.acc}, [{si}]")
         else:
             # General inner expression — preserve SI across evaluation.
+            self.emit(f"        push {si}")
+            self.generate_expression(inner)
+            if not is_byte_inner:
+                self._emit_scale_index(self.target.acc, scale=inner_size)
+            self.emit(f"        pop {si}")
+            self.emit(f"        add {si}, {self.target.acc}")
+            if is_byte_inner:
+                self.emit_byte_load_zx(f"[{si}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, [{si}]")
+        self.ax_clear()
+
+    def _generate_member_double_index_expression(self, expression: MemberDoubleIndex, /) -> None:
+        """Lower ``ptr->field[i][j]`` for a pointer-of-pointer member.
+
+        Stage 1 reuses :class:`MemberIndex` to load ``field[i]`` (the
+        outer ``T *``) into the accumulator — the same path that handles
+        ``ptr->field[i]``.  Stage 2 mirrors
+        :meth:`_generate_double_index_expression`: park the pointer in SI
+        and index into it, sized by ``sizeof(T)`` (the member's base type
+        with its pointer stars stripped).
+        """
+        self.ax_clear()
+        outer_load = MemberIndex(
+            arrow=expression.arrow,
+            index=expression.outer_index,
+            line=expression.line,
+            member_name=expression.member_name,
+            object_name=expression.object_name,
+        )
+        self.generate_expression(outer_load)
+        # Inner stride: the member's declared type with all pointer stars
+        # and array brackets removed (``char **`` / ``char *[N]`` → ``char``).
+        info = self._resolve_member_index_layout(
+            arrow=expression.arrow,
+            line=expression.line,
+            member_name=expression.member_name,
+            object_name=expression.object_name,
+        )
+        base_type = info.type_name.split("[")[0].replace("*", "").strip()
+        try:
+            inner_size = self._type_size(base_type)
+        except KeyError:
+            inner_size = self.target.int_size
+        is_byte_inner = inner_size == 1
+        si = self.target.si_register
+        self.emit(f"        mov {si}, {self.target.acc}")
+        inner = expression.inner_index
+        if isinstance(inner, Int):
+            offset = inner.value * (1 if is_byte_inner else inner_size)
+            mem = f"{si}+{offset}" if offset else si
+            if is_byte_inner:
+                self.emit_byte_load_zx(f"[{mem}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, [{mem}]")
+        else:
             self.emit(f"        push {si}")
             self.generate_expression(inner)
             if not is_byte_inner:
@@ -2833,6 +2890,8 @@ class EmissionMixin:
                 )
         elif isinstance(expression, DoubleIndex):
             self._generate_double_index_expression(expression)
+        elif isinstance(expression, MemberDoubleIndex):
+            self._generate_member_double_index_expression(expression)
         elif isinstance(expression, IncrementDecrement):
             # Lower ``var ± 1`` through the normal Assign store path so
             # register-pinned locals, byte locals, frame-slot locals,

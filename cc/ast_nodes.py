@@ -573,6 +573,24 @@ class MemberAssign(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class MemberDoubleIndex(Node):
+    """Chained subscript into a pointer-of-pointer member: ``ptr->field[i][j]``.
+
+    For a ``char **`` (or ``T **`` / ``T *[N]``) member, the outer
+    subscript loads one element (a ``T *``) — exactly what
+    :class:`MemberIndex` yields — and the inner subscript indexes into
+    that pointee, sized by ``sizeof(T)``.  Used by kilo's
+    ``s->filematch[i][0]``.
+    """
+
+    arrow: bool
+    inner_index: Node
+    member_name: str
+    object_name: str
+    outer_index: Node
+
+
+@dataclass(kw_only=True, slots=True)
 class MemberIncrementDecrement(IntegerOperand, Node):
     """``++ptr->field`` / ``--ptr->field`` / ``ptr->field++`` / ``ptr->field--``.
 

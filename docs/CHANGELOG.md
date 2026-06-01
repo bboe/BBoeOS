@@ -24,6 +24,11 @@ time.
   `*(base + index)` and `*(base)` forms now desugar to `base[index]`, so kilo's
   `*(p+1)` / `*(p+klen)` compile (previously only `*name`, `*++p`, and the `*(T
   *)cast` form were accepted).
+- **cc.py double-indexing a pointer-of-pointer member (`s->field[i][j]`).** A
+  chained subscript on a `char **` / `T **` member now lowers via a new
+  `MemberDoubleIndex` node: stage 1 loads the outer `T *` element (reusing the
+  member-index path), stage 2 indexes into it sized by `sizeof(T)`.  Used by
+  kilo's `s->filematch[i][0]`.
 - **cc.py `--permissive` mode for third-party C.** An opt-in flag that relaxes
   the house-style comparison strictness: integer literal `0` counts as a
   null-pointer constant, so `if (p)`, `p == 0`, and `c != 0` compile without the

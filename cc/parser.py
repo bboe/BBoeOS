@@ -51,6 +51,7 @@ from cc.ast_nodes import (
     MemberAccess,
     MemberAddressOf,
     MemberAssign,
+    MemberDoubleIndex,
     MemberIncrementDecrement,
     MemberIndex,
     MemberIndexAssign,
@@ -844,6 +845,20 @@ class Parser:
                 self.eat("LBRACKET")
                 index = self.parse_expression()
                 self.eat("RBRACKET")
+                # ``ptr->field[i][j]`` — a pointer-of-pointer member
+                # (``char **field``) chased twice.
+                if self.peek()[0] == "LBRACKET":
+                    self.eat("LBRACKET")
+                    inner_index = self.parse_expression()
+                    self.eat("RBRACKET")
+                    return MemberDoubleIndex(
+                        arrow=arrow,
+                        inner_index=inner_index,
+                        line=line,
+                        member_name=member_token[1],
+                        object_name=name,
+                        outer_index=index,
+                    )
                 return MemberIndex(
                     arrow=arrow,
                     index=index,
