@@ -69,14 +69,44 @@ jobs:
       - uses: actions/cache@v5
         if: needs.changes.outputs.docs_only != 'true' && matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive' && matrix.suite != 'lint_no_raw_syscalls'
         with:
-          key: apt-nasm-qemu-e2fsprogs-${{ runner.os }}
+          key: apt-qemu-e2fsprogs-${{ runner.os }}
           path: ~/apt-cache
       - name: Install build dependencies
         if: needs.changes.outputs.docs_only != 'true' && matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive' && matrix.suite != 'lint_no_raw_syscalls'
         run: |
           sudo cp ~/apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
-          sudo apt-get update && sudo apt-get install -y e2fsprogs nasm qemu-system-x86
+          sudo apt-get update && sudo apt-get install -y e2fsprogs qemu-system-x86 autoconf automake gcc make perl
           mkdir -p ~/apt-cache && cp /var/cache/apt/archives/*.deb ~/apt-cache/
+      # bboe/nasm @ jmp-match-forward-shrink fixes a Jcc/JMP relaxation
+      # quirk where stock NASM 2.16 keeps the long form for forward
+      # jumps whose post-shrink rel8 would just fit (disp = ±127 / -128
+      # after target moves back by 4). asm.c's self-hosted assembler
+      # picks the shorter form in those cases, so byte-for-byte
+      # roundtrip required either matching NASM's conservatism (deep
+      # multipass-algorithm work) or fixing NASM to agree with asm.c
+      # (this patch). Pinned by commit so a NASM rebase doesn't drift
+      # the relaxation behaviour out from under test_asm.
+      - uses: actions/cache@v5
+        if: needs.changes.outputs.docs_only != 'true' && matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive' && matrix.suite != 'lint_no_raw_syscalls'
+        with:
+          key: nasm-bin-9aa829a0-${{ runner.os }}
+          path: ~/nasm-bin
+      - name: Build patched NASM
+        if: needs.changes.outputs.docs_only != 'true' && matrix.suite != 'test_cc_compatibility' && matrix.suite != 'test_kernel_archive' && matrix.suite != 'lint_no_raw_syscalls'
+        env:
+          NASM_COMMIT: 9aa829a07adeb75fdd815136a20dd7a9890e2961
+        run: |
+          if [ ! -x "$HOME/nasm-bin/nasm" ]; then
+            git clone --filter=blob:none https://github.com/bboe/nasm.git ~/nasm-src
+            cd ~/nasm-src
+            git checkout "$NASM_COMMIT"
+            ./autogen.sh
+            ./configure
+            make -j"$(nproc)"
+            mkdir -p ~/nasm-bin
+            cp nasm ~/nasm-bin/
+          fi
+          echo "$HOME/nasm-bin" >> "$GITHUB_PATH"
       - name: Install pytest
         if: needs.changes.outputs.docs_only != 'true' && (matrix.suite == 'test_unit' || matrix.suite == 'test_pipeline')
         run: pip install pytest
