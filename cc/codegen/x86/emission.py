@@ -1374,8 +1374,6 @@ class EmissionMixin:
                     self.emit(f"        mov {self.target.acc}, [{addr}]")
                 self._si_scratch_guard_end(guarded=guarded)
             else:
-                guarded = self._si_scratch_guard_begin(vname)
-                self._emit_load_var(vname, register=self.target.si_register)
                 si = self.target.si_register
                 # Index scaling: ``p[i]`` advances by sizeof(*p)
                 # bytes per ``i``, so a narrow pointee (unsigned short* on
@@ -1386,6 +1384,37 @@ class EmissionMixin:
                     scale_size = 1
                 else:
                     scale_size = self.target.int_size
+                # x86 SIB-addressing fast path: when the index lives in a
+                # pinned register distinct from SI, fold ``acc = idx*k;
+                # si += acc`` into the load's effective address.  Same
+                # gating as the IndexAssign SIB write path
+                # (``generate_index_assign``).
+                pinned_index_register = (
+                    self.pinned_register[index_expression.name]
+                    if isinstance(index_expression, Var) and index_expression.name in self.pinned_register
+                    else None
+                )
+                if (
+                    pinned_index_register is not None
+                    and pinned_index_register != si
+                    and scale_size in (1, 2, 4, 8)
+                    and self.target.int_size >= 4
+                ):
+                    guarded = self._si_scratch_guard_begin(vname)
+                    self._emit_load_var(vname, register=si)
+                    scale_suffix = "" if scale_size == 1 else f"*{scale_size}"
+                    addr = f"{si}+{pinned_index_register}{scale_suffix}"
+                    if is_byte:
+                        self.emit_byte_load_zx(f"[{addr}]")
+                    elif narrow_word:
+                        _word_load(addr)
+                    else:
+                        self.emit(f"        mov {self.target.acc}, [{addr}]")
+                    self._si_scratch_guard_end(guarded=guarded)
+                    self.ax_clear()
+                    return
+                guarded = self._si_scratch_guard_begin(vname)
+                self._emit_load_var(vname, register=si)
 
                 def _scale(register: str, /) -> None:
                     if scale_size == 1:
