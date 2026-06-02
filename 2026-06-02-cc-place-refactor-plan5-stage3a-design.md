@@ -1,9 +1,25 @@
 # cc.py Place Refactor — Plan 5 / Stage 3a Design: recursive address resolver
 
-**Status:** Designed (brainstormed + approved). First sub-stage of the merged
-Stage 3 (decomposition A: recursion-first). Sub-stages 3b (fold named-array
-`ir.Index` + rep-string rewrite + operand lowering) and 3c (CSE/LICM/SSA
-optimizer port) follow.
+**Status:** SCOPE EXPANDED — partially superseded. Implementation revealed the
+**parser** caps lvalue depth: it rejects true multidimensional array decls
+(`int m[2][3]`), pointer-to-array types (`int (*p)[3]`), and triple+ subscripts
+(`m[i][j][k]`), and member-index is limited to element sizes 1–2. So this
+codegen-only design (a recursive `resolve_address`) cannot demonstrate
+arbitrary depth end-to-end — the parser never produces those trees. Decision:
+expand the scope to a full **multidimensional-array language feature** (parser +
+type system + codegen), to be re-designed and re-decomposed (new design doc
+forthcoming). What survives from this doc: the recursive `resolve_address` /
+`MemOperand` architecture (the codegen substrate), the deref-breaks-the-chain
+model, terminal bitfield/width handling, the Clang/GCC consistency analysis, and
+the resolver-unification + retire-the-hack + lift-element-size goals — these
+become the codegen sub-piece of the expanded feature. **Task 1 (MemOperand +
+`resolve_address` skeleton) is implemented** and committed on branch
+`bboe/cc-place-plan5-stage3a` (inert, byte-identical); it is the first step of
+that codegen sub-piece. The codegen-only implementation plan
+(`2026-06-02-cc-place-refactor-plan5-stage3a.md`) is superseded beyond Task 1.
+
+Original codegen-only design below (the resolver architecture is retained; the
+"arbitrary depth end-to-end" claim is what the parser blocks):
 
 **Goal:** Replace the five bespoke place-codegen emitters with **one recursive
 `resolve_address(place)`** over a generalized machine-operand descriptor, so
