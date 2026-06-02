@@ -60,6 +60,34 @@ def _is_constant_true(condition: ast_nodes.Node, /) -> bool:
     return isinstance(condition.left, ast_nodes.Int) and condition.left.value != 0
 
 
+def _is_migrated_access(node: ast_nodes.Node, /) -> bool:
+    """Return True for the Place-access shapes Stage 1 lowers to :class:`Access`.
+
+    PlaceLoad / PlaceStore / PlaceCall — the always-complex (member /
+    dereference / subscript-of-expression) accesses.  PlaceAddressOf and
+    PlaceIncrementDecrement stay on :class:`Block` this stage (their
+    ``VariablePlace`` forms back the loop induction-variable matchers in
+    ``cc.loops``); see the Stage 1 plan's Scope boundary.
+    """
+    return isinstance(node, (ast_nodes.PlaceCall, ast_nodes.PlaceLoad, ast_nodes.PlaceStore))
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Access(_NoValueFields):
+    """Complex-lvalue access (PlaceLoad / PlaceStore / PlaceCall).
+
+    Carved out of :class:`Block` so the access family is a distinct,
+    optimizer-visible op (Plan 5 Stage 1).  Like ``Block`` it wraps an
+    AST ``node`` lowered by the existing statement codegen and reads no
+    IR ``Value`` operands directly — its reads are discovered by walking
+    ``node`` (``_iter_ast_var_names``).  Treated identically to ``Block``
+    at every conservative / opaque optimizer site; the type tag is what
+    later stages key structured-operand handling off of.
+    """
+
+    node: ast_nodes.Node
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class BinaryOperation:
     """destination = left operation right — arithmetic or bitwise binary operation."""
@@ -283,7 +311,8 @@ class TailCall:
 
 
 Instruction = (
-    BinaryOperation
+    Access
+    | BinaryOperation
     | Block
     | BranchFalse
     | Call
@@ -533,6 +562,10 @@ class Builder:
                 return expr
             case ast_nodes.AssignExpr(inner=inner):
                 return self._lower_assign_expr(inner=inner, out=out, strings=strings)
+            case _ if _is_migrated_access(expr):
+                temp = self._tmp()
+                out.append(Access(node=ast_nodes.Assign(expr=expr, name=temp)))
+                return temp
             case _:
                 # Complex: use a temp + Block to let AST codegen handle it.
                 temp = self._tmp()
@@ -732,6 +765,8 @@ class Builder:
                     out=out,
                     strings=strings,
                 )
+            case _ if _is_migrated_access(stmt):
+                out.append(Access(node=stmt))
             case _:
                 out.append(Block(node=stmt))
 

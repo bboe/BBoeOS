@@ -1634,7 +1634,7 @@ class EmissionMixin:
                     self._current_call_pinned_initialized = None
             case ir.Switch():
                 self._generate_ir_switch(instruction)
-            case ir.Block(node=node):
+            case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
 
     def _node_contains_var(self, node: Node, name: str, /) -> bool:

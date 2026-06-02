@@ -281,7 +281,7 @@ class CodeGeneratorBase:
                     continue  # skip trailing labels
                 case ir.Return() | ir.TailCall():
                     return True
-                case ir.Block(node=node):
+                case ir.Block(node=node) | ir.Access(node=node):
                     return CodeGeneratorBase.always_exits([node])
                 case _:
                     return False
@@ -350,7 +350,7 @@ class CodeGeneratorBase:
                         destination = name
                     case ir.Call(destination=name):
                         destination = name
-                    case ir.Block(node=Assign(name=name)):
+                    case ir.Block(node=Assign(name=name)) | ir.Access(node=Assign(name=name)):
                         destination = name
                     case ir.Switch(cases=cases):
                         # IR Switch arms hold lowered IR instructions;
@@ -906,7 +906,7 @@ class CodeGeneratorBase:
             return True
         if isinstance(last, ir.Return):
             return True
-        if isinstance(last, ir.Block):
+        if isinstance(last, (ir.Block, ir.Access)):
             return CodeGeneratorBase.always_exits([last.node])
         if isinstance(last, ir.Label):
             # Trailing label means control could still fall off the end.

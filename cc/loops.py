@@ -649,7 +649,7 @@ def _iter_read_names(instruction: ir.Instruction, /) -> Iterator[str]:
             yield instruction.source
         if instruction.final_iv is not None and isinstance(instruction.final_iv[1], str):
             yield instruction.final_iv[1]
-    if isinstance(instruction, (ir.Block, ir.CarryBranch, ir.Switch)):
+    if isinstance(instruction, (ir.Access, ir.Block, ir.CarryBranch, ir.Switch)):
         yield from _iter_ast_read_names(instruction)
 
 
@@ -704,7 +704,7 @@ def _iv_address_taken_in_loop(body_block_order: list[BasicBlock], /, *, inductio
             # mention.  A bare mention (the IV's own ``i++`` increment, a
             # ``Var(i)`` read) is harmless and must not reject, or every
             # real ``for (i = 0; ...; i++)`` loop would be turned away.
-            if isinstance(instruction, (ir.Block, ir.CarryBranch, ir.Switch)) and _ast_takes_address_of(
+            if isinstance(instruction, (ir.Access, ir.Block, ir.CarryBranch, ir.Switch)) and _ast_takes_address_of(
                 instruction, name=induction_variable
             ):
                 return True
@@ -1071,7 +1071,7 @@ def _names_defined_in_loop(*, body_block_order: list[BasicBlock]) -> set[str]:
             destination = getattr(instruction, "destination", None)
             if isinstance(destination, str):
                 names.add(destination)
-            if isinstance(instruction, (ir.Block, ir.CarryBranch, ir.Switch)):
+            if isinstance(instruction, (ir.Access, ir.Block, ir.CarryBranch, ir.Switch)):
                 names.update(_iter_ast_referenced_names(instruction))
     return names
 

@@ -753,7 +753,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # Record filter sets for every direct IR call — builtin
             # and user-function alike — plus CarryBranch
             # (``carry_return`` callee invoked from a condition).
-            # Block-wrapped statements are not analysed; ``ir.Block``
+            # Block / Access-wrapped statements are not analysed; ``ir.Block`` / ``ir.Access``
             # lowering leaves :attr:`_current_call_pinned_initialized`
             # at ``None`` so any nested calls fall back to the
             # conservative full save-set.
@@ -3024,8 +3024,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """
         if isinstance(instruction, (ir.BinaryOperation, ir.Copy, ir.Index)):
             return [instruction.destination]
-        if isinstance(instruction, ir.Block):
-            # Block-wrapped AST escape hatch.  A VarDecl with
+        if isinstance(instruction, (ir.Block, ir.Access)):
+            # Block / Access wrap an AST escape hatch.  A VarDecl with
             # initialiser is a store to its name; ditto an
             # ``unsigned long`` Assign that the IR builder routes
             # through Block.  Pinned-to-register locals can't be

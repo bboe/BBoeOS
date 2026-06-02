@@ -140,6 +140,10 @@ jobs:
             command: python3 tests/test_cc_local_structs.py
           - suite: test_cc_compatibility
             command: python3 tests/test_cc_compatibility.py
+          - suite: test_cc_function_sizes
+            command: python3 tests/test_cc_function_sizes.py
+          - suite: test_cc_place
+            command: python3 tests/test_cc_place.py
           - suite: test_doom_music_qemu
             command: python3 tests/test_doom_music_qemu.py
           - suite: test_doom_sound_qemu

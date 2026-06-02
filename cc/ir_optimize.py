@@ -160,6 +160,7 @@ def _has_side_effects(instruction: ir.Instruction, /) -> bool:
     return isinstance(
         instruction,
         (
+            ir.Access,
             ir.Block,
             ir.BranchFalse,
             ir.Call,
@@ -499,7 +500,7 @@ class Optimizer:
         """Return the set of IR labels (``.user_<name>``) referenced by Block-buried Gotos."""
         targets: set[str] = set()
         for instruction in body:
-            if isinstance(instruction, ir.Block):
+            if isinstance(instruction, (ir.Access, ir.Block)):
                 targets.update(_iter_ast_goto_targets(instruction.node))
             elif isinstance(instruction, ir.CarryBranch):
                 targets.update(_iter_ast_goto_targets(instruction.call_ast))
@@ -522,7 +523,7 @@ class Optimizer:
                     counts[operand] = counts.get(operand, 0) + 1
             if isinstance(instruction, (ir.Index, ir.IndexAssign)):
                 counts[instruction.base] = counts.get(instruction.base, 0) + 1
-            elif isinstance(instruction, ir.Block):
+            elif isinstance(instruction, (ir.Access, ir.Block)):
                 for name in _iter_ast_var_names(instruction.node):
                     counts[name] = counts.get(name, 0) + 1
             elif isinstance(instruction, ir.CarryBranch):
