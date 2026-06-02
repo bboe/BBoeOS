@@ -42,10 +42,9 @@ from cc.ast_nodes import (
     Compound,
     Conditional,
     Continue,
-    DerefAssign,
+    DereferencePlace,
     DerefIncrement,
     DerefIncrementAssign,
-    DoubleIndex,
     DoWhile,
     ExtendedAsm,
     For,
@@ -69,14 +68,13 @@ from cc.ast_nodes import (
     PlaceIncDec,
     PlaceLoad,
     PlaceStore,
-    PointerDereference,
-    PointerDereferenceAssign,
     Return,
     SizeofExpr,
     SizeofType,
     SizeofVar,
     String,
     StructInitializer,
+    SubscriptPlace,
     Switch,
     SwitchCase,
     TailCall,
@@ -304,7 +302,8 @@ class EmissionMixin:
                 self.variable_arrays.add(param.name)
             if param.out_register is not None:
                 # Output-only register param: no caller-pushed stack slot.
-                # Track it so DerefAssign in the body emits mov <reg>, <val>.
+                # Track it so a ``*p = v`` store in the body emits
+                # mov <reg>, <val> instead of a pointer write.
                 self.out_register_locals[param.name] = param.out_register
                 continue
             if param.in_register is not None:
@@ -653,75 +652,6 @@ class EmissionMixin:
             else:
                 self.emit(f"        {operation} {width} [{address}], {amount}")
 
-    def _emit_pointer_dereference(self, expression: PointerDereference) -> None:
-        """Read through a pointer expression at ``target_type`` width.
-
-        Codegen: evaluate ``expression.expression`` into the accumulator
-        (an address), then load through it.  Width is chosen by
-        ``target_type``: ``unsigned char`` → byte load with zero-extension;
-        anything else → full int_size load.
-
-        Shortcut: when the inner expression is ``AddressOf(Var)`` of a
-        local, fold the ``lea + load`` pair into a single frame-relative
-        load.  This is the hot path for the port-IO bridge idiom
-        ``*(unsigned char *)&local_struct``.
-        """
-        inner = expression.expression
-        if isinstance(inner, AddressOf) and inner.var.name in self.locals:
-            address = f"[{self._local_address(inner.var.name)}]"
-            if expression.target_type == "unsigned char":
-                self.emit_byte_load_zx(address)
-            elif expression.target_type == "unsigned short" and self.target.int_size > 2:
-                self.emit(f"        movzx {self.target.acc}, word {address}")
-            else:
-                self.emit(f"        mov {self.target.acc}, {address}")
-            self.ax_clear()
-            return
-        self.generate_expression(inner)
-        address_register = self.target.acc
-        if expression.target_type == "unsigned char":
-            self.emit(f"        mov al, [{address_register}]")
-            self.emit_accumulator_zx_from_al()
-        elif expression.target_type == "unsigned short" and self.target.int_size > 2:
-            self.emit(f"        movzx {address_register}, word [{address_register}]")
-        else:
-            self.emit(f"        mov {address_register}, [{address_register}]")
-        self.ax_clear()
-
-    def _emit_pointer_dereference_assign(self, statement: PointerDereferenceAssign) -> None:
-        """Write ``value`` through ``*(target_type *)address``.
-
-        Evaluates the RHS into the accumulator, then the address
-        expression into the SI scratch register, and stores at
-        ``target_type`` width.  Shortcut: when ``address`` is
-        ``AddressOf(Var)`` of a local, fold the store directly to
-        ``[ebp-N]`` (no lea / scratch register).  This is the hot path
-        for the port-IO bridge idiom ``*(unsigned char *)&local = inb(...);``.
-        """
-        self.generate_expression(statement.value)
-        accumulator = self.target.acc
-        if isinstance(statement.address, AddressOf) and statement.address.var.name in self.locals:
-            destination = f"[{self._local_address(statement.address.var.name)}]"
-            if statement.target_type == "unsigned char":
-                self.emit(f"        mov {destination}, {self.target.low_byte(accumulator)}")
-            elif statement.target_type == "unsigned short" and self.target.int_size > 2:
-                self.emit(f"        mov word {destination}, {self.target.low_word(accumulator)}")
-            else:
-                self.emit(f"        mov {destination}, {accumulator}")
-            return
-        # General path: stash the value, evaluate address into SI, store.
-        scratch = self.target.si_register
-        self.emit(f"        push {accumulator}")
-        self.generate_expression(statement.address)
-        self.emit(f"        mov {scratch}, {accumulator}")
-        self.emit(f"        pop {accumulator}")
-        if statement.target_type == "unsigned char":
-            self.emit(f"        mov [{scratch}], {self.target.low_byte(accumulator)}")
-        elif statement.target_type == "unsigned short" and self.target.int_size > 2:
-            self.emit(f"        mov word [{scratch}], {self.target.low_word(accumulator)}")
-        else:
-            self.emit(f"        mov [{scratch}], {accumulator}")
-
     def _emit_rep_fill(self, *, element_size: int) -> None:
         """Emit cld + rep stos{b,w,d}. EDI/EAX/ECX preloaded by caller."""
         self.emit("        cld")
@@ -887,24 +817,9 @@ class EmissionMixin:
             self._check_defined(inner.name, line=inner.line)
             self.emit_store_local(expression=inner.expr, name=inner.name)
             self.generate_expression(Var(line=inner.line, name=inner.name))
-        elif isinstance(inner, DerefAssign):
-            # ``generate_statement`` on DerefAssign evaluates expr → AX,
-            # stores, then calls ax_clear().  AX still holds the value
-            # after the store.  Call the statement path and then force AX
-            # back to the value with a direct load (no re-evaluation of
-            # the RHS — use the already-written pointee read).
-            self.generate_statement(inner)
-            # AX is cleared by tracking but physically holds the value;
-            # restore tracking so the caller can rely on AX.
-            # Re-evaluate expr only if it is a trivial constant/variable
-            # (avoids double function-call).  For non-trivial RHSs, the
-            # physical AX value is already correct — just re-mark it via
-            # generate_expression on a Var if we know the name.
-            if isinstance(inner.expr, (Int, Var)):
-                self.generate_expression(inner.expr)
         elif isinstance(inner, DerefIncrementAssign):
-            # Same pattern as DerefAssign: the statement path evaluates
-            # expr → AX, stores, bumps pointer, clears AX tracking.  The
+            # The statement path evaluates expr → AX, stores, bumps the
+            # pointer, then clears AX tracking.  The
             # assigned value (the expr value, not the post-bump pointer) is
             # still physically in AX.  No re-evaluation needed.
             self.generate_statement(inner)
@@ -915,8 +830,13 @@ class EmissionMixin:
                 message = "assignment-as-expression to bitfield fields is not supported"
                 raise CompileError(message, line=expression.line)
             self._emit_place_store(inner.place, inner.value)
-        elif isinstance(inner, PointerDereferenceAssign):
-            self._emit_pointer_dereference_assign(inner)
+            # ``(*p = v)`` (standalone DereferencePlace of a named pointer)
+            # re-evaluates a trivial (Int / Var) RHS after the store to
+            # re-establish the accumulator-tracking metadata.  Member-shape
+            # PlaceStores never did this, so it is scoped to the deref case
+            # to stay byte-identical to legacy.
+            if isinstance(inner.place, DereferencePlace) and isinstance(inner.place.pointer, Var) and isinstance(inner.value, (Int, Var)):
+                self.generate_expression(inner.value)
         else:
             message = f"AssignExpr: unsupported inner node type '{type(inner).__name__}'"
             raise CompileError(message, line=expression.line)
@@ -1241,72 +1161,6 @@ class EmissionMixin:
         # neither branch's variable-tracking is guaranteed.
         self.ax_clear()
 
-    def _generate_double_index_expression(self, expression: DoubleIndex, /) -> None:
-        """Lower a :class:'DoubleIndex' (chained subscript) rvalue.
-
-        Extracted from :meth:`generate_expression` to keep that method readable.
-        """
-        self.ax_clear()
-        vname = expression.array.name
-        self._check_defined(vname, line=expression.line)
-        # Stage 1: load name[outer_index] into AX via the existing
-        # Index path (handles constant-base, pinned-SI, byte vs word
-        # widths uniformly).  For ``char *foo[N]`` this is a 4-byte
-        # pointer load; for ``int *foo[N]`` likewise.
-        outer_load = Index(array=expression.array, index=expression.outer_index, line=expression.line)
-        self.generate_expression(outer_load)
-        # Stage 2: index into the pointer in AX.  Element width is
-        # the pointee of the outer-array's element type — i.e.
-        # ``sizeof(*element)``.  For ``char *arr[N]`` the element
-        # type is ``"char*"`` so the inner stride is
-        # ``sizeof(char) == 1``.  ``_index_pointee_size`` is
-        # array-aware (returns sizeof(element)), so for DoubleIndex
-        # we strip the recorded element type's trailing ``*`` and
-        # consult ``target.type_size`` directly.
-        si = self.target.si_register
-        self.emit(f"        mov {si}, {self.target.acc}")
-        element_type = self.variable_types.get(vname, "")
-        if element_type.endswith("*"):
-            pointee = element_type[:-1].rstrip()
-            try:
-                inner_size = self.target.type_size(pointee)
-            except KeyError:
-                inner_size = self.target.int_size
-        else:
-            inner_size = self.target.int_size
-        is_byte_inner = inner_size == 1
-        inner = expression.inner_index
-        if isinstance(inner, Int):
-            offset = inner.value * (1 if is_byte_inner else inner_size)
-            mem = f"{si}+{offset}" if offset else si
-            if is_byte_inner:
-                self.emit_byte_load_zx(f"[{mem}]")
-            else:
-                self.emit(f"        mov {self.target.acc}, [{mem}]")
-        elif isinstance(inner, Var):
-            # Var load doesn't touch SI, so no push/pop round-trip.
-            self.generate_expression(inner)
-            if not is_byte_inner:
-                self._emit_scale_index(self.target.acc, scale=inner_size)
-            self.emit(f"        add {si}, {self.target.acc}")
-            if is_byte_inner:
-                self.emit_byte_load_zx(f"[{si}]")
-            else:
-                self.emit(f"        mov {self.target.acc}, [{si}]")
-        else:
-            # General inner expression — preserve SI across evaluation.
-            self.emit(f"        push {si}")
-            self.generate_expression(inner)
-            if not is_byte_inner:
-                self._emit_scale_index(self.target.acc, scale=inner_size)
-            self.emit(f"        pop {si}")
-            self.emit(f"        add {si}, {self.target.acc}")
-            if is_byte_inner:
-                self.emit_byte_load_zx(f"[{si}]")
-            else:
-                self.emit(f"        mov {self.target.acc}, [{si}]")
-        self.ax_clear()
-
     def _generate_index_expression(self, expression: Index, /) -> None:
         """Lower an :class: (array subscript) rvalue load into the accumulator.
 
@@ -1626,7 +1480,7 @@ class EmissionMixin:
             # itself must also be pure.
             return self._is_pure_expression(node.index)
         if isinstance(node, PlaceLoad):
-            return True
+            return self._place_is_pure(node.place)
         if isinstance(node, Conditional):
             return (
                 self._is_pure_expression(node.condition)
@@ -1843,6 +1697,32 @@ class EmissionMixin:
         # the tail jmp is valid and the named register's stale value
         # is never used.
         return any(self._node_contains_var(stmt, param_name) for stmt in body)
+
+    def _place_is_pure(self, place: Place, /) -> bool:
+        """Return True when reading *place* has no observable side effect.
+
+        A standalone :class:`DereferencePlace` (a pointer read through an
+        arbitrary address) is treated as IMPURE: the pointer reads and
+        chained subscripts it models all report impure, and the
+        conditional / guarded-update elision in
+        :meth:`_try_emit_conditional_via_cond_value` relies on that to
+        avoid eliding a re-evaluated branch.  Member shapes (dot, arrow,
+        chained, struct-array, member-index) stay PURE, matching the
+        legacy ``MemberAccess`` behavior — ``p->f`` is a ``MemberPlace``
+        whose base is a ``DereferencePlace`` and stays pure.  A
+        ``SubscriptPlace`` is pure only when its base chain does not
+        bottom out at a standalone ``DereferencePlace`` (``name[i][j]``
+        is impure; ``arr[i].field[j]`` / ``ptr->field[i]`` are pure).
+        """
+        if isinstance(place, VariablePlace):
+            return True
+        if isinstance(place, DereferencePlace):
+            return False
+        if isinstance(place, MemberPlace):
+            return True
+        if isinstance(place, SubscriptPlace):
+            return self._place_is_pure(place.base)
+        return False
 
     def _place_targets_bitfield(self, place: Place, /) -> bool:
         """Return True if *place*'s terminal member is a bitfield.
@@ -2801,33 +2681,26 @@ class EmissionMixin:
             # ``p`` by sizeof(*p) bytes *without* touching the
             # accumulator.  ``*++p`` / ``*--p`` (prefix) reverses the
             # order — bump first, then load through the post-incremented
-            # pointer.  Both paths share :meth:`_emit_pointer_bump`,
-            # which operates directly on the pinned register / frame
-            # slot.  After a prefix bump :meth:`ax_clear` is invoked so
-            # the subsequent load reloads from the updated slot.
+            # pointer.  The pointee read goes through the recursive Place
+            # core (``DereferencePlace`` of the pointer ``Var``), the same
+            # path a parser-emitted ``*p`` read uses.  Both paths share
+            # :meth:`_emit_pointer_bump`, which operates directly on the
+            # pinned register / frame slot.  After a prefix bump
+            # :meth:`ax_clear` is invoked so the subsequent load reloads
+            # from the updated slot.
             target = expression.target_name
             self._check_defined(target, line=expression.line)
+            pointee_place = DereferencePlace(
+                line=expression.line,
+                pointer=Var(line=expression.line, name=target),
+            )
             if expression.is_postfix:
-                self.generate_expression(
-                    Index(
-                        array=Var(line=expression.line, name=target),
-                        index=Int(line=expression.line, value=0),
-                        line=expression.line,
-                    )
-                )
+                self._emit_place_load(pointee_place)
                 self._emit_pointer_bump(delta=expression.delta, line=expression.line, name=target)
             else:
                 self._emit_pointer_bump(delta=expression.delta, line=expression.line, name=target)
                 self.ax_clear()
-                self.generate_expression(
-                    Index(
-                        array=Var(line=expression.line, name=target),
-                        index=Int(line=expression.line, value=0),
-                        line=expression.line,
-                    )
-                )
-        elif isinstance(expression, DoubleIndex):
-            self._generate_double_index_expression(expression)
+                self._emit_place_load(pointee_place)
         elif isinstance(expression, IncrementDecrement):
             # Lower ``var ± 1`` through the normal Assign store path so
             # register-pinned locals, byte locals, frame-slot locals,
@@ -2870,8 +2743,6 @@ class EmissionMixin:
             self._emit_place_increment_decrement(expression)
         elif isinstance(expression, PlaceLoad):
             self._emit_place_load(expression.place)
-        elif isinstance(expression, PointerDereference):
-            self._emit_pointer_dereference(expression)
         elif isinstance(expression, SizeofExpr):
             self.ax_clear()
             inferred_type = self._expression_type(expression.expression)
@@ -4171,43 +4042,11 @@ class EmissionMixin:
                 message = "continue outside of a loop"
                 raise CompileError(message, line=statement.line)
             self.emit(f"        jmp {self.loop_continue_labels[-1]}")
-        elif isinstance(statement, DerefAssign):
-            if statement.pointer.name in self.out_register_locals:
-                reg = self.out_register_locals[statement.pointer.name]
-                self.generate_expression(statement.expr)
-                # Source defaults to the accumulator; if the out_register
-                # target is narrower (e.g. 16-bit ``dx`` against 32-bit
-                # ``eax``) take the matching low-width alias so NASM doesn't
-                # reject the size-mismatched ``mov dx, eax``.
-                source = self.target.acc
-                if len(reg) < len(source):
-                    source = self.target.low_word(source)
-                if reg != source:
-                    self.emit(f"        mov {reg}, {source}")
-                self.ax_clear()
-            else:
-                # Generic ``*holder = expr`` where *holder* is a plain
-                # pointer local/param.  Pointed-to width comes from
-                # stripping one ``*`` off holder's declared type — e.g.
-                # ``char**`` writes a 4-byte ``char*`` slot; ``char*``
-                # writes a 1-byte ``char``.
-                holder_type = self.variable_types.get(statement.pointer.name)
-                if not holder_type or not holder_type.endswith("*"):
-                    message = f"pointer dereference write to non-pointer variable '{statement.pointer.name}'"
-                    raise CompileError(message, line=statement.line)
-                pointee_type = holder_type[:-1]
-                self.generate_expression(statement.expr)
-                self._emit_load_var(statement.pointer.name, register=self.target.si_register)
-                if pointee_type in self.BYTE_TYPES:
-                    self.emit(f"        mov [{self.target.si_register}], {self.target.low_byte(self.target.acc)}")
-                else:
-                    self.emit(f"        mov [{self.target.si_register}], {self.target.acc}")
-                self.ax_clear()
         elif isinstance(statement, DerefIncrementAssign):
             # ``*p++ = expr;`` / ``*p-- = expr;`` (postfix) — evaluate
             # ``expr`` into the accumulator, store through ``p`` at
-            # pointee width (mirroring :class:`DerefAssign` codegen),
-            # then bump ``p`` by ``sizeof(*p)`` bytes.  ``*++p = expr;``
+            # pointee width, then bump ``p`` by ``sizeof(*p)`` bytes.
+            # ``*++p = expr;``
             # / ``*--p = expr;`` (prefix) bumps ``p`` *first*, then
             # evaluates and stores through the updated pointer.  Both
             # use the in-place pointer-bump helper (no accumulator
@@ -4225,11 +4064,12 @@ class EmissionMixin:
             self.generate_expression(statement.expr)
             self._emit_load_var(target, register=self.target.si_register)
             if pointee_type in self.BYTE_TYPES:
-                self.emit(f"        mov [{self.target.si_register}], {self.target.low_byte(self.target.acc)}")
+                width = 1
             elif pointee_type == "unsigned short" and self.target.int_size > 2:
-                self.emit(f"        mov word [{self.target.si_register}], {self.target.low_word(self.target.acc)}")
+                width = 2
             else:
-                self.emit(f"        mov [{self.target.si_register}], {self.target.acc}")
+                width = self.target.int_size
+            self._emit_store_accumulator_at_width(destination=f"[{self.target.si_register}]", width=width)
             if statement.is_postfix:
                 self._emit_pointer_bump(delta=statement.delta, line=statement.line, name=target)
             self.ax_clear()
@@ -4283,9 +4123,6 @@ class EmissionMixin:
             self.ax_clear()
         elif isinstance(statement, PlaceStore):
             self._emit_place_store(statement.place, statement.value)
-            self.ax_clear()
-        elif isinstance(statement, PointerDereferenceAssign):
-            self._emit_pointer_dereference_assign(statement)
             self.ax_clear()
         elif isinstance(statement, Return):
             self.generate_return(statement)

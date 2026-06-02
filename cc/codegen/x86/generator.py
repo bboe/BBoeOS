@@ -27,9 +27,7 @@ from cc.ast_nodes import (
     Char,
     Compound,
     Conditional,
-    DerefAssign,
     DereferencePlace,
-    DoubleIndex,
     DoWhile,
     EnumDecl,
     ExtendedAsm,
@@ -48,7 +46,7 @@ from cc.ast_nodes import (
     Place,
     PlaceIncDec,
     PlaceLoad,
-    PointerDereference,
+    PlaceStore,
     SizeofExpr,
     SizeofType,
     SizeofVar,
@@ -769,6 +767,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     defined.add(pinned_locals[target_name])
         return result
 
+    def _dereference_place_width(self, place: DereferencePlace, /) -> int:
+        """Return the byte width of a load/store through a standalone ``DereferencePlace``.
+
+        The pointee type string (one ``*`` stripped from the pointer
+        expression's type) maps
+        to 1 for byte types, 2 for ``unsigned short`` on targets whose
+        ``int_size`` exceeds 2, otherwise the full ``int_size``.
+        """
+        pointee_type = self._place_type(place)
+        if pointee_type in self.BYTE_TYPES:
+            return 1
+        if pointee_type == "unsigned short" and self.target.int_size > 2:
+            return 2
+        return self.target.int_size
+
     def _emit_bitfield_read(self, info: FieldInfo, /, *, addr: str) -> None:
         """Emit the load-shift-mask-extend sequence for a bitfield read.
 
@@ -1282,6 +1295,161 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             addr += f"{displacement:+d}"
         addr += f"+{base_register}"
         return addr
+
+    def _emit_dereference_place_load(self, place: DereferencePlace, /) -> None:
+        """Load the value at a standalone ``DereferencePlace`` into the accumulator.
+
+        The ``AddressOf(Var)``-of-local fast path folds ``*(T *)&local``
+        to a direct frame load (no ``lea`` / scratch register); the general
+        path evaluates the pointer expression into the accumulator and loads
+        through it.  The byte width uses the compact, target-aware
+        :meth:`emit_byte_load_zx` (a single ``movzx`` on 32-bit) rather than
+        the old ``mov al`` / zero-extend pair the legacy
+        ``_emit_pointer_dereference`` emitted.  Width comes from
+        :meth:`_dereference_place_width`.  A
+        ``Cast`` wrapping the pointer is transparent: the fast-path test
+        peers through it (the legacy parser keyed on the cast's inner
+        ``AddressOf``), and ``generate_expression`` on the cast emits the
+        identical bytes as evaluating the cast's inner (Cast codegen is
+        identity).
+        """
+        pointer = place.pointer
+        width = self._dereference_place_width(place)
+        fast_path_target = pointer.expression if isinstance(pointer, Cast) else pointer
+        if isinstance(fast_path_target, AddressOf) and fast_path_target.var.name in self.locals:
+            address = f"[{self._local_address(fast_path_target.var.name)}]"
+            if width == 1:
+                self.emit_byte_load_zx(address)
+            elif width == 2 and self.target.int_size > 2:
+                self.emit(f"        movzx {self.target.acc}, word {address}")
+            else:
+                self.emit(f"        mov {self.target.acc}, {address}")
+            self.ax_clear()
+            return
+        self.generate_expression(pointer)
+        address_register = self.target.acc
+        if width == 1:
+            self.emit_byte_load_zx(f"[{address_register}]")
+        elif width == 2 and self.target.int_size > 2:
+            self.emit(f"        movzx {address_register}, word [{address_register}]")
+        else:
+            self.emit(f"        mov {address_register}, [{address_register}]")
+        self.ax_clear()
+
+    def _emit_dereference_place_store(self, place: DereferencePlace, value: Node, /) -> None:
+        """Store *value* through a standalone ``DereferencePlace``.
+
+        Two store sequences selected by the pointer expression shape:
+
+        - ``*p = v`` where *p* is a named pointer (``DereferencePlace`` of a
+          bare :class:`Var`): the ``out_register`` register-alias write and
+          the ``_emit_load_var`` / ESI store at pointee width.
+        - ``*(T *)e = v`` (cast or arbitrary address expression): the
+          ``AddressOf(Var)``-of-local fast store and the general
+          push / ESI-scratch / pop sequence.
+        """
+        pointer = place.pointer
+        if isinstance(pointer, Var):
+            pointer_name = pointer.name
+            if pointer_name in self.out_register_locals:
+                register = self.out_register_locals[pointer_name]
+                self.generate_expression(value)
+                source = self.target.acc
+                if len(register) < len(source):
+                    source = self.target.low_word(source)
+                if register != source:
+                    self.emit(f"        mov {register}, {source}")
+                self.ax_clear()
+                return
+            holder_type = self.variable_types.get(pointer_name)
+            if not holder_type or not holder_type.endswith("*"):
+                message = f"pointer dereference write to non-pointer variable '{pointer_name}'"
+                raise CompileError(message, line=place.line)
+            pointee_type = holder_type[:-1]
+            self.generate_expression(value)
+            self._emit_load_var(pointer_name, register=self.target.si_register)
+            if pointee_type in self.BYTE_TYPES:
+                self.emit(f"        mov [{self.target.si_register}], {self.target.low_byte(self.target.acc)}")
+            else:
+                self.emit(f"        mov [{self.target.si_register}], {self.target.acc}")
+            self.ax_clear()
+            return
+        # Cast / arbitrary address expression: ``*(T *)e = v``.
+        width = self._dereference_place_width(place)
+        self.generate_expression(value)
+        accumulator = self.target.acc
+        fast_path_target = pointer.expression if isinstance(pointer, Cast) else pointer
+        if isinstance(fast_path_target, AddressOf) and fast_path_target.var.name in self.locals:
+            destination = f"[{self._local_address(fast_path_target.var.name)}]"
+            self._emit_store_accumulator_at_width(destination=destination, width=width)
+            return
+        scratch = self.target.si_register
+        self.emit(f"        push {accumulator}")
+        self.generate_expression(pointer)
+        self.emit(f"        mov {scratch}, {accumulator}")
+        self.emit(f"        pop {accumulator}")
+        self._emit_store_accumulator_at_width(destination=f"[{scratch}]", width=width)
+
+    def _emit_double_index_place_load(self, place: SubscriptPlace, /) -> None:
+        """Load ``name[outer][inner]`` (a ``SubscriptPlace`` over a deref of an ``Index``).
+
+        Byte-for-byte port of the legacy ``_generate_double_index_expression``:
+        stage 1 loads ``name[outer]`` (the pointer) into the accumulator via
+        the ordinary ``Index`` path; stage 2 indexes into the pointee.  The
+        inner stride is the pointee size of the array element's pointer type
+        (``target.type_size`` on the stripped element type, NOT
+        :meth:`_index_pointee_size`).  Three inner sub-paths — constant
+        (fold offset), :class:`Var` (no ESI round-trip), general (push / pop
+        ESI) — match the legacy emitter exactly, including the byte-load
+        zero-extension versus the full-width ``mov``.
+        """
+        outer_index_node = place.base.pointer
+        vname = outer_index_node.array.name
+        self.ax_clear()
+        self._check_defined(vname, line=place.line)
+        outer_load = Index(array=outer_index_node.array, index=outer_index_node.index, line=place.line)
+        self.generate_expression(outer_load)
+        si = self.target.si_register
+        self.emit(f"        mov {si}, {self.target.acc}")
+        element_type = self.variable_types.get(vname, "")
+        if element_type.endswith("*"):
+            pointee = element_type[:-1].rstrip()
+            try:
+                inner_size = self.target.type_size(pointee)
+            except KeyError:
+                inner_size = self.target.int_size
+        else:
+            inner_size = self.target.int_size
+        is_byte_inner = inner_size == 1
+        inner = place.index
+        if isinstance(inner, Int):
+            offset = inner.value * (1 if is_byte_inner else inner_size)
+            mem = f"{si}+{offset}" if offset else si
+            if is_byte_inner:
+                self.emit_byte_load_zx(f"[{mem}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, [{mem}]")
+        elif isinstance(inner, Var):
+            self.generate_expression(inner)
+            if not is_byte_inner:
+                self._emit_scale_index(self.target.acc, scale=inner_size)
+            self.emit(f"        add {si}, {self.target.acc}")
+            if is_byte_inner:
+                self.emit_byte_load_zx(f"[{si}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, [{si}]")
+        else:
+            self.emit(f"        push {si}")
+            self.generate_expression(inner)
+            if not is_byte_inner:
+                self._emit_scale_index(self.target.acc, scale=inner_size)
+            self.emit(f"        pop {si}")
+            self.emit(f"        add {si}, {self.target.acc}")
+            if is_byte_inner:
+                self.emit_byte_load_zx(f"[{si}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, [{si}]")
+        self.ax_clear()
 
     def _emit_field_load(self, *, addr: str, field_size: int) -> None:
         """Emit the struct-field load instruction matching *field_size*.
@@ -2237,6 +2405,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if isinstance(place, MemberPlace) and self._match_struct_array_member(place) is None:
             self._emit_member_scalar_load(place)
             return
+        # Standalone dereference shapes own bespoke load sequences (frame-direct
+        # fast path, self-load through the accumulator) that do not fit the
+        # PlaceAddress model; route them to dedicated emitters before the
+        # generic _resolve_place path.
+        if (
+            isinstance(place, SubscriptPlace)
+            and isinstance(place.base, DereferencePlace)
+            and isinstance(place.base.pointer, Index)
+            and isinstance(place.base.pointer.array, Var)
+        ):
+            # ``name[outer][inner]`` (chained subscript): a
+            # SubscriptPlace over a standalone DereferencePlace of an Index
+            # of a Var (an array of pointers).  Owns a bespoke two-stage
+            # load that does not fit the PlaceAddress model.
+            self._emit_double_index_place_load(place)
+            return
+        if isinstance(place, DereferencePlace):
+            self._emit_dereference_place_load(place)
+            return
         self.ax_clear()
         protect_bx = self._bx_holds_pinned_var()
         if protect_bx:
@@ -2261,6 +2448,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return
         if isinstance(place, MemberPlace) and self._match_struct_array_member(place) is None:
             self._emit_member_scalar_store(place, value)
+            return
+        if isinstance(place, DereferencePlace):
+            self._emit_dereference_place_store(place, value)
             return
         allowed = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
         self.ax_clear()
@@ -2430,6 +2620,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"register-arg target {target} given unexpected complex node {arg!r}"
             raise CompileError(message, line=getattr(arg, "line", None))
 
+    def _emit_store_accumulator_at_width(self, *, destination: str, width: int) -> None:
+        """Store the accumulator into *destination* at *width* (byte / word / full).
+
+        *destination* is a bracket-enclosed memory operand (``[ebp-4]`` /
+        ``[esi]`` / …).  Byte width stores the low-byte accumulator alias;
+        2-byte width on a 32-bit target stores the low-word alias with an
+        explicit ``word`` size prefix; every other width stores the full
+        accumulator.  Shared by the standalone-``DereferencePlace`` store
+        (cast fast path and general path) and the ``*p++ =`` increment
+        store, which all wrote this same byte/word/full triple inline.
+        """
+        accumulator = self.target.acc
+        if width == 1:
+            self.emit(f"        mov {destination}, {self.target.low_byte(accumulator)}")
+        elif width == 2 and self.target.int_size > 2:
+            self.emit(f"        mov word {destination}, {self.target.low_word(accumulator)}")
+        else:
+            self.emit(f"        mov {destination}, {accumulator}")
+
     def _emit_struct_element_offset(self, index: Node, struct_size: int, /) -> None:
         """Emit code that leaves ``index * struct_size`` in BX (uses AX as scratch)."""
         acc = self.target.acc
@@ -2484,12 +2693,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         stack: list[Node] = [node]
         while stack:
             current = stack.pop()
-            if isinstance(current, (Index, DoubleIndex)):
+            if isinstance(current, Index):
                 # Index lowering uses SI as the base-address scratch
                 # whenever the base isn't a compile-time constant — by
-                # far the most common shape.  DoubleIndex always
-                # parks the outer pointer in SI before the inner load.
-                # Be conservative and always claim SI.
+                # far the most common shape.  Be conservative and always
+                # claim SI.
                 clobbers.add(self.target.si_register)
             elif isinstance(current, Call):
                 builtin_clobbers = self._builtin_clobbers.get(current.name)
@@ -2568,8 +2776,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # A bare Place used as an expression operand (e.g. the pointer
             # inside a DereferencePlace) — resolve its declared type.
             return self._place_type(node)
-        if isinstance(node, PointerDereference):
-            return node.target_type
         if isinstance(node, (SizeofType, SizeofVar, SizeofExpr)):
             return "int"
         if isinstance(node, String):
@@ -3876,11 +4082,38 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # require spill+reload at every access.
             state.address_taken.add(node.var.name)
             return
-        if isinstance(node, DerefAssign):
-            # ``*p = expr`` writes through a pointer — pre-refactor the
-            # pointer was a str field, so it never counted as a read.
-            # Walk only the right-hand side.
-            self._tally_auto_pin_counts(node.expr, state=state)
+        if isinstance(node, PlaceStore) and isinstance(node.place, DereferencePlace):
+            # ``*p = v`` / ``*(T *)e = v`` on the Place tree.  The
+            # named-pointer form counts only the right-hand side — the
+            # pointer is read directly by name and never tallies as an
+            # auto-pin candidate read; the cast / arbitrary-address form
+            # walks both the address expression and the value through the
+            # generic descent.
+            if isinstance(node.place.pointer, Var):
+                self._tally_auto_pin_counts(node.value, state=state)
+            else:
+                self._tally_auto_pin_counts(node.place.pointer, state=state)
+                self._tally_auto_pin_counts(node.value, state=state)
+            return
+        if isinstance(node, PlaceLoad) and isinstance(node.place, DereferencePlace):
+            # ``*(T *)e`` read on the Place tree.  Walk the pointer
+            # expression generically; the Place pointer here is the
+            # wrapping ``Cast`` whose inner is that expression (Cast
+            # descent is a no-op that recurses into its expression).
+            self._tally_auto_pin_counts(node.place.pointer, state=state)
+            return
+        if (
+            isinstance(node, PlaceLoad)
+            and isinstance(node.place, SubscriptPlace)
+            and isinstance(node.place.base, DereferencePlace)
+            and isinstance(node.place.base.pointer, Index)
+        ):
+            # ``name[i][j]`` on the Place tree.  Walk ``array`` (a Var →
+            # counts[]), the outer index, and the inner index through the
+            # generic descent: the inner ``Index`` covers array + outer
+            # index, and the subscript index covers the inner index.
+            self._tally_auto_pin_counts(node.place.base.pointer, state=state)
+            self._tally_auto_pin_counts(node.place.index, state=state)
             return
         for node_field in fields(node):
             value = getattr(node, node_field.name)

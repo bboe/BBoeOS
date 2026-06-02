@@ -100,8 +100,7 @@ class Assign(Node):
 class AssignExpr(IntegerOperand, Node):
     """A parenthesized assignment used as an expression.
 
-    Wraps an underlying ``*Assign`` AST node (``Assign``, ``DerefAssign``,
-    ``IndexAssign``, ``PointerDereferenceAssign``,
+    Wraps an underlying ``*Assign`` AST node (``Assign``, ``IndexAssign``,
     ``DerefIncrementAssign``, ``PlaceStore``).
     The value of the expression is the
     post-assignment value of the lvalue; the lvalue itself is not produced
@@ -185,14 +184,6 @@ class Continue(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class DerefAssign(Node):
-    """Pointer dereference assignment ``*pointer = expr;``."""
-
-    expr: Node
-    pointer: Var
-
-
-@dataclass(kw_only=True, slots=True)
 class DerefIncrement(Node):
     """``*p++`` / ``*p--`` / ``*++p`` / ``*--p`` as an rvalue expression.
 
@@ -248,22 +239,6 @@ class DereferencePlace(Place):
     """The pointee of an arbitrary pointer expression: ``*pointer``."""
 
     pointer: Node
-
-
-@dataclass(kw_only=True, slots=True)
-class DoubleIndex(Node):
-    """Chained subscript ``name[outer][inner]``.
-
-    Used when *name* is an array of pointers (``char *foo[N]``,
-    ``unsigned char *bar[N]``, etc.).  The outer subscript loads a pointer
-    from the array, the inner subscript indexes into the pointee.
-    Codegen consults :meth:`_index_pointee_size` to size the inner
-    load.  Assignment to a double-subscript LHS is not (yet) supported.
-    """
-
-    array: Var
-    outer_index: Node
-    inner_index: Node
 
 
 @dataclass(kw_only=True, slots=True)
@@ -564,43 +539,6 @@ class PlaceStore(Node):
     """Store *value* into *place*: ``place = value;``."""
 
     place: Place
-    value: Node
-
-
-@dataclass(kw_only=True, slots=True)
-class PointerDereference(Node):
-    """Read through a pointer expression: ``*(T *)expr``.
-
-    Used for the port-IO bridge idiom where a bitfield struct is read
-    out as a raw byte: ``unsigned char raw = *(unsigned char *)&s;``.
-    ``expression`` evaluates to an address; ``target_type`` selects the
-    load width (``unsigned char``, ``unsigned short``, or pointer width).
-
-    Unlike :class:`Index` (which assumes ``array`` is a :class:`Var`
-    holding a pointer), this node evaluates an arbitrary address
-    expression into the accumulator and then loads through it.
-    """
-
-    expression: Node
-    target_type: str
-
-
-@dataclass(kw_only=True, slots=True)
-class PointerDereferenceAssign(Node):
-    """Write through a pointer expression: ``*(T *)expr = value;``.
-
-    Write-side counterpart of :class:`PointerDereference`.  Used for the
-    port-IO bridge idiom where a bitfield struct receives a fresh byte
-    read from a hardware port:
-    ``*(unsigned char *)&imr = kernel_inb(IMR_PORT);``.
-
-    ``address`` is the inner address expression (without the leading
-    ``*(T *)``); ``target_type`` selects the store width;  ``value`` is
-    the right-hand side.
-    """
-
-    address: Node
-    target_type: str
     value: Node
 
 

@@ -24,11 +24,9 @@ from cc.ast_nodes import (
     Compound,
     Conditional,
     Continue,
-    DerefAssign,
     DereferencePlace,
     DerefIncrement,
     DerefIncrementAssign,
-    DoubleIndex,
     DoWhile,
     EnumDecl,
     ExtendedAsm,
@@ -52,8 +50,6 @@ from cc.ast_nodes import (
     PlaceIncDec,
     PlaceLoad,
     PlaceStore,
-    PointerDereference,
-    PointerDereferenceAssign,
     Program,
     Return,
     SizeofExpr,
@@ -314,7 +310,7 @@ class Parser:
             raise CompileError(message, line=token[2])
         return [self.parse_statement()]
 
-    def _parse_deref_assignment_no_semi(self) -> DerefAssign | DerefIncrementAssign | PointerDereferenceAssign:
+    def _parse_deref_assignment_no_semi(self) -> PlaceStore | DerefIncrementAssign:
         """Parse ``*p = expr``, ``*p++ = expr``, ``*++p = expr``, or ``*(T*)e = expr`` without consuming the trailing semicolon.
 
         The leading ``STAR`` token must NOT yet have been consumed.
@@ -330,10 +326,16 @@ class Parser:
             )
             self.eat("ASSIGN")
             value = self.parse_expression()
-            return PointerDereferenceAssign(
-                address=operand.expression,
+            return PlaceStore(
                 line=star_token[2],
-                target_type=pointee_type,
+                place=DereferencePlace(
+                    line=star_token[2],
+                    pointer=Cast(
+                        expression=operand.expression,
+                        line=star_token[2],
+                        target_type=f"{pointee_type} *",
+                    ),
+                ),
                 value=value,
             )
         # Prefix ``*++p = expr;`` / ``*--p = expr;``
@@ -366,7 +368,11 @@ class Parser:
             )
         self.eat("ASSIGN")
         expression = self.parse_expression()
-        return DerefAssign(expr=expression, line=star_token[2], pointer=Var(line=star_token[2], name=name_token[1]))
+        return PlaceStore(
+            line=star_token[2],
+            place=DereferencePlace(line=star_token[2], pointer=Var(line=star_token[2], name=name_token[1])),
+            value=expression,
+        )
 
     def _parse_designated_struct_initializer(self) -> StructInitializer:
         """Parse ``{ 0 }`` zero-init, ``{ .field = expr, ... }`` designated, or ``{ e0, e1, ... }`` positional init.
@@ -839,11 +845,16 @@ class Parser:
                 self.eat("LBRACKET")
                 inner_index = self.parse_expression()
                 self.eat("RBRACKET")
-                return DoubleIndex(
-                    array=Var(line=line, name=name),
-                    outer_index=index,
-                    inner_index=inner_index,
+                return PlaceLoad(
                     line=line,
+                    place=SubscriptPlace(
+                        line=line,
+                        base=DereferencePlace(
+                            line=line,
+                            pointer=Index(array=Var(line=line, name=name), index=index, line=line),
+                        ),
+                        index=inner_index,
+                    ),
                 )
             if self.peek()[0] == "LPAREN":
                 self.eat("LPAREN")
@@ -1259,9 +1270,9 @@ class Parser:
         - ``IDENT[i].m[j] = rhs``                 → :class:`PlaceStore`
         - ``IDENT.m = rhs`` / ``IDENT->m = rhs``  → :class:`PlaceStore`
         - ``IDENT.m[i] = rhs``                    → :class:`PlaceStore`
-        - ``*p = rhs``                             → :class:`DerefAssign`
+        - ``*p = rhs``                             → :class:`PlaceStore`
         - ``*p++ = rhs`` / ``*++p = rhs``         → :class:`DerefIncrementAssign`
-        - ``*(T*)e = rhs``                         → :class:`PointerDereferenceAssign`
+        - ``*(T*)e = rhs``                         → :class:`PlaceStore`
 
         All eleven assignment operators (plain ``=`` plus the ten compound
         forms) are accepted for the ``IDENT`` lvalue shape.
@@ -1389,10 +1400,11 @@ class Parser:
 
         Entered with the ``STAR`` token already consumed.  Three shapes:
 
-        1. ``*(T *)expr`` — operand starts with a cast.  Wrap the cast
-           as a :class:`PointerDereference` whose ``target_type``
-           picks the load width.  Used by the port-IO bridge idiom
-           ``*(unsigned char *)&s`` for byte-sized bitfield structs.
+        1. ``*(T *)expr`` — operand starts with a cast.  Emit a
+           ``PlaceLoad`` over a :class:`DereferencePlace` whose pointer
+           is the ``Cast`` (its ``target_type`` picks the load width).
+           Used by the port-IO bridge idiom ``*(unsigned char *)&s``
+           for byte-sized bitfield structs.
         2. ``*++p`` / ``*--p`` / ``*p++`` / ``*p--`` — desugar to
            :class:`DerefIncrement` with the right ``is_postfix`` /
            ``delta``.
@@ -1406,7 +1418,13 @@ class Parser:
                 line=line,
                 operand=operand,
             )
-            return PointerDereference(expression=operand.expression, line=line, target_type=pointee_type)
+            return PlaceLoad(
+                line=line,
+                place=DereferencePlace(
+                    line=line,
+                    pointer=Cast(expression=operand.expression, line=line, target_type=f"{pointee_type} *"),
+                ),
+            )
         if self.peek()[0] == "LPAREN":
             # ``*(expr)`` — dereference of a parenthesized pointer
             # expression (no cast).  Desugar the ``*(base + index)`` and

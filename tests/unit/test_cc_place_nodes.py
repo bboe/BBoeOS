@@ -89,3 +89,32 @@ def test_subscript_over_member_models_pointer_field_index() -> None:
     )
     assert isinstance(place.base, ast_nodes.MemberPlace)
     assert isinstance(place.base.base, ast_nodes.DereferencePlace)
+
+
+def test_place_load_over_standalone_dereference() -> None:
+    """*p (read) is PlaceLoad(DereferencePlace(Var)) — a standalone deref Place."""
+    load = ast_nodes.PlaceLoad(place=ast_nodes.DereferencePlace(pointer=ast_nodes.Var(name="p")))
+    assert isinstance(load.place, ast_nodes.DereferencePlace)
+    assert load.place.pointer.name == "p"
+
+
+def test_place_store_over_standalone_dereference() -> None:
+    """*p = v is PlaceStore(DereferencePlace(Var), value)."""
+    store = ast_nodes.PlaceStore(
+        place=ast_nodes.DereferencePlace(pointer=ast_nodes.Var(name="p")),
+        value=ast_nodes.Int(value=5),
+    )
+    assert isinstance(store.place, ast_nodes.DereferencePlace)
+    assert store.value == ast_nodes.Int(value=5)
+
+
+def test_subscript_over_dereference_models_double_index() -> None:
+    """a[i][j] is SubscriptPlace(DereferencePlace(Index(a, i)), j)."""
+    place = ast_nodes.SubscriptPlace(
+        base=ast_nodes.DereferencePlace(
+            pointer=ast_nodes.Index(array=ast_nodes.Var(name="a"), index=ast_nodes.Var(name="i")),
+        ),
+        index=ast_nodes.Var(name="j"),
+    )
+    assert isinstance(place.base, ast_nodes.DereferencePlace)
+    assert isinstance(place.base.pointer, ast_nodes.Index)
