@@ -131,8 +131,8 @@ def _assignment_destination(instruction: ir.Instruction, /) -> str | None:
     path is recognised.
 
     For the ``i++`` / ``++i`` shape (``Block(node=Assign(name=<temp>,
-    expr=IncrementDecrement(target_name=i)))``) the *mutated* variable is
-    the ``IncrementDecrement.target_name``, not the ``Assign.name`` (which
+    expr=PlaceIncrementDecrement(place=VariablePlace(i))))``) the *mutated* variable is
+    the ``PlaceIncrementDecrement`` place's name, not the ``Assign.name`` (which
     is the discarded result temp).  Report the mutated variable so the
     induction-variable scan counts the real write — the discarded temp is
     dead and never participates in the linear IV relationship.
@@ -141,8 +141,10 @@ def _assignment_destination(instruction: ir.Instruction, /) -> str | None:
     if isinstance(destination, str):
         return destination
     if isinstance(instruction, ir.Block) and isinstance(instruction.node, ast_nodes.Assign):
-        if isinstance(instruction.node.expr, ast_nodes.IncrementDecrement):
-            return instruction.node.expr.target_name
+        if isinstance(instruction.node.expr, ast_nodes.PlaceIncrementDecrement) and isinstance(
+            instruction.node.expr.place, ast_nodes.VariablePlace
+        ):
+            return instruction.node.expr.place.name
         return instruction.node.name
     return None
 
@@ -150,17 +152,15 @@ def _assignment_destination(instruction: ir.Instruction, /) -> str | None:
 def _ast_takes_address_of(node: object, /, *, name: str) -> bool:
     """Return True when *name*'s address is taken (``&name``) in the AST subtree at *node*.
 
-    Walks the subtree looking for an :class:`cc.ast_nodes.AddressOf` whose
-    target is ``Var(name=name)``.  ``&name`` is the only C construct that
+    Walks the subtree looking for a ``&name``
+    (``PlaceAddressOf(VariablePlace(name))``).  ``&name`` is the only C construct that
     leaks a scalar local's address, so a precise scan for that one node
     kind is sound — far tighter than rejecting on any textual mention of
     the name (which would turn away a loop merely because its own IV
     appears in the increment).
     """
-    if isinstance(node, ast_nodes.AddressOf):
-        if node.var.name == name:
-            return True
-        return _ast_takes_address_of(node.var, name=name)
+    if ast_nodes.address_of_variable_name(node) == name:
+        return True
     if dataclasses.is_dataclass(node):
         return any(_ast_takes_address_of(getattr(node, declared_field.name), name=name) for declared_field in dataclasses.fields(node))
     if isinstance(node, (list, tuple)):
@@ -515,9 +515,10 @@ def _iter_ast_read_names(node: object, /) -> Iterator[str]:
     IV-escape guards don't false-reject a perfectly ordinary loop:
 
     * :class:`cc.ast_nodes.Var` — a value read, yields ``name``;
-    * :class:`cc.ast_nodes.AddressOf` — yields the target ``var.name``
+    * ``&name`` (:class:`cc.ast_nodes.PlaceAddressOf` over a
+      :class:`cc.ast_nodes.VariablePlace`) — yields the target name
       (an address-of counts as a use of the variable);
-    * :class:`cc.ast_nodes.IncrementDecrement` — ``target_name`` is both
+    * :class:`cc.ast_nodes.PlaceIncrementDecrement` — the place's named variable is both
       read and written, so it counts as a read;
     * :class:`cc.ast_nodes.VarDecl` — the declared ``name`` is *not* a
       read; recurse only into the initializer;
@@ -526,7 +527,7 @@ def _iter_ast_read_names(node: object, /) -> Iterator[str]:
 
     Every other dataclass / list / tuple is walked structurally.  This is
     the read-set the rep-string matcher needs: a ``Block(VarDecl(name=i))``
-    declaration or the ``Block(Assign(name=_ir_t, IncrementDecrement(i)))``
+    declaration or the ``Block(Assign(name=_ir_t, PlaceIncrementDecrement(VariablePlace(i))))``
     increment must not be mistaken for an after-loop *read* of ``i``.
 
     Yields:
@@ -536,11 +537,18 @@ def _iter_ast_read_names(node: object, /) -> Iterator[str]:
     if isinstance(node, ast_nodes.Var):
         yield node.name
         return
-    if isinstance(node, ast_nodes.AddressOf):
-        yield node.var.name
+    if (taken_name := ast_nodes.address_of_variable_name(node)) is not None:
+        yield taken_name
         return
-    if isinstance(node, ast_nodes.IncrementDecrement):
-        yield node.target_name
+    if isinstance(node, ast_nodes.PlaceIncrementDecrement):
+        # ``x++`` / ``a[i]++`` — the place's named variable is both read
+        # and written, so it counts as a read (mirroring the legacy
+        # increment-decrement target yield); compound places (a[i]++)
+        # also read their index Vars via the structural walk below.
+        if isinstance(node.place, ast_nodes.VariablePlace):
+            yield node.place.name
+            return
+        yield from _iter_ast_read_names(node.place)
         return
     if isinstance(node, ast_nodes.VarDecl):
         if node.init is not None:
@@ -566,7 +574,7 @@ def _iter_ast_referenced_names(node: object, /) -> Iterator[str]:
     check also needs to see declarations and assignments that write to
     loop-local names through fields that vary by AST node type —
     ``VarDecl.name``, ``ArrayDecl.name``, ``Assign.name``,
-    :class:`cc.ast_nodes.IncrementDecrement` ``target_name``, etc.
+    :class:`cc.ast_nodes.PlaceIncrementDecrement` place names, etc.
 
     Walking *every* string-valued dataclass field is conservative — it
     yields type-name strings, operation symbols, and other non-variable
@@ -598,8 +606,10 @@ def _iter_read_names(instruction: ir.Instruction, /) -> Iterator[str]:
     Covers three sources of name references:
 
     * value operands walked by :func:`_iter_value_operands` — a bare
-      ``str`` is a name, and an :class:`cc.ast_nodes.AddressOf` operand
-      contributes its ``var.name`` (the IV whose address is taken);
+      ``str`` is a name, and a ``&name``
+      (:class:`cc.ast_nodes.PlaceAddressOf` over a
+      :class:`cc.ast_nodes.VariablePlace`) operand
+      contributes its name (the IV whose address is taken);
     * the pointer-base fields of :class:`cc.ir.Index` /
       :class:`cc.ir.IndexAssign`, which are plain ``str`` names *not*
       listed in ``VALUE_FIELDS``;
@@ -613,7 +623,7 @@ def _iter_read_names(instruction: ir.Instruction, /) -> Iterator[str]:
       opaque AST subtrees that may read the IV through fields the
       value-operand walk cannot see.  Crucially this is the *read* walk,
       not the every-string walk: a ``Block(VarDecl(name=i))`` declaration
-      or a ``Block(Assign(name=_ir_t, IncrementDecrement(i)))`` increment
+      or a ``Block(Assign(name=_ir_t, PlaceIncrementDecrement(VariablePlace(i))))`` increment
       must not register as an after-loop read of ``i`` (the former is a
       declaration, the latter an in-loop write), or every real
       ``for (i = 0; ...; i++)`` loop would false-reject.
@@ -629,8 +639,8 @@ def _iter_read_names(instruction: ir.Instruction, /) -> Iterator[str]:
     for operand in _iter_value_operands(instruction):
         if isinstance(operand, str):
             yield operand
-        elif isinstance(operand, ast_nodes.AddressOf):
-            yield operand.var.name
+        elif (taken_name := ast_nodes.address_of_variable_name(operand)) is not None:
+            yield taken_name
     if isinstance(instruction, (ir.Index, ir.IndexAssign)):
         yield instruction.base
     if isinstance(instruction, ir.RepString):
@@ -669,7 +679,7 @@ def _iter_value_operands(instruction: ir.Instruction, /) -> Iterator[ir.Value]:
 def _iv_address_taken_in_loop(body_block_order: list[BasicBlock], /, *, induction_variable: str) -> bool:
     """Return True when *induction_variable*'s address is taken anywhere in the loop body.
 
-    An :class:`cc.ast_nodes.AddressOf` of the IV — as a direct value
+    A ``&iv`` (``PlaceAddressOf(VariablePlace)``) of the IV — as a direct value
     operand or nested inside a :class:`cc.ir.Block` / ``CarryBranch`` /
     ``Switch`` AST subtree — lets a callee mutate the counter through the
     leaked pointer, breaking the ``count == bound`` linear relationship
@@ -677,7 +687,7 @@ def _iv_address_taken_in_loop(body_block_order: list[BasicBlock], /, *, inductio
 
     This guard is *not* redundant with the non-idiomatic-body rejection:
     ``IndexAssign.source`` is a ``Value`` and ``Value`` admits
-    ``ast_nodes.AddressOf``, so a bare single-instruction fill
+    ``PlaceAddressOf``, so a bare single-instruction fill
     ``buf[i] = &i;`` is an idiomatic body the matcher would otherwise
     accept — only this guard rejects it.  See
     ``test_recognize_fill_loop_rejects_iv_address_taken_inside_idiomatic_body``.
@@ -686,10 +696,10 @@ def _iv_address_taken_in_loop(body_block_order: list[BasicBlock], /, *, inductio
         terminator = () if block.terminator is None else (block.terminator,)
         for instruction in (*block.instructions, *terminator):
             for operand in _iter_value_operands(instruction):
-                if isinstance(operand, ast_nodes.AddressOf) and operand.var.name == induction_variable:
+                if ast_nodes.address_of_variable_name(operand) == induction_variable:
                     return True
             # An opaque AST subtree could take the IV's address — but the
-            # *only* way to do so in C is an ``ast_nodes.AddressOf`` node,
+            # *only* way to do so in C is a ``&iv`` node,
             # so scan precisely for ``&iv`` rather than rejecting on any
             # mention.  A bare mention (the IV's own ``i++`` increment, a
             # ``Var(i)`` read) is harmless and must not reject, or every
@@ -708,8 +718,8 @@ def _iv_live_after_loop(loop: NaturalLoop, /, *, cfg: ControlFlowGraph, inductio
     loop body would observe garbage (the init ``Copy(IV, 0)`` is later
     DCE'd and the ``RepString`` leaves no IV value behind).  We therefore
     reject when the IV name appears as a read in *any* basic block that is
-    not part of ``loop.body`` — as a value operand, an
-    :class:`cc.ast_nodes.AddressOf` target, an ``Index`` / ``IndexAssign``
+    not part of ``loop.body`` — as a value operand, a
+    ``&name`` (:class:`cc.ast_nodes.PlaceAddressOf`) target, an ``Index`` / ``IndexAssign``
     base, a ``RepString`` field, or anywhere inside an AST escape hatch.
 
     This is CFG-based rather than a flat-suffix scan, so it stays sound
@@ -1148,10 +1158,10 @@ def _self_increment_step(instruction: ir.Instruction, /, *, name: str) -> int | 
       left=Var(name), operation='+'/'-', right=Int)))`` form the IR builder
       emits for ``name = name op K``;
     * the AST-escape-hatch ``Block(node=Assign(name=<temp>, expr=
-      IncrementDecrement(target_name=name, delta=±1)))`` form the IR builder
+      PlaceIncrementDecrement(place=VariablePlace(name), delta=±1)))`` form the IR builder
       emits for ``name++`` / ``++name`` (and the prefix / postfix variants).
       The ``Assign.name`` is the discarded result temp; the *mutated*
-      variable is ``IncrementDecrement.target_name``, so the step keys off
+      variable is the ``PlaceIncrementDecrement`` place's name, so the step keys off
       that.  Without this form the matcher would never recognize a real
       ``for (i = 0; i < n; i++)`` loop — the IR builder routes ``i++``
       through this shape, not a bare ``i = i + 1`` BinaryOperation.
@@ -1167,8 +1177,9 @@ def _self_increment_step(instruction: ir.Instruction, /, *, name: str) -> int | 
     if (
         isinstance(instruction, ir.Block)
         and isinstance(instruction.node, ast_nodes.Assign)
-        and isinstance(instruction.node.expr, ast_nodes.IncrementDecrement)
-        and instruction.node.expr.target_name == name
+        and isinstance(instruction.node.expr, ast_nodes.PlaceIncrementDecrement)
+        and isinstance(instruction.node.expr.place, ast_nodes.VariablePlace)
+        and instruction.node.expr.place.name == name
     ):
         return instruction.node.expr.delta
     if (

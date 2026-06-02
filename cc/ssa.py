@@ -70,7 +70,7 @@ _SSA_VERSION_SEPARATOR = "_ssa"
 
 
 def _address_taken_names(body: list[ir.Instruction], /) -> set[str]:
-    """Return every name appearing as the target of an :class:`cc.ast_nodes.AddressOf` in *body*.
+    """Return every name whose address is taken (``&name``) in *body*.
 
     A name whose address is taken can be mutated through the resulting
     pointer at any later call site (callee receives the pointer, or an
@@ -84,8 +84,8 @@ def _address_taken_names(body: list[ir.Instruction], /) -> set[str]:
     taken: set[str] = set()
     for instruction in body:
         for operand in _iter_value_operands(instruction):
-            if isinstance(operand, ast_nodes.AddressOf):
-                taken.add(operand.var.name)
+            if (taken_name := ast_nodes.address_of_variable_name(operand)) is not None:
+                taken.add(taken_name)
         if isinstance(instruction, ir.Switch):
             for case in instruction.cases:
                 taken.update(_address_taken_names(case.body))
@@ -195,7 +195,8 @@ def _eliminate_redundant_expressions(ssa: SSAForm, /, *, idom: dict[BasicBlock, 
     (``+``, ``*``, ``&``, ``|``, ``^``, ``==``, ``!=``) by sorting the
     operand-key pair so ``a + b`` and ``b + a`` collapse to one number.
 
-    Operand safety: constants and :class:`cc.ast_nodes.AddressOf` are
+    Operand safety: constants and ``&name``
+    (:class:`cc.ast_nodes.PlaceAddressOf`) are
     always safe.  String operands are safe when they are SSA-versioned
     (single-def by construction) **or** when they are un-versioned names
     that never appear as a destination anywhere in the body
@@ -223,11 +224,12 @@ def _eliminate_redundant_expressions(ssa: SSAForm, /, *, idom: dict[BasicBlock, 
             return ("i", value)
         if isinstance(value, str):
             return ("s", value)
-        assert isinstance(value, ast_nodes.AddressOf)
-        return ("a", value.var.name)
+        taken_name = ast_nodes.address_of_variable_name(value)
+        assert taken_name is not None
+        return ("a", taken_name)
 
     def _is_safe(value: ir.Value, /) -> bool:
-        if isinstance(value, (int, ast_nodes.AddressOf)):
+        if isinstance(value, int) or ast_nodes.address_of_variable_name(value) is not None:
             return True
         if _SSA_VERSION_SEPARATOR in value:
             return True
@@ -335,17 +337,23 @@ def _iter_ast_var_names(node: object, /) -> Iterator[str]:
     if isinstance(node, ast_nodes.Var):
         yield node.name
         return
+    if isinstance(node, ast_nodes.VariablePlace):
+        # A ``VariablePlace`` names a variable through its ``name`` string
+        # field (not a Var node), so the Var-only recursion below cannot
+        # see it.  After the Place fold, a for-loop's ``i++`` step is
+        # ``PlaceIncrementDecrement(VariablePlace(i))`` whose sole mention of ``i`` is
+        # this string — missing it lets the SSA eligibility filter version
+        # ``i`` as loop-invariant and fold the guard to ``cmp 0, n``.
+        yield node.name
+        return
     # Lvalue targets and member/deref bases the AST stores as a bare string
-    # rather than a Var node: ``target_name`` (IncrementDecrement /
-    # DerefIncrement{,Assign}) and ``object_name`` (the Member* family).
+    # rather than a Var node: ``target_name`` (DerefIncrement{,Assign}) and
+    # ``object_name`` (the Member* family).
     # The Var-only recursion below cannot see these, so a variable
     # referenced *only* through one of them is invisible to callers that
-    # must enumerate every name an opaque region touches.  The canonical
-    # failure is a for-loop's ``i++`` step, whose sole mention of ``i`` is
-    # ``target_name``: missing it lets the SSA eligibility filter version
-    # ``i`` as loop-invariant and fold the guard to ``cmp 0, n``.  Both
-    # field names appear only on variable-bearing nodes, so reading them by
-    # attribute is unambiguous.
+    # must enumerate every name an opaque region touches.  Both field names
+    # appear only on variable-bearing nodes, so reading them by attribute
+    # is unambiguous.
     for bare_name_field in ("target_name", "object_name"):
         bare_name = getattr(node, bare_name_field, None)
         if isinstance(bare_name, str):
@@ -509,7 +517,7 @@ def _propagate_ssa_copies(ssa: SSAForm, /) -> bool:
                     # ``edx_ssaM = ...`` between the captured SSA point and
                     # block end, so the de-versioned Copy reads a stale value.
                     # Restrict propagation to non-string sources (constants,
-                    # AddressOf, etc.) which survive de-versioning intact.
+                    # PlaceAddressOf, etc.) which survive de-versioning intact.
                     continue
                 direct_mapping[instruction.destination] = source
     if not direct_mapping:

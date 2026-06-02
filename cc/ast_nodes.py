@@ -13,6 +13,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+def address_of_variable_name(node: object, /) -> str | None:
+    """Return the variable name of an ``&name`` expression, else ``None``.
+
+    ``&name`` is a ``PlaceAddressOf`` over a ``VariablePlace``.
+    Call-argument detection (``out_register`` capture), SSA address-taken
+    analysis, loop induction-variable scanning and the ``*(T *)&local``
+    fast paths all need to recognise this exact shape and recover the bare
+    name; centralising the check keeps every consumer in lock-step.
+    """
+    if isinstance(node, PlaceAddressOf) and isinstance(node.place, VariablePlace):
+        return node.place.name
+    return None
+
+
 @dataclass(kw_only=True, slots=True)
 class Node:
     """Base class for every AST node.
@@ -43,13 +57,6 @@ class IntegerOperand:
     """
 
     __slots__ = ()
-
-
-@dataclass(kw_only=True, slots=True)
-class AddressOf(Node):
-    """Address-of expression ``&name``."""
-
-    var: Var
 
 
 @dataclass(kw_only=True, slots=True)
@@ -225,7 +232,7 @@ class Place(Node):
     A recursive description of *where* a value lives.  Operation nodes say
     *what* to do there: read it (:class:`PlaceLoad`), write it
     (:class:`PlaceStore`), take its address (:class:`PlaceAddressOf`),
-    increment/decrement it (:class:`PlaceIncDec`), or call through the
+    increment/decrement it (:class:`PlaceIncrementDecrement`), or call through the
     function pointer it holds (:class:`PlaceCall`).
 
     Placed before :class:`DereferencePlace` (alphabetically later) because
@@ -371,23 +378,6 @@ class If(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class IncrementDecrement(IntegerOperand, Node):
-    """``++var`` / ``--var`` / ``var++`` / ``var--`` on a plain local or global.
-
-    Always targets a bare name (no ``*p++``, no ``a[i]++`` yet — those
-    desugars are tracked as follow-ups).  ``delta`` is ``+1`` or ``-1``;
-    ``is_postfix`` selects whether the expression evaluates to the
-    pre- or post-update value.  In statement position the value is
-    discarded — codegen for the statement form skips the
-    accumulator-load step.
-    """
-
-    delta: int
-    is_postfix: bool
-    target_name: str
-
-
-@dataclass(kw_only=True, slots=True)
 class Index(Node):
     """Subscript expression ``array[index]``."""
 
@@ -401,15 +391,6 @@ class IndexAssign(Node):
 
     array: Var
     expr: Node
-    index: Node
-
-
-@dataclass(kw_only=True, slots=True)
-class IndexedCall(Node):
-    """Call through a function-pointer array element: ``array[index](args)``."""
-
-    args: list[Node]
-    array: Var
     index: Node
 
 
@@ -516,7 +497,7 @@ class PlaceCall(Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class PlaceIncDec(IntegerOperand, Node):
+class PlaceIncrementDecrement(IntegerOperand, Node):
     """``++place`` / ``place++`` / ``--place`` / ``place--``.
 
     ``delta`` is ``+1`` or ``-1``; ``is_postfix`` selects pre- vs post-value.

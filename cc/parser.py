@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cc.ast_nodes import (
-    AddressOf,
     ArrayDecl,
     ArrayInit,
     AsmOperand,
@@ -34,10 +33,8 @@ from cc.ast_nodes import (
     Function,
     Goto,
     If,
-    IncrementDecrement,
     Index,
     IndexAssign,
-    IndexedCall,
     InlineAsm,
     Int,
     Label,
@@ -47,7 +44,8 @@ from cc.ast_nodes import (
     Node,
     Param,
     PlaceAddressOf,
-    PlaceIncDec,
+    PlaceCall,
+    PlaceIncrementDecrement,
     PlaceLoad,
     PlaceStore,
     Program,
@@ -786,7 +784,8 @@ class Parser:
         * ``ident.field`` / ``ident->field`` with optional ``[i]``
           subscript or ``++``/``--`` postfix, plus chained member walks.
         * Bare enum constant — folds to an :class:`Int` literal.
-        * ``ident++`` / ``ident--`` — postfix :class:`IncrementDecrement`.
+        * ``ident++`` / ``ident--`` — postfix :class:`PlaceIncrementDecrement` over a
+          :class:`VariablePlace`.
         * Plain :class:`Var` fallthrough.
         """
         name = ident_token[1]
@@ -845,21 +844,42 @@ class Parser:
                 self.eat("LBRACKET")
                 inner_index = self.parse_expression()
                 self.eat("RBRACKET")
-                return PlaceLoad(
+                double_index_place = SubscriptPlace(
                     line=line,
-                    place=SubscriptPlace(
+                    base=DereferencePlace(
                         line=line,
-                        base=DereferencePlace(
-                            line=line,
-                            pointer=Index(array=Var(line=line, name=name), index=index, line=line),
-                        ),
-                        index=inner_index,
+                        pointer=Index(array=Var(line=line, name=name), index=index, line=line),
                     ),
+                    index=inner_index,
+                )
+                if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+                    # Postfix ``a[i][j]++`` / ``a[i][j]--`` on an array of
+                    # pointers — a deref-rooted subscript, so it flows
+                    # through the generic _emit_place_store arm rather than
+                    # the named-array IndexAssign lowering.
+                    operator_token = self.eat()
+                    delta = self._delta_from_operator(operator_token[0])
+                    return PlaceIncrementDecrement(delta=delta, is_postfix=True, line=line, place=double_index_place)
+                return PlaceLoad(line=line, place=double_index_place)
+            if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+                # Postfix ``a[i]++`` / ``a[i]--`` on a named array as an
+                # expression — evaluates to the pre-update element value.
+                operator_token = self.eat()
+                delta = self._delta_from_operator(operator_token[0])
+                return PlaceIncrementDecrement(
+                    delta=delta,
+                    is_postfix=True,
+                    line=line,
+                    place=SubscriptPlace(base=VariablePlace(line=line, name=name), index=index, line=line),
                 )
             if self.peek()[0] == "LPAREN":
                 self.eat("LPAREN")
                 arguments = self.parse_arguments()
-                return IndexedCall(args=arguments, array=Var(line=line, name=name), index=index, line=line)
+                return PlaceCall(
+                    args=arguments,
+                    line=line,
+                    place=SubscriptPlace(base=VariablePlace(line=line, name=name), index=index, line=line),
+                )
             return Index(array=Var(line=line, name=name), index=index, line=line)
         if self.peek()[0] in ("DOT", "ARROW"):
             arrow_token = self.eat()
@@ -884,7 +904,7 @@ class Parser:
                 # expression — evaluates to the pre-update value.
                 operator_token = self.eat()
                 delta = self._delta_from_operator(operator_token[0])
-                return PlaceIncDec(
+                return PlaceIncrementDecrement(
                     delta=delta,
                     is_postfix=True,
                     line=line,
@@ -912,11 +932,10 @@ class Parser:
             return Int(line=line, value=self.enum_constants[name])
         if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
             # Postfix ``var++`` / ``var--`` — expression evaluates
-            # to the pre-update value.  Bare Var targets only (no
-            # ``s.f++`` or ``a[i]--`` yet).
+            # to the pre-update value.
             operator_token = self.eat()
             delta = self._delta_from_operator(operator_token[0])
-            return IncrementDecrement(delta=delta, is_postfix=True, line=line, target_name=name)
+            return PlaceIncrementDecrement(delta=delta, is_postfix=True, line=line, place=VariablePlace(line=line, name=name))
         return Var(line=line, name=name)
 
     def _parse_ident_statement(self, *, token: tuple) -> Node | list[Node]:
@@ -965,18 +984,65 @@ class Parser:
             operator_token = self.eat()
             self.eat("SEMI")
             delta = self._delta_from_operator(operator_token[0])
-            return IncrementDecrement(delta=delta, is_postfix=True, line=token[2], target_name=token[1])
+            return PlaceIncrementDecrement(
+                delta=delta,
+                is_postfix=True,
+                line=token[2],
+                place=VariablePlace(line=token[2], name=token[1]),
+            )
         if next_kind == "LBRACKET":
             saved_position = self.position
             self.eat("IDENT")
             self.eat("LBRACKET")
             index_expression = self.parse_expression()
             self.eat("RBRACKET")
+            if self.peek()[0] == "LBRACKET":
+                # ``a[i][j]++;`` on an array of pointers — a deref-rooted
+                # subscript that flows through the generic _emit_place_store
+                # arm.  Only the postfix-increment statement is handled here;
+                # any other follow-on rewinds to the index-assignment parser.
+                self.eat("LBRACKET")
+                inner_index_expression = self.parse_expression()
+                self.eat("RBRACKET")
+                if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+                    operator_token = self.eat()
+                    self.eat("SEMI")
+                    delta = self._delta_from_operator(operator_token[0])
+                    return PlaceIncrementDecrement(
+                        delta=delta,
+                        is_postfix=True,
+                        line=token[2],
+                        place=SubscriptPlace(
+                            line=token[2],
+                            base=DereferencePlace(
+                                line=token[2],
+                                pointer=Index(array=Var(line=token[2], name=token[1]), index=index_expression, line=token[2]),
+                            ),
+                            index=inner_index_expression,
+                        ),
+                    )
+                self.position = saved_position
+                return self.parse_index_assignment()
+            if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
+                # ``a[i]++;`` / ``a[i]--;`` on a named array.
+                operator_token = self.eat()
+                self.eat("SEMI")
+                delta = self._delta_from_operator(operator_token[0])
+                return PlaceIncrementDecrement(
+                    delta=delta,
+                    is_postfix=True,
+                    line=token[2],
+                    place=SubscriptPlace(base=VariablePlace(line=token[2], name=token[1]), index=index_expression, line=token[2]),
+                )
             if self.peek()[0] == "LPAREN":
                 self.eat("LPAREN")
                 arguments = self.parse_arguments()
                 self.eat("SEMI")
-                return IndexedCall(args=arguments, array=Var(line=token[2], name=token[1]), index=index_expression, line=token[2])
+                return PlaceCall(
+                    args=arguments,
+                    line=token[2],
+                    place=SubscriptPlace(base=VariablePlace(line=token[2], name=token[1]), index=index_expression, line=token[2]),
+                )
             self.position = saved_position
             return self.parse_index_assignment()
         if next_kind in ("DOT", "ARROW"):
@@ -1094,7 +1160,7 @@ class Parser:
         expression = self.parse_expression()
         return PlaceStore(line=token[2], place=member_place, value=expression)
 
-    def _parse_member_assignment(self) -> PlaceIncDec | PlaceStore:
+    def _parse_member_assignment(self) -> PlaceIncrementDecrement | PlaceStore:
         """Parse a struct member assignment statement.
 
         Accepts ``name (. | ->) member = expr ;``, the indexed form
@@ -1103,7 +1169,7 @@ class Parser:
         member access ``name (. | ->) member (. | ->) member2 ... =
         expr ;``, and the postfix increment/decrement forms
         ``name (. | ->) member ++ ;`` / ``name (. | ->) member -- ;``
-        (yielding :class:`PlaceIncDec` with ``is_postfix=True``).
+        (yielding :class:`PlaceIncrementDecrement` with ``is_postfix=True``).
         """
         token = self.eat("IDENT")
         object_name = token[1]
@@ -1137,7 +1203,7 @@ class Parser:
             operator_token = self.eat()
             self.eat("SEMI")
             delta = self._delta_from_operator(operator_token[0])
-            return PlaceIncDec(delta=delta, is_postfix=True, line=token[2], place=member_place)
+            return PlaceIncrementDecrement(delta=delta, is_postfix=True, line=token[2], place=member_place)
         if self.peek()[0] == "LBRACKET":
             self.eat("LBRACKET")
             index_expression = self.parse_expression()
@@ -2181,17 +2247,46 @@ class Parser:
         token = self.peek()
         line = token[2]
         if token[0] in ("PLUS_PLUS", "MINUS_MINUS"):
-            # Prefix ``++var`` / ``--var`` and ``++ptr->member`` /
-            # ``--s.member``.  Postfix forms are recognized after the
-            # target lvalue is parsed, further down.  Other lvalues
-            # (``*p``, ``a[i]``) are out of scope for the first cut.
+            # Prefix ``++var`` / ``--var``, ``++ptr->member`` /
+            # ``--s.member`` and ``++a[i]`` / ``--a[i][j]``.  Postfix forms
+            # are recognized after the target lvalue is parsed, further
+            # down.  Other lvalues (``*p``) are out of scope.
             operator_token = self.eat()
             delta = self._delta_from_operator(operator_token[0])
             name_token = self.eat("IDENT")
+            if self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                index = self.parse_expression()
+                self.eat("RBRACKET")
+                if self.peek()[0] == "LBRACKET":
+                    # ``++a[i][j]`` on an array of pointers — deref-rooted
+                    # subscript through the generic _emit_place_store arm.
+                    self.eat("LBRACKET")
+                    inner_index = self.parse_expression()
+                    self.eat("RBRACKET")
+                    return PlaceIncrementDecrement(
+                        delta=delta,
+                        is_postfix=False,
+                        line=line,
+                        place=SubscriptPlace(
+                            line=line,
+                            base=DereferencePlace(
+                                line=line,
+                                pointer=Index(array=Var(line=line, name=name_token[1]), index=index, line=line),
+                            ),
+                            index=inner_index,
+                        ),
+                    )
+                return PlaceIncrementDecrement(
+                    delta=delta,
+                    is_postfix=False,
+                    line=line,
+                    place=SubscriptPlace(base=VariablePlace(line=line, name=name_token[1]), index=index, line=line),
+                )
             if self.peek()[0] in ("DOT", "ARROW"):
                 arrow_token = self.eat()
                 member_token = self.eat("IDENT")
-                return PlaceIncDec(
+                return PlaceIncrementDecrement(
                     delta=delta,
                     is_postfix=False,
                     line=line,
@@ -2201,7 +2296,7 @@ class Parser:
                         member_name=member_token[1],
                     ),
                 )
-            return IncrementDecrement(delta=delta, is_postfix=False, line=line, target_name=name_token[1])
+            return PlaceIncrementDecrement(delta=delta, is_postfix=False, line=line, place=VariablePlace(line=line, name=name_token[1]))
         if token[0] == "SIZEOF":
             return self.parse_sizeof()
         if token[0] == "NUMBER":
@@ -2236,6 +2331,31 @@ class Parser:
             return BinaryOperation(left=Int(line=line, value=0), line=line, operation="-", right=operand)
         if token[0] == "AMP":
             self.eat()
+            if self.peek()[0] == "STAR":
+                # ``&*p`` / ``&*(T *)e`` collapses to the pointer value
+                # itself (``&*p == p``).  Build a DereferencePlace whose
+                # pointer is the dereferenced expression; _emit_place_address_of
+                # then just evaluates that pointer with no load through it.
+                self.eat("STAR")
+                if self.peek()[0] == "LPAREN" and self._is_type_start(offset=1):
+                    operand = self.parse_primary()
+                    pointee_type = self._pointee_type_from_cast(
+                        context="&*(T *)expr",
+                        line=line,
+                        operand=operand,
+                    )
+                    pointer_expression: Node = Cast(
+                        expression=operand.expression,
+                        line=line,
+                        target_type=f"{pointee_type} *",
+                    )
+                else:
+                    pointer_token = self.eat("IDENT")
+                    pointer_expression = Var(line=line, name=pointer_token[1])
+                return PlaceAddressOf(
+                    line=line,
+                    place=DereferencePlace(line=line, pointer=pointer_expression),
+                )
             name_token = self.eat("IDENT")
             # ``&array[i]`` desugars to ``array + i`` — cc.py's typed pointer
             # arithmetic already scales by element size, so the resulting
@@ -2273,7 +2393,7 @@ class Parser:
                         place=SubscriptPlace(base=member_place, index=index, line=line),
                     )
                 return PlaceAddressOf(line=line, place=member_place)
-            return AddressOf(line=line, var=Var(line=line, name=name_token[1]))
+            return PlaceAddressOf(line=line, place=VariablePlace(line=line, name=name_token[1]))
         if token[0] == "STAR":
             self.eat()
             return self._parse_star_primary(line=line)
@@ -2329,6 +2449,25 @@ class Parser:
                         line=line,
                         member_name=member_token[1],
                     ),
+                )
+            # ``(*fp)(args)`` — call through a parenthesized dereference of a
+            # named function pointer.  ``*fp`` desugars to ``Index(fp, 0)`` in
+            # _parse_star_primary, so recover the pointer Var and call through
+            # a DereferencePlace.  More complex callee expressions
+            # (``(*(arr + 1))(args)``) are out of scope.
+            if (
+                self.peek()[0] == "LPAREN"
+                and isinstance(expression, Index)
+                and isinstance(expression.array, Var)
+                and isinstance(expression.index, Int)
+                and expression.index.value == 0
+            ):
+                self.eat("LPAREN")
+                arguments = self.parse_arguments()
+                return PlaceCall(
+                    args=arguments,
+                    line=line,
+                    place=DereferencePlace(line=line, pointer=expression.array),
                 )
             return expression
         message = f"expected expression, got {token[0]} ({token[1]!r})"
@@ -2493,11 +2632,42 @@ class Parser:
             operator_token = self.eat()
             delta = self._delta_from_operator(operator_token[0])
             name_token = self.eat("IDENT")
+            if self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                index = self.parse_expression()
+                self.eat("RBRACKET")
+                if self.peek()[0] == "LBRACKET":
+                    # ``++a[i][j];`` on an array of pointers — deref-rooted
+                    # subscript through the generic _emit_place_store arm.
+                    self.eat("LBRACKET")
+                    inner_index = self.parse_expression()
+                    self.eat("RBRACKET")
+                    self.eat("SEMI")
+                    return PlaceIncrementDecrement(
+                        delta=delta,
+                        is_postfix=False,
+                        line=token[2],
+                        place=SubscriptPlace(
+                            line=token[2],
+                            base=DereferencePlace(
+                                line=token[2],
+                                pointer=Index(array=Var(line=token[2], name=name_token[1]), index=index, line=token[2]),
+                            ),
+                            index=inner_index,
+                        ),
+                    )
+                self.eat("SEMI")
+                return PlaceIncrementDecrement(
+                    delta=delta,
+                    is_postfix=False,
+                    line=token[2],
+                    place=SubscriptPlace(base=VariablePlace(line=token[2], name=name_token[1]), index=index, line=token[2]),
+                )
             if self.peek()[0] in ("DOT", "ARROW"):
                 arrow_token = self.eat()
                 member_token = self.eat("IDENT")
                 self.eat("SEMI")
-                return PlaceIncDec(
+                return PlaceIncrementDecrement(
                     delta=delta,
                     is_postfix=False,
                     line=token[2],
@@ -2508,7 +2678,9 @@ class Parser:
                     ),
                 )
             self.eat("SEMI")
-            return IncrementDecrement(delta=delta, is_postfix=False, line=token[2], target_name=name_token[1])
+            return PlaceIncrementDecrement(
+                delta=delta, is_postfix=False, line=token[2], place=VariablePlace(line=token[2], name=name_token[1])
+            )
         if token[0] == "IDENT":
             return self._parse_ident_statement(token=token)
         message = f"expected statement, got {token[0]} ({token[1]!r})"

@@ -423,7 +423,7 @@ probe_bitfield_constfold:
         pop ebp
         ret
 
-probe_member_incdec:
+probe_member_increment_decrement:
         push ebp
         mov ebp, esp
         sub esp, 12
@@ -905,23 +905,578 @@ probe_sizeof_cast_deref_expr:
         pop ebp
         ret
 
+probe_addr_of_global:
+        push ebp
+        mov ebp, esp
+        mov eax, _g_g_counter
+        pop ebp
+        ret
+
+probe_addr_of_local:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        xor eax, eax
+        mov [ebp-4], eax
+        lea eax, [ebp-4]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_sizeof_addr:
+        push ebp
+        mov ebp, esp
+        mov eax, 4
+        pop ebp
+        ret
+
+probe_postinc_expr:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        inc dword [ebp-4]
+        mov eax, [ebp-4]
+        sub eax, 1
+        mov edx, eax
+        add eax, [ebp-4]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_preinc_expr:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        inc dword [ebp-4]
+        mov eax, [ebp-4]
+        mov edx, eax
+        add eax, [ebp-4]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_postdec_expr:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        dec dword [ebp-4]
+        mov eax, [ebp-4]
+        add eax, 1
+        mov edx, eax
+        add eax, [ebp-4]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_predec_expr:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        dec dword [ebp-4]
+        mov eax, [ebp-4]
+        mov edx, eax
+        add eax, [ebp-4]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_postinc_expr_global:
+        push ebp
+        mov ebp, esp
+        inc dword [_g_g_counter]
+        mov eax, [_g_g_counter]
+        sub eax, 1
+        mov edx, eax
+        add eax, [_g_g_counter]
+        pop ebp
+        ret
+
+probe_preinc_expr_global:
+        push ebp
+        mov ebp, esp
+        inc dword [_g_g_counter]
+        mov eax, [_g_g_counter]
+        mov edx, eax
+        add eax, [_g_g_counter]
+        pop ebp
+        ret
+
+probe_postinc_stmt:
+        push ebp
+        mov ebp, esp
+        inc dword [_g_g_counter]
+        mov eax, [_g_g_counter]
+        sub eax, 1
+        pop ebp
+        ret
+
+probe_predec_stmt:
+        push ebp
+        mov ebp, esp
+        dec dword [_g_g_counter]
+        mov eax, [_g_g_counter]
+        pop ebp
+        ret
+
+probe_postinc_stmt_local:
+        push ebp
+        mov ebp, esp
+        sub esp, 4
+        mov [ebp-4], eax
+        inc dword [ebp-4]
+        mov eax, [ebp-4]
+        sub eax, 1
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_predec_stmt_local:
+        push ebp
+        mov ebp, esp
+        sub esp, 4
+        mov [ebp-4], eax
+        dec dword [ebp-4]
+        mov eax, [ebp-4]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_indexed_call_global_const:
+        push ebp
+        mov ebp, esp
+        push eax
+        mov eax, [_g_g_fptable+4]
+        call eax
+        add esp, 4
+        pop ebp
+        ret
+
+probe_indexed_call_global_var:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov eax, [ebp-8]
+        push eax
+        lea esi, [_g_g_fptable]
+        mov eax, [ebp-4]
+        shl eax, 2
+        add eax, esi
+        mov eax, [eax]
+        call eax
+        add esp, 4
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_indexed_call_global_const_exprval:
+        push ebp
+        mov ebp, esp
+        sub esp, 4
+        mov [ebp-4], eax
+        push edx
+        mov eax, [ebp-4]
+        push eax
+        mov eax, [_g_g_fptable+4]
+        call eax
+        add esp, 4
+        pop edx
+        mov edx, eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_indexed_call_global_var_exprval:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        push edx
+        mov eax, [ebp-8]
+        push eax
+        lea esi, [_g_g_fptable]
+        mov eax, [ebp-4]
+        shl eax, 2
+        add eax, esi
+        mov eax, [eax]
+        call eax
+        add esp, 4
+        pop edx
+        mov edx, eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_indexed_call_global_stmt:
+        push ebp
+        mov ebp, esp
+        push eax
+        mov eax, [_g_g_fptable]
+        call eax
+        add esp, 4
+        pop ebp
+        ret
+
+probe_indexed_call_local_const:
+        push ebp
+        mov ebp, esp
+        sub esp, 28
+        mov [ebp-4], eax
+        mov eax, [_g_g_fptable_src+8]
+        lea esi, [ebp-20]
+        mov [esi+8], eax
+        mov eax, [ebp-4]
+        push eax
+        mov eax, [ebp-20+8]
+        call eax
+        add esp, 4
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_indexed_call_local_var:
+        push ebp
+        mov ebp, esp
+        sub esp, 32
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_fptable_src+esi]
+        push eax
+        lea esi, [ebp-24]
+        mov eax, [ebp-4]
+        shl eax, 2
+        add esi, eax
+        pop eax
+        mov [esi], eax
+        mov eax, [ebp-8]
+        push eax
+        lea esi, [ebp-24]
+        mov eax, [ebp-4]
+        shl eax, 2
+        add eax, esi
+        mov eax, [eax]
+        call eax
+        add esp, 4
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_indexed_call_local_stmt:
+        push ebp
+        mov ebp, esp
+        sub esp, 24
+        mov [ebp-4], eax
+        mov eax, [_g_g_fptable_src]
+        lea esi, [ebp-20]
+        mov [esi], eax
+        mov eax, [ebp-4]
+        push eax
+        mov eax, [ebp-20]
+        call eax
+        add esp, 4
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_addr_deref:
+        push ebp
+        mov ebp, esp
+        pop ebp
+        ret
+
+probe_named_array_postinc:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov eax, 5
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov [_g_g_arr+esi], eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_arr+esi]
+        inc eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov [_g_g_arr+esi], eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_arr+esi]
+        sub eax, 1
+        mov edx, eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_arr+esi]
+        mov [ebp-8], eax
+        mov eax, edx
+        add eax, [ebp-8]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_named_array_predec:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov eax, 5
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov [_g_g_arr+esi], eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_arr+esi]
+        dec eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov [_g_g_arr+esi], eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_arr+esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_named_array_postinc_stmt:
+        push ebp
+        mov ebp, esp
+        sub esp, 4
+        mov [ebp-4], eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_arr+esi]
+        inc eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov [_g_g_arr+esi], eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_arr+esi]
+        sub eax, 1
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_double_index_postinc:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_rows+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        mov eax, [esi]
+        inc eax
+        push eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_rows+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        pop eax
+        mov [esi], eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_rows+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        mov eax, [esi]
+        sub eax, 1
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_double_index_postinc_stmt:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_rows+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        mov eax, [esi]
+        inc eax
+        push eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_rows+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        pop eax
+        mov [esi], eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_rows+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        mov eax, [esi]
+        sub eax, 1
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_double_index_preinc:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_rows+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        mov eax, [esi]
+        inc eax
+        push eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_rows+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        pop eax
+        mov [esi], eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_rows+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        mov eax, [esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_named_array_predec_stmt:
+        push ebp
+        mov ebp, esp
+        sub esp, 4
+        mov [ebp-4], eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_arr+esi]
+        dec eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov [_g_g_arr+esi], eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_arr+esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_double_index_preinc_stmt:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_rows+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        mov eax, [esi]
+        inc eax
+        push eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_rows+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        pop eax
+        mov [esi], eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_g_rows+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        mov eax, [esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_call_through_ptr:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov eax, [ebp-8]
+        push eax
+        mov eax, [ebp-4]
+        call eax
+        add esp, 4
+        mov esp, ebp
+        pop ebp
+        ret
+
 ;; --- global data ---
-        dd 262
+        dd 346
         dw 0B032h
 _program_end:
-_bss_end equ _program_end + 262
+_bss_end equ _program_end + 346
 ;; --- BSS (zero-initialized) ---
-_g_g_flags equ _program_end
+_g_g_counter equ _program_end
+g_counter equ _g_g_counter
+_g_g_flags equ _program_end + 4
 g_flags equ _g_g_flags
-_g_g_outer equ _program_end + 5
+_g_g_outer equ _program_end + 9
 g_outer equ _g_g_outer
-_g_ints equ _program_end + 14
+_g_g_arr equ _program_end + 18
+g_arr equ _g_g_arr
+_g_g_fptable equ _program_end + 50
+g_fptable equ _g_g_fptable
+_g_g_fptable_src equ _program_end + 66
+g_fptable_src equ _g_g_fptable_src
+_g_g_rows equ _program_end + 82
+g_rows equ _g_g_rows
+_g_ints equ _program_end + 98
 ints equ _g_ints
-_g_names equ _program_end + 30
+_g_names equ _program_end + 114
 names equ _g_names
-_g_points equ _program_end + 46
+_g_points equ _program_end + 130
 points equ _g_points
-_g_words equ _program_end + 150
+_g_words equ _program_end + 234
 words equ _g_words
-_g_wrecs equ _program_end + 166
+_g_wrecs equ _program_end + 250
 wrecs equ _g_wrecs
