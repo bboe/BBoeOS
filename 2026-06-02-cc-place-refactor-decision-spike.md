@@ -1,133 +1,148 @@
-# cc.py `Place` Refactor — Decision Spike: IR-vs-direct-emission fork (gates Plan 5)
+# cc.py `Place` Refactor — Decision Spike → Design: grow the IR, retire `Block` entirely
 
-**Status:** Decided — **option (a): keep the small IR; make `_resolve_place` the
-shared address core.** This doc records the choice and rationale so Plan 5 (the
-`Index` / `IndexAssign` fold) can be written.
+**Status:** Decided. The earlier draft of this spike leaned toward option (a)
+(keep the small IR, map the subscript Place shape back to `ir.Index`) on
+risk/effort grounds. After weighing it against how production compilers
+actually work, and with the acceptance gate relaxed from *byte-identical* to
+*byte-efficient*, the decision is **option (b): lower all `Place` accesses into
+first-class IR ops and retire the `Block` escape hatch entirely.**
 
-**Context:** Plans 1–4 (PRs #573, #575, #576, #577) folded the member, deref,
-`DoubleIndex`, address-of, increment/decrement, and indexed-call families onto
-the recursive `Place` AST. The only access nodes left outside `Place` are
-`Index` / `IndexAssign` (subscript on a *named* array, `a[i]`), deliberately
-deferred because — unlike every other access shape — they are lowered into
-**real IR ops** (`ir.Index` / `ir.IndexAssign`) that the SSA pass and the
-loop / rep-string optimizer consume, rather than riding the `ir.Block` escape
-hatch. Plan 5 folds them in. Before writing it we must pick how.
+This supersedes the (a) recommendation. It turns Plan 5 from a single plan into
+a small **staged program** (below).
 
-## The fork
+## Why (b), and why retire `Block`
 
-- **(a) Keep the small IR.** Fold `Index`/`IndexAssign` at the **AST/parser
-  level** (parser emits `PlaceLoad(SubscriptPlace(VariablePlace(a), i))` /
-  `PlaceStore(...)`), and teach the **IR builder** to recognize that one Place
-  shape and lower it to the *existing* `ir.Index` / `ir.IndexAssign` ops. The
-  SSA pass, copy-prop, LICM, strength reduction, and the rep-string recognizer
-  stay **completely untouched** — they still see `ir.Index` / `ir.IndexAssign`.
-  `_resolve_place` remains the shared address-computation core for the
-  `Block`-emitted Place shapes (member / deref / double-index), exactly as
-  Plans 1–4 left it. Delete the `Index` / `IndexAssign` **AST** nodes; keep the
-  identically-named **IR** ops.
+`Block(node=<arbitrary AST>)` is "lower this AST node via the existing
+statement codegen" — an escape hatch that routes most access shapes (and
+declarations, struct-init, inline asm, special-cased assigns) *around* the IR
+and its optimizer. No production compiler has an equivalent:
 
-- **(b) Grow the IR.** Lower *all* `Place` into new IR address/load/store ops,
-  retire `Block` for accesses, and re-express the optimizer over IR Place ops —
-  gaining optimization on member access "for free."
+- **Clang/LLVM:** the AST lvalue tree (`ArraySubscriptExpr` / `MemberExpr` /
+  deref) is lowered by `EmitLValue` into a CodeGen-time `LValue` (an address),
+  then to **uniform** LLVM IR — `getelementptr` + `load`/`store`. All
+  optimization (LICM, GVN, the loop-idiom recognizer that is the analog of our
+  rep-string pass) runs on that uniform IR. No escape hatch.
+- **GCC:** GENERIC lvalue trees (`ARRAY_REF` / `COMPONENT_REF` / `MEM_REF` /
+  `ADDR_EXPR` — almost exactly our `SubscriptPlace`/`MemberPlace`/
+  `DereferencePlace`/`PlaceAddressOf`) are carried as *structured references in
+  the optimizable IR* (GIMPLE); passes call `get_inner_reference` to decompose
+  a ref into `(base, offset, bitpos)` — precisely what our `_resolve_place`
+  returns. Lowered to flat addressing later.
 
-## Findings that drove the decision (recon over cc/ir.py, ssa.py, ir_optimize.py, loops.py, codegen)
+The part of Plans 1–4 that already matches the big compilers is
+`_resolve_place` (≈ `EmitLValue` / `get_inner_reference`). The part that does
+**not** is the `Block` escape hatch. (b) removes it; accesses become a uniform,
+optimizer-visible IR representation; `_resolve_place` becomes the shared
+address core that *emission* (and the IR lowering) use.
 
-1. **The rep-string / loop optimizer is hard-coupled to the `ir.Index` /
-   `ir.IndexAssign` op shapes.** `cc/loops.py` matches the exact pair
-   `ir.Index(base=S, index=IV)` + `ir.IndexAssign(base=D, index=IV, source=t)`
-   with the induction variable as a **bare operand** (`isinstance(load,
-   ir.Index)` / `isinstance(store, ir.IndexAssign)`, and `store.index != IV`
-   guards). Under (b), the IV would sit several levels deep inside a
-   `SubscriptPlace(VariablePlace(...))` IR op and this matcher — the one PR #566
-   just added — would need a full rewrite. Under (a) it is **untouched**.
+Inline asm is **not** an obstacle: it does not need `Block`. It becomes a
+dedicated **opaque** IR op (`ir.InlineAsm` already exists and the bare
+`asm("…")` form already lowers to it), exactly as LLVM (inline-asm `CallInst`
+with `sideeffect`) and GCC (`GIMPLE_ASM`) represent it — a barrier the
+optimizer won't reorder/eliminate/propagate across, with declared clobbers
+informing liveness. That is strictly better than `Block(arbitrary AST)`: the
+optimizer learns "asm clobbering X/Y" instead of "opaque — bail."
 
-2. **Multiple passes already reach into `Index`/`IndexAssign` operands.**
-   Copy-propagation and constant folding in `ir_optimize.py` actively rewrite
-   the `index` / `source` operands (`_substitute_value`); `_compute_use_counts`
-   counts the bases as reads; LICM (`loops.py`) has `Index`-specific
-   memory-safety / hoistability logic (`_is_hoistable_kind` includes
-   `ir.Index`); SSA explicitly excludes `Index`/`IndexAssign` bases from
-   renaming. Option (b) means **every one of these passes must learn to walk
-   `Place` trees** instead of flat IR ops — a large, error-prone surface with
-   real miscompile risk (the store-index-miscompile class, PR #568, lives
-   exactly here). Option (a) leaves all of them alone.
+## Acceptance gate: byte-efficiency (not byte-identity)
 
-3. **The two paths share nothing today, and (a) needs them to share little.**
-   `_resolve_place` is currently called *only* from the `Block`-emitted Place
-   path — never from the IR `Index` lowering. The IR `Index`/`IndexAssign` ops
-   have their own emit path. Under (a), the named-array subscript continues to
-   lower to `ir.Index`/`ir.IndexAssign` (its own emit path, optimizer-visible),
-   and the *other* Place shapes keep using `_resolve_place` — so no new
-   cross-path plumbing is forced, and the duplication that does exist is
-   acceptable and documented.
+The byte-exact gate of Plans 1–4 is replaced by a **byte-efficiency** gate:
 
-4. **The "small IR" stance is embedded throughout.** `ir.py` lowers only the
-   straightforward shapes (arithmetic, simple assigns, control flow, named-array
-   subscript) and routes everything complex through `Block` ("Escape hatch:
-   lower this AST node via the existing statement codegen"). `ir_optimize.py`
-   states it does not rewrite `Block` nodes. There are 15 IR op types; (b) adds
-   a Place-address/load/store family on top and forces it through every pass.
-   (b) runs directly against this stance.
+- Compile every userland `.c` before and after; compare **per-function emitted
+  byte size**. **New size ≤ old size for every function.**
+- A size **increase** is allowed **only** when it is a clear performance win
+  (e.g. it enables a `rep stos`/`rep movs`, or removes a memory round-trip) —
+  and must be called out with that justification.
+- Size **decreases are welcome and expected**: once the optimizer sees
+  accesses uniformly, it can CSE/hoist repeated address math (this is part of
+  (b)'s payoff).
+- Correctness: `tests/test_asm.py` 49/49, `tests/test_programs.py` bbfs + ext2
+  (incl. `e2fsck`), full unit suite, and especially the **rep-string suite**
+  (the loop-idiom recognizer is the riskiest pass to re-port).
 
-5. **(b) throws away Plans 1–4's investment.** The `_resolve_place` /
-   `_emit_place_*` / `_emit_member_*` / `_emit_dereference_place_*` /
-   `_emit_double_index_place_*` family (~700+ lines, byte-exact, fully tested)
-   becomes interim scaffolding under (b). Under (a) it is the **permanent**
-   shared core.
+This relaxation is what makes (b) tractable: we no longer need bit-for-bit
+reproduction of the old addressing; we need to not regress size.
 
-## Decision: (a)
+## IR shape (forced by the byte-efficiency gate)
 
-(a) is lower risk, preserves the byte-exact `_resolve_place` core, leaves the
-SSA + loop/rep-string + copy-prop + LICM passes (and their golden/byte-exact
-behavior) untouched, and matches the project's deliberate small-IR design. The
-one facet (b) would improve — optimization on member access — is not currently
-needed (member access is not in loops that the rep-string/LICM passes target),
-and can be revisited later without re-deciding this fork. The dual path
-(IR for named-array subscript, `Block` + `_resolve_place` for everything else)
-stays as a **deliberate, documented** design point rather than a smell to
-eliminate.
+The naive LLVM-pure model — materialize a pointer with a GEP-like op, then
+`load`/`store` through it — would emit `lea ebx,[…]; mov eax,[ebx]` where we
+currently emit a single `mov eax,[_g_arr+12+ebx]`. That **bloats** with no perf
+gain, so the gate rules it out (absent a full addressing-mode-selection pass,
+which we are not building).
 
-## What Plan 5 looks like under (a)
+Therefore the new access ops **carry the symbolic address** — the
+`_resolve_place` `(const_base, offset, index, scale)` form — as an SSA-visible
+value, and **emission folds** an `Address` + `Load`/`Store` into a single x86
+addressed instruction. The optimizer sees and can CSE/hoist the `Address`
+values; emission keeps the encoding tight. This is the GCC "structured ref with
+`get_inner_reference`" model adapted to cc.py's x86 addressing.
 
-The fold becomes primarily an **AST-level unification with an IR-builder
-recognizer**, byte-exact like Plans 1–4:
+## Staged program (each stage = its own plan + PR, each gated)
 
-1. **Parser:** emit `PlaceLoad(SubscriptPlace(VariablePlace(a), i))` for `a[i]`
-   reads and `PlaceStore(SubscriptPlace(VariablePlace(a), i), v)` for `a[i] = v`
-   (and the compound / `+=` forms), replacing the `Index` / `IndexAssign` AST
-   constructions. The `DoubleIndex`-style `a[i][j]` already composes
-   (`SubscriptPlace(DereferencePlace(Index(...)), j)`) — Plan 5 lets the inner
-   `a[i]` also be a `SubscriptPlace`, so the bespoke `_emit_double_index_place_*`
-   helpers can fold into genuine recursion (and `a[i][j][k]` falls out for free).
+> The recursion goal is explicit (see "Plan 5 goal" below) and lands in Stage 3.
 
-2. **IR builder (`cc/ir.py`):** add a recognizer that maps the named-array
-   subscript Place shape — `PlaceLoad`/`PlaceStore` over
-   `SubscriptPlace(VariablePlace, index)` — back to the existing `ir.Index` /
-   `ir.IndexAssign` ops, so SSA + every optimizer pass + the rep-string
-   recognizer keep operating on the identical IR they see today. This is the
-   single load-bearing change and the byte-exact gate's focus.
+- **Stage 1 — Foundation.** Build the **per-function byte-size differential
+  harness** (the new gate tool). Define the uniform access IR ops: an `Address`
+  value op carrying the symbolic `(const_base, offset, index, scale)` triple,
+  and `Load(addr,width)` / `Store(addr,width,value)` / `AddressOf(addr)` /
+  call-through-address ops. Lower the **currently-`Block`-emitted Place access
+  family** (member / deref / subscript load·store·address-of·inc-dec·call) into
+  them; emission folds them into tight x86 addressing. Optimizer passes updated
+  only enough to treat the new ops safely (conservative). Gate: byte-size ≤
+  baseline. `Index`/`IndexAssign` stay as-is this stage.
 
-3. **`_resolve_place`:** extend to resolve `SubscriptPlace(VariablePlace, index)`
-   for the `Block`-emitted contexts that don't go through the IR (e.g. a bare
-   `a[i]` sub-expression the IR builder leaves to `Block`), reusing the existing
-   array-base address math. Becomes the single shared address core for all
-   non-IR Place shapes.
+- **Stage 2 — Optimizer port.** Teach every pass to understand the new ops:
+  copy-prop / const-fold operand rewriting, SSA value numbering over `Address`,
+  LICM hoistability + memory-write detection, strength reduction, and — the
+  highest-risk item — **rewrite the rep-string / loop-idiom matcher** to match
+  the uniform `Load`/`Store`/`Address` shapes instead of `ir.Index`/
+  `ir.IndexAssign`. This is where size *wins* appear (hoisted/CSE'd address
+  math). Gate: byte-size ≤ baseline (expect improvements); rep-string suite
+  green.
 
-4. **Delete** the `Index` / `IndexAssign` **AST** node classes (the IR ops of
-   the same name stay). Migrate any remaining AST-`Index` consumers (e.g. the
-   `_emit_double_index_place_*` inner-`Index`, `_expression_type`, liveness) to
-   the Place shape.
+- **Stage 3 — Fold `Index`/`IndexAssign` + recursion (the old "Plan 5").**
+  Parser emits `PlaceLoad`/`PlaceStore` over `SubscriptPlace(VariablePlace)` for
+  `a[i]`; these lower into the Stage-1 uniform ops. **Make `_resolve_place`
+  uniformly recursive** over `SubscriptPlace`/`MemberPlace`/`DereferencePlace`
+  at any depth, retiring the 2-level `_emit_double_index_place_*` hack. Delete
+  the `Index`/`IndexAssign` AST nodes (the IR ops are gone too, replaced by the
+  uniform ops). Acceptance includes a **triple-index test** (`a[i][j][k]`) and
+  chained `a->b[1][2]` / `(*p)[i][j]`.
 
-**Gate (same discipline as Plans 1–4):** the `tests/test_cc_place.py` golden
-stays byte-identical for all subscript shapes captured from pre-Plan-5 output;
-the userland differential (all 50 `.c`) stays byte-identical; `test_asm` 49/49;
-`test_programs` bbfs + ext2 green. The rep-string suite (`rep_loops` tests) is
-the critical regression check — if the IR-builder recognizer is correct, those
-stay green unchanged.
+- **Stage 4 — Retire `Block` entirely.** Give the remaining `Block` residents
+  first-class ops: `VarDecl` / `ArrayDecl`, struct initializers, bitfield
+  assigns, the long-type / const-chain / self-modify `Assign` special-cases,
+  and route the `Call(name="asm")` + `ExtendedAsm` forms to opaque
+  `InlineAsm`/`ExtendedAsm` ops. **Delete the `Block` node.** Gate: byte-size ≤
+  baseline; full suite; `git grep "Block" cc/ir.py` → only history/none.
 
-**Risk note:** the highest-risk item is step 2 (the IR-builder recognizer) — if
-the named-array subscript Place shape isn't mapped to `ir.Index`/`ir.IndexAssign`
-exactly, the loop/rep-string optimizer silently stops firing (no error, just
-worse code) or, worse, the induction-variable walkers miss a step (the
-store-index-miscompile class). The userland differential + rep-string suite are
-the gates that catch this; Plan 5 must run both before declaring done.
+## Plan 5 goal (explicit): recursive, arbitrary-depth access
+
+Folding `Index` is not just "handle `a[i]`": the stated, tested goal is
+**uniform recursion** — `_resolve_place` resolves a `SubscriptPlace` /
+`MemberPlace` / `DereferencePlace` of any depth by resolving its base
+recursively, dereferencing if the base is a pointer, then applying the
+subscript/member/deref. Arbitrary-depth `a[i][j][k]`, chained `a->b[1][2]`,
+`(*p)[i][j]`, `s.grid[i][j].f[k]` must compile and run correctly (acceptance
+tests), with the bespoke `_emit_double_index_place_*` 2-level helpers deleted.
+(Optimization of deep accesses follows from Stage 2's optimizer port — the
+inner contiguous dimension becomes a uniform `Load`/`Store` the rep-string pass
+can match once LICM hoists the outer address.)
+
+## Risk register
+
+1. **Rep-string matcher rewrite (Stage 2)** — highest risk. If the uniform-op
+   matcher misses a shape it previously caught, loops silently stop being
+   `rep`-ified (size regression, caught by the gate); if it mis-identifies the
+   induction step, miscompile (the store-index-miscompile class — caught by the
+   rep-string suite + runtime tests). Port with the existing rep-string tests as
+   the oracle and add uniform-op-shape tests.
+2. **Addressing-mode folding (Stage 1)** — if emission fails to fold an
+   `Address`+`Load` into one instruction, size regresses. The byte-size gate
+   catches it per function.
+3. **SSA over `Address` values** — `Address` ops that depend on a mutated index
+   must not be CSE'd across the mutation; reuse the `_iter_ast_var_names` /
+   induction-variable discipline from the store-index-miscompile fix.
+4. **Scope creep of Stage 4** — the non-access residents (struct-init, the
+   `Assign` special-cases) are fiddly for little optimizer payoff; keep their
+   new ops thin and behavior-preserving.
