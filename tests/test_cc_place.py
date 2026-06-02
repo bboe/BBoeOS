@@ -1,13 +1,26 @@
 #!/usr/bin/env python3
-"""Byte-exact golden snapshot for IndexMember* codegen through the Place core.
+"""Byte-exact golden snapshot for Member* / IndexMember* codegen through the Place core.
 
-Compiles a fixture exercising arr[i].field, arr[i].field[j],
-arr[i].field = v, and arr[i].field[j] = v as statements, plus the
-auxiliary paths these shapes flow through: sizeof(arr[i].field)
+The original five probes exercise the struct-array shapes: arr[i].field,
+arr[i].field[j], arr[i].field = v, and arr[i].field[j] = v as statements,
+plus the auxiliary paths these flow through: sizeof(arr[i].field)
 (expression-type inference) and (arr[i].field = v) / (arr[i].field[j] = v)
-as assignment-as-expression.  Asserts the cc.py-emitted assembly is
-identical to a checked-in golden file.  Regenerate the golden deliberately
-with BBOE_UPDATE_GOLDEN=1 only when output is intended to change.
+as assignment-as-expression.
+
+The fixture is then extended to capture the CURRENT (legacy) output of the
+full Member* family so a later refactor onto the recursive Place abstraction
+can prove byte-exactness against this oracle.  The added probes cover: dot
+scalar read/store; dot struct-value yield (address-of, &g_outer.in); arrow
+scalar read/store; chained o->pin->a read/store; cast-base
+((struct flags *)&raw)->hi; inline-array index read/store (variable and
+constant subscript); pointer-field index read/store; word (2-byte) inline
+index; &member and &member[i]; bitfield read; bitfield general write;
+1-bit-literal bitfield write; const-folded bitfield write into a known local
+byte; postfix ++ on a member; and prefix -- on a member.
+
+Asserts the cc.py-emitted assembly is identical to a checked-in golden file.
+Regenerate the golden deliberately with BBOE_UPDATE_GOLDEN=1 only when output
+is intended to change.
 """
 
 from __future__ import annotations
@@ -57,6 +70,38 @@ int probe_assign_elem_expr(int i, int j, int v) {
     int y = (points[i].path[j] = v);
     return y;
 }
+
+struct inner { int a; char tag; };
+struct outer { struct inner in; struct inner *pin; };
+struct flags { int hi; unsigned char a : 1; unsigned char b : 3; unsigned char c : 4; };
+struct buf { int n; char data[8]; char *p; unsigned short w[4]; };
+
+struct outer g_outer;
+struct flags g_flags;
+
+int probe_dot_read(void) { return g_outer.in.a; }
+int probe_dot_store(int v) { g_outer.in.a = v; return g_outer.in.a; }
+int probe_arrow_read(struct buf *b) { return b->n; }
+int probe_arrow_store(struct buf *b, int v) { b->n = v; return b->n; }
+int probe_chain_read(struct outer *o) { return o->pin->a; }
+int probe_chain_store(struct outer *o, int v) { o->pin->a = v; return o->pin->a; }
+int probe_cast_base(unsigned char raw) { return ((struct flags *)&raw)->hi; }
+int probe_inline_index_read(struct buf *b, int i) { return b->data[i]; }
+int probe_inline_index_store(struct buf *b, int i, int v) { b->data[i] = v; return 0; }
+int probe_inline_index_const(struct buf *b) { return b->data[3]; }
+int probe_pointer_index_read(struct buf *b, int i) { return b->p[i]; }
+int probe_pointer_index_store(struct buf *b, int i, int v) { b->p[i] = v; return 0; }
+int probe_word_inline_index(struct buf *b, int i) { return b->w[i]; }
+char *probe_member_addr(struct buf *b) { return &b->n; }
+char **probe_member_addr_offset(struct buf *b) { return &b->p; }
+char *probe_member_elem_addr(struct buf *b, int i) { return &b->data[i]; }
+int probe_bitfield_read(struct flags *f) { return f->b; }
+int probe_bitfield_store(struct flags *f, int v) { f->b = v; return 0; }
+int probe_bitfield_one_literal(struct flags *f) { f->a = 1; return 0; }
+int probe_bitfield_constfold(void) { struct flags local; local.a = 0; local.b = 5; return local.b; }
+int probe_member_incdec(struct buf *b) { int pre = b->n++; return pre + b->n; }
+int probe_member_predec(struct buf *b) { return --b->n; }
+int probe_addr_of_dot(void) { return (int)&g_outer.in; }
 """
 
 

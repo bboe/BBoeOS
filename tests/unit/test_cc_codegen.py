@@ -3066,7 +3066,7 @@ def test_member_access_via_cast_arrow_rejects_non_struct_pointer() -> None:
         bits=32,
     )
     assert not ok, f"expected struct-pointer-cast rejection, got success:\n{message}"
-    assert "struct-pointer cast" in message, message
+    assert "requires a pointer to struct" in message, message
 
 
 def test_member_access_via_cast_arrow_word_field_offset() -> None:

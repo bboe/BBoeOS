@@ -946,17 +946,6 @@ class Builder:
         if isinstance(inner, ast_nodes.Assign) and self._var_types.get(inner.name) == "unsigned long":
             message = "assignment-as-expression to 'unsigned long' is not supported"
             raise CompileError(message, line=line)
-        # Bitfield member assignments clobber AX during the read-modify-write
-        # sequence, breaking the "AX = assigned value" contract.  Reject at
-        # compile time rather than silently miscompile.
-        if isinstance(inner, ast_nodes.MemberAssign) and inner.base_expr is None:
-            struct_type = self._var_types.get(inner.object_name, "")
-            # Dot form: "struct TAG"; arrow form: "struct TAG*" — strip the "*".
-            tag = struct_type[7:].rstrip("*") if struct_type.startswith("struct ") else ""
-            bitfield_fields = self._struct_bitfield_names.get(tag, frozenset())
-            if inner.member_name in bitfield_fields:
-                message = "assignment-as-expression to bitfield fields is not supported"
-                raise CompileError(message, line=line)
         rhs_value = self._build_expr(expr=original_rhs, out=out, strings=strings)
         temp = self._tmp()
         out.append(Copy(destination=temp, source=rhs_value))

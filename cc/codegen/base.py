@@ -579,7 +579,7 @@ class CodeGeneratorBase:
 
         Per C usual arithmetic conversions, an unsigned operand on either
         side causes the whole comparison to be unsigned.  Detection is a
-        leaf-aware walk over ``Var`` / ``Index`` / ``MemberAccess`` /
+        leaf-aware walk over ``Var`` / ``Index`` / ``PlaceLoad`` /
         ``BinaryOperation`` / ``AddressOf``; ``Int`` literals stay
         unsigned-neutral (they pick up the other operand's signedness).
         Conservative for shapes we don't recognise — falls back to
