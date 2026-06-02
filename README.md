@@ -139,6 +139,7 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   Plan 1: [2026-06-01-cc-place-refactor-plan.md](./2026-06-01-cc-place-refactor-plan.md).
   Plan 2: [2026-06-01-cc-place-refactor-plan2.md](./2026-06-01-cc-place-refactor-plan2.md).
   Plan 3: [2026-06-02-cc-place-refactor-plan3.md](./2026-06-02-cc-place-refactor-plan3.md).
+  Plan 4: [2026-06-02-cc-place-refactor-plan4.md](./2026-06-02-cc-place-refactor-plan4.md).
   Staged — Plan 1 = `Place` infra + the `IndexMember*` family as a
   byte-exact proof-of-concept, with the IR-touching `Index` fold
   sequenced last behind a decision spike.  Status: Plan 1 shipped (PR
