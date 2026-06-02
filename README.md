@@ -141,6 +141,7 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   Plan 3: [2026-06-02-cc-place-refactor-plan3.md](./2026-06-02-cc-place-refactor-plan3.md).
   Plan 4: [2026-06-02-cc-place-refactor-plan4.md](./2026-06-02-cc-place-refactor-plan4.md).
   Decision spike → IR design: [2026-06-02-cc-place-refactor-decision-spike.md](./2026-06-02-cc-place-refactor-decision-spike.md) — chose option (b): grow the IR, retire the Block escape hatch entirely; byte-EFFICIENCY gate. Staged program (Stages 1-4) supersedes the single Plan 5.
+  Plan 5 / Stage 1: [2026-06-02-cc-place-refactor-plan5-stage1.md](./2026-06-02-cc-place-refactor-plan5-stage1.md) — foundation: per-function byte-size differential gate + carve `PlaceLoad`/`PlaceStore`/`PlaceCall` off `Block` into a new `ir.Access` op, treated identically-conservatively at every `ir.Block` site. Byte-identical by design.
   Staged — Plan 1 = `Place` infra + the `IndexMember*` family as a
   byte-exact proof-of-concept, with the IR-touching `Index` fold
   sequenced last behind a decision spike.  Status: Plan 1 shipped (PR
