@@ -4064,11 +4064,12 @@ class EmissionMixin:
             self.generate_expression(statement.expr)
             self._emit_load_var(target, register=self.target.si_register)
             if pointee_type in self.BYTE_TYPES:
-                self.emit(f"        mov [{self.target.si_register}], {self.target.low_byte(self.target.acc)}")
+                width = 1
             elif pointee_type == "unsigned short" and self.target.int_size > 2:
-                self.emit(f"        mov word [{self.target.si_register}], {self.target.low_word(self.target.acc)}")
+                width = 2
             else:
-                self.emit(f"        mov [{self.target.si_register}], {self.target.acc}")
+                width = self.target.int_size
+            self._emit_store_accumulator_at_width(destination=f"[{self.target.si_register}]", width=width)
             if statement.is_postfix:
                 self._emit_pointer_bump(delta=statement.delta, line=statement.line, name=target)
             self.ax_clear()

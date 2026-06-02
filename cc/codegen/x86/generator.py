@@ -1381,24 +1381,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         fast_path_target = pointer.expression if isinstance(pointer, Cast) else pointer
         if isinstance(fast_path_target, AddressOf) and fast_path_target.var.name in self.locals:
             destination = f"[{self._local_address(fast_path_target.var.name)}]"
-            if width == 1:
-                self.emit(f"        mov {destination}, {self.target.low_byte(accumulator)}")
-            elif width == 2 and self.target.int_size > 2:
-                self.emit(f"        mov word {destination}, {self.target.low_word(accumulator)}")
-            else:
-                self.emit(f"        mov {destination}, {accumulator}")
+            self._emit_store_accumulator_at_width(destination=destination, width=width)
             return
         scratch = self.target.si_register
         self.emit(f"        push {accumulator}")
         self.generate_expression(pointer)
         self.emit(f"        mov {scratch}, {accumulator}")
         self.emit(f"        pop {accumulator}")
-        if width == 1:
-            self.emit(f"        mov [{scratch}], {self.target.low_byte(accumulator)}")
-        elif width == 2 and self.target.int_size > 2:
-            self.emit(f"        mov word [{scratch}], {self.target.low_word(accumulator)}")
-        else:
-            self.emit(f"        mov [{scratch}], {accumulator}")
+        self._emit_store_accumulator_at_width(destination=f"[{scratch}]", width=width)
 
     def _emit_double_index_place_load(self, place: SubscriptPlace, /) -> None:
         """Load ``name[outer][inner]`` (a ``SubscriptPlace`` over a deref of an ``Index``).
@@ -2629,6 +2619,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             message = f"register-arg target {target} given unexpected complex node {arg!r}"
             raise CompileError(message, line=getattr(arg, "line", None))
+
+    def _emit_store_accumulator_at_width(self, *, destination: str, width: int) -> None:
+        """Store the accumulator into *destination* at *width* (byte / word / full).
+
+        *destination* is a bracket-enclosed memory operand (``[ebp-4]`` /
+        ``[esi]`` / …).  Byte width stores the low-byte accumulator alias;
+        2-byte width on a 32-bit target stores the low-word alias with an
+        explicit ``word`` size prefix; every other width stores the full
+        accumulator.  Shared by the standalone-``DereferencePlace`` store
+        (cast fast path and general path) and the ``*p++ =`` increment
+        store, which all wrote this same byte/word/full triple inline.
+        """
+        accumulator = self.target.acc
+        if width == 1:
+            self.emit(f"        mov {destination}, {self.target.low_byte(accumulator)}")
+        elif width == 2 and self.target.int_size > 2:
+            self.emit(f"        mov word {destination}, {self.target.low_word(accumulator)}")
+        else:
+            self.emit(f"        mov {destination}, {accumulator}")
 
     def _emit_struct_element_offset(self, index: Node, struct_size: int, /) -> None:
         """Emit code that leaves ``index * struct_size`` in BX (uses AX as scratch)."""
