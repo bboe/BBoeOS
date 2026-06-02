@@ -80,6 +80,12 @@ u32 vfs_found_size __attribute__((asm_name("vfs_found_size")));
 u16 vfs_found_dir_sec __attribute__((asm_name("vfs_found_dir_sec")));
 u16 vfs_found_dir_off __attribute__((asm_name("vfs_found_dir_off")));
 
+// Kernel-side scratch for fd_normalize_path — a getname-lite copy of the
+// user path so the trailing-slash trim doesn't mutate the caller's own
+// (writable, unprotected) string literal.  One fs op runs at a time, so
+// a single shared buffer is safe.
+u8 path_buffer[MAX_PATH];
+
 // fd_ops dispatch table — one entry per FD_TYPE_*.  Each entry is a
 // (read_fn, write_fn) pair; a 0 slot means "unsupported".  Indexed
 // by fd entry's type byte.  The function-pointer fields are 4 bytes
@@ -466,6 +472,28 @@ fd_lookup(int fd_num __attribute__((in_register("bx"))),
     return 1;
 }
 
+// fd_normalize_path: copy a (already access_ok_string-validated) user
+// path into path_buffer and drop trailing '/' characters, returning the
+// kernel copy.  Linux's path walker treats "src/" as the directory
+// "src"; our bbfs/ext2 resolvers instead split at the slash and search
+// the subdirectory for an empty basename, so "src/" fails to open.
+// Trimming in a kernel copy — rather than in place — keeps us from
+// rewriting the caller's writable string literal.  A bare "/" is left
+// intact.  Stops at the NUL within MAX_PATH bytes; the validation at the
+// syscall edge guarantees one exists.
+u8 *fd_normalize_path(u8 *path) {
+    int length = 0;
+    while (length < MAX_PATH - 1 && path[length] != '\0') {
+        path_buffer[length] = path[length];
+        length = length + 1;
+    }
+    while (length > 1 && path_buffer[length - 1] == '/') {
+        length = length - 1;
+    }
+    path_buffer[length] = '\0';
+    return path_buffer;
+}
+
 // fd_open: open the file at `name` with the given `flags`, returning
 // AX = fd or -1 (CF set on error).  /dev/vga is a synthetic device
 // that bypasses the filesystem and just allocates an FD_TYPE_VGA
@@ -557,12 +585,15 @@ fd_open(int *result __attribute__((out_register("ax"))),
         *result = fd_num;
         return 1;
     }
-    if (!vfs_find(name)) {
+    // Normalize the path (trim a trailing '/') only after the synthetic
+    // /dev/* devices above, which match the user pointer verbatim.
+    u8 *resolved = fd_normalize_path(name);
+    if (!vfs_find(resolved)) {
         if ((flags & O_CREAT) == 0) {
             *result = -1;
             return 0;
         }
-        if (!vfs_create(name)) {
+        if (!vfs_create(resolved)) {
             *result = -1;
             return 0;
         }
