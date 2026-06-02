@@ -177,7 +177,8 @@ def test_hoist_scans_carry_branch_terminator_for_address_taken_locals() -> None:
     Regression: ``_names_defined_in_loop`` only walked
     ``block.instructions``, missing the AST inside
     :class:`cc.ir.CarryBranch` terminators.  A local declared in the
-    function and passed via :class:`cc.ast_nodes.AddressOf` to a
+    function and passed via ``&local``
+    (:class:`cc.ast_nodes.PlaceAddressOf`) to a
     carry-return callee inside the loop was therefore mis-classified
     as loop-external, and a subsequent ``BinaryOperation`` reading
     that local was hoisted ahead of the call.  Caught by
@@ -188,7 +189,10 @@ def test_hoist_scans_carry_branch_terminator_for_address_taken_locals() -> None:
     """
     call_ast = ast_nodes.Call(
         line=1,
-        args=[ast_nodes.AddressOf(line=1, var=ast_nodes.Var(line=1, name="byte_offset")), ast_nodes.Var(line=1, name="pointer")],
+        args=[
+            ast_nodes.PlaceAddressOf(line=1, place=ast_nodes.VariablePlace(line=1, name="byte_offset")),
+            ast_nodes.Var(line=1, name="pointer"),
+        ],
         name="vfs_read_sec",
     )
     body = [
@@ -380,30 +384,33 @@ def test_hoist_treats_excluded_global_as_loop_defined_across_a_call() -> None:
 
 
 def test_hoist_treats_increment_decrement_target_as_loop_defined() -> None:
-    """A name written by ``ir.Block(IncrementDecrement)`` inside the loop is NOT mistakenly treated as invariant.
+    """A name written by ``ir.Block(PlaceIncrementDecrement)`` inside the loop is NOT mistakenly treated as invariant.
 
-    The AST node's writing-field is ``target_name``, not ``name`` — the
-    invariance-defs scan must reach it via the conservative
-    every-string walk, not a literal "name"-only match.  Without this,
+    The mutated name lives on the ``PlaceIncrementDecrement`` place's ``name`` field,
+    not an ``Assign.name`` — the invariance-defs scan must reach it via
+    the conservative every-name walk, not a literal "name"-only match.
+    Without this,
     the qsort do-while ``do { i++; } while (cmp(a + i*size, …) < 0);``
     has ``i * size`` and ``a + i * size`` wrongly classified as
     invariant and hoisted past the i++ that defines i for each
     iteration.
     """
-    incdec = ast_nodes.IncrementDecrement(delta=1, is_postfix=True, line=1, target_name="i")
+    increment_decrement = ast_nodes.PlaceIncrementDecrement(
+        delta=1, is_postfix=True, line=1, place=ast_nodes.VariablePlace(line=1, name="i")
+    )
     body = [
         ir.Copy(destination="a", source=0),
         ir.Copy(destination="size", source=4),
         ir.Copy(destination="i", source=0),
         ir.Jump(target=".loop"),
         ir.Label(name=".loop"),
-        ir.Block(node=incdec),
+        ir.Block(node=increment_decrement),
         ir.BinaryOperation(destination="_ir_t", left="i", right="size", operation="*"),
         ir.BranchFalse(left="_ir_t", operation="==", right=0, target=".loop"),
         ir.Return(value=None),
     ]
     result = loops.hoist_loop_invariants(body)
-    # The BinaryOp stays in the loop body — after the Block(IncrementDecrement)
+    # The BinaryOp stays in the loop body — after the Block(PlaceIncrementDecrement)
     # and before the loop-back branch.  No preheader created (because nothing
     # was hoistable), so the function should be returned unchanged.
     assert result is body
@@ -1008,7 +1015,7 @@ def test_recognize_fill_loop_rejects_index_not_iv() -> None:
 
 
 def test_recognize_fill_loop_rejects_iv_address_taken_after_loop() -> None:
-    """Item A/E: an ``AddressOf`` of the IV after the loop counts as a use of it."""
+    """Item A/E: a ``&IV`` (PlaceAddressOf) after the loop counts as a use of it."""
     body = [
         ir.Copy(destination="i", source=0),
         ir.Label(name="floop0"),
@@ -1018,14 +1025,18 @@ def test_recognize_fill_loop_rejects_iv_address_taken_after_loop() -> None:
         ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
         ir.Jump(target="floop0"),
         ir.Label(name="fend0"),
-        ir.Call(args=(ast_nodes.AddressOf(line=1, var=ast_nodes.Var(line=1, name="i")),), destination=None, name="use"),
+        ir.Call(
+            args=(ast_nodes.PlaceAddressOf(line=1, place=ast_nodes.VariablePlace(line=1, name="i")),),
+            destination=None,
+            name="use",
+        ),
         ir.Return(value=None),
     ]
     assert loops.recognize_string_loops(body) is body
 
 
 def test_recognize_fill_loop_rejects_iv_address_taken_inside_idiomatic_body() -> None:
-    """Item E: an ``AddressOf`` of the IV inside an *idiomatic* fill body blocks the rewrite.
+    """Item E: a ``&IV`` (PlaceAddressOf) of the IV inside an *idiomatic* fill body blocks the rewrite.
 
     Non-vacuous coverage of ``_iv_address_taken_in_loop``: the body is a
     bare single-instruction fill ``buf[i] = &i;`` — exactly the shape the
@@ -1034,7 +1045,7 @@ def test_recognize_fill_loop_rejects_iv_address_taken_inside_idiomatic_body() ->
     is satisfied (unit stride, zero-dominating init, IV dead outside the
     loop, 1-byte element), so the address-taken guard is the *only* thing
     preventing the rewrite.  ``IndexAssign.source`` is a ``Value`` and
-    ``Value = int | str | ast_nodes.AddressOf``, so ``&IV`` genuinely
+    ``Value = int | str | ast_nodes.PlaceAddressOf``, so ``&IV`` genuinely
     reaches an idiomatic 1-instruction body — the guard is live code, not
     dead.  Taking ``&i`` forces the counter into a memory slot the
     scalar-IV-eliminating rewrite would leave stale, so rejecting is
@@ -1044,7 +1055,7 @@ def test_recognize_fill_loop_rejects_iv_address_taken_inside_idiomatic_body() ->
         ir.Copy(destination="i", source=0),
         ir.Label(name="floop0"),
         ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
-        ir.IndexAssign(base="buf", index="i", source=ast_nodes.AddressOf(line=1, var=ast_nodes.Var(line=1, name="i"))),
+        ir.IndexAssign(base="buf", index="i", source=ast_nodes.PlaceAddressOf(line=1, place=ast_nodes.VariablePlace(line=1, name="i"))),
         ir.Label(name="fstep0"),
         ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
         ir.Jump(target="floop0"),

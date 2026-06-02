@@ -28,7 +28,6 @@ from dataclasses import dataclass, field
 from itertools import combinations
 
 from cc.ast_nodes import (
-    AddressOf,
     ArrayDecl,
     ArrayInit,
     Assign,
@@ -52,6 +51,7 @@ from cc.ast_nodes import (
     LogicalOr,
     Node,
     Param,
+    PlaceAddressOf,
     PlaceLoad,
     PlaceStore,
     Return,
@@ -64,6 +64,7 @@ from cc.ast_nodes import (
     TailCall,
     Var,
     VarDecl,
+    VariablePlace,
     While,
 )
 
@@ -135,13 +136,6 @@ class LivenessAnalyzer:
         """
         if expression is None:
             return
-        if isinstance(expression, AddressOf):
-            # ``&x`` references x's address — record the use; the
-            # allocator separately disqualifies address-taken locals
-            # from register pinning.
-            if isinstance(expression.var, Var):
-                accumulator.add(expression.var.name)
-            return
         if isinstance(expression, BinaryOperation):
             self._add_expression_uses(expression.left, accumulator)
             self._add_expression_uses(expression.right, accumulator)
@@ -165,6 +159,19 @@ class LivenessAnalyzer:
         if isinstance(expression, (LogicalAnd, LogicalOr)):
             self._add_expression_uses(expression.left, accumulator)
             self._add_expression_uses(expression.right, accumulator)
+            return
+        if isinstance(expression, PlaceAddressOf):
+            # ``&place`` references the place's addressing Vars.  ``&x`` records
+            # x (so auto-pin's
+            # address-taken disqualification is unchanged); deref-rooted places
+            # record their pointer/index Vars.  Member-rooted places fall
+            # through to _add_place_uses' raise, leaving auto-pin off for them
+            # exactly as before this plan (legacy PlaceAddressOf over a member
+            # had no liveness handler).
+            if isinstance(expression.place, VariablePlace):
+                accumulator.add(expression.place.name)
+                return
+            self._add_place_uses(expression.place, accumulator)
             return
         if isinstance(expression, PlaceLoad):
             self._add_place_uses(expression.place, accumulator)

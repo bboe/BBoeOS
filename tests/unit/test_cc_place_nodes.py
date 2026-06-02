@@ -118,3 +118,41 @@ def test_subscript_over_dereference_models_double_index() -> None:
     )
     assert isinstance(place.base, ast_nodes.DereferencePlace)
     assert isinstance(place.base.pointer, ast_nodes.Index)
+
+
+def test_place_address_of_over_variable() -> None:
+    """&x is PlaceAddressOf(VariablePlace) once AddressOf folds into Place."""
+    node = ast_nodes.PlaceAddressOf(place=ast_nodes.VariablePlace(name="x"))
+    assert isinstance(node.place, ast_nodes.VariablePlace)
+    assert node.place.name == "x"
+
+
+def test_place_increment_decrement_over_variable() -> None:
+    """x++ is PlaceIncrementDecrement(VariablePlace) once IncrementDecrement folds into Place."""
+    node = ast_nodes.PlaceIncrementDecrement(delta=1, is_postfix=True, place=ast_nodes.VariablePlace(name="x"))
+    assert node.delta == 1
+    assert node.is_postfix is True
+    assert isinstance(node.place, ast_nodes.VariablePlace)
+
+
+def test_place_increment_decrement_over_subscript() -> None:
+    """a[i]++ is PlaceIncrementDecrement(SubscriptPlace(VariablePlace, index))."""
+    node = ast_nodes.PlaceIncrementDecrement(
+        delta=-1,
+        is_postfix=False,
+        place=ast_nodes.SubscriptPlace(base=ast_nodes.VariablePlace(name="a"), index=ast_nodes.Var(name="i")),
+    )
+    assert isinstance(node.place, ast_nodes.SubscriptPlace)
+    assert isinstance(node.place.base, ast_nodes.VariablePlace)
+
+
+def test_place_call_over_subscript_and_dereference() -> None:
+    """arr[i](args) and (*fp)(args) are PlaceCall over a SubscriptPlace / DereferencePlace."""
+    indexed = ast_nodes.PlaceCall(
+        args=[ast_nodes.Int(value=3)],
+        place=ast_nodes.SubscriptPlace(base=ast_nodes.VariablePlace(name="fns"), index=ast_nodes.Var(name="i")),
+    )
+    assert isinstance(indexed.place, ast_nodes.SubscriptPlace)
+    assert indexed.args == [ast_nodes.Int(value=3)]
+    through_pointer = ast_nodes.PlaceCall(args=[], place=ast_nodes.DereferencePlace(pointer=ast_nodes.Var(name="fp")))
+    assert isinstance(through_pointer.place, ast_nodes.DereferencePlace)

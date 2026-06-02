@@ -24,7 +24,7 @@ from cc import ast_nodes
 from cc.errors import CompileError
 from cc.tokens import COMPARISON_OPERATIONS, INVERT_COMPARISON
 
-Value = int | str | ast_nodes.AddressOf
+Value = int | str | ast_nodes.PlaceAddressOf
 
 
 class _NoValueFields:
@@ -525,9 +525,11 @@ class Builder:
                     Label(name=end_lbl),
                 ])
                 return temp
-            case ast_nodes.AddressOf():
-                # Pass through as-is so generate_call can detect out_register
-                # arguments (&var) without the node being replaced by a temp.
+            case ast_nodes.PlaceAddressOf(place=ast_nodes.VariablePlace()):
+                # Pass ``&name`` through as-is so generate_call can detect
+                # out_register arguments without the node being replaced by a
+                # temp.  Member / dereference ``PlaceAddressOf`` shapes fall to
+                # the default temp+Block, exactly as they did before the fold.
                 return expr
             case ast_nodes.AssignExpr(inner=inner):
                 return self._lower_assign_expr(inner=inner, out=out, strings=strings)
@@ -719,8 +721,6 @@ class Builder:
                 else:
                     v = self._build_expr(expr=value, out=out, strings=strings) if value is not None else None
                     out.append(Return(value=v))
-            case ast_nodes.IndexedCall():
-                out.append(Block(node=stmt))
             case ast_nodes.InlineAsm(content=content):
                 out.append(InlineAsm(content=content))
             case ast_nodes.Switch(cases=cases, discriminant=discriminant):

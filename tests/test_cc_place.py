@@ -30,6 +30,20 @@ the purity traps of a deref read and a double-index read used in an if
 condition; (*p = v), (*p++ = v) and (*(T *)e = v) assignment-as-expression
 values; and sizeof(*p) / sizeof(*(unsigned short *)e).
 
+The fixture is further extended to capture the legacy output of the three
+operation nodes Plan 4 folds onto the recursive Place abstraction: AddressOf
+(&x), IncrementDecrement (x++/++x/x--/--x) and IndexedCall (arr[i](args)).
+These Plan 4 probes cover: &x address-of a global scalar and a local scalar,
+plus &x inside sizeof; ++/-- in all four positions (postfix/prefix x++/--x)
+used as expressions whose value is consumed for both a local and a global int,
+and as value-discarding statements for a local and a global int; and indexed
+function-pointer calls through a global array and a local array, with both a
+constant and a variable index, exercised as a statement and as an expression
+whose result is used.  The legacy parser rejects a function-pointer-array
+*parameter* (int (*t[4])(int) as a formal parameter raises "expected RPAREN,
+got LBRACKET"), so the local-array probes declare a local int (*t[4])(int) and
+assign its elements from a file-scope source array before calling through it.
+
 Asserts the cc.py-emitted assembly is identical to a checked-in golden file.
 Regenerate the golden deliberately with BBOE_UPDATE_GOLDEN=1 only when output
 is intended to change.
@@ -111,7 +125,7 @@ int probe_bitfield_read(struct flags *f) { return f->b; }
 int probe_bitfield_store(struct flags *f, int v) { f->b = v; return 0; }
 int probe_bitfield_one_literal(struct flags *f) { f->a = 1; return 0; }
 int probe_bitfield_constfold(void) { struct flags local; local.a = 0; local.b = 5; return local.b; }
-int probe_member_incdec(struct buf *b) { int pre = b->n++; return pre + b->n; }
+int probe_member_increment_decrement(struct buf *b) { int pre = b->n++; return pre + b->n; }
 int probe_member_predec(struct buf *b) { return --b->n; }
 int probe_addr_of_dot(void) { return (int)&g_outer.in; }
 
@@ -157,6 +171,50 @@ int probe_deref_incassign_expr(char *out, int v) { int y = (*out++ = v); return 
 int probe_cast_deref_assign_expr(char *base, int off, int v) { int y = (*(unsigned char *)(base + off) = v); return y; }
 int probe_sizeof_deref(int *p) { return sizeof(*p); }
 int probe_sizeof_cast_deref_expr(char *base, int off) { return sizeof(*(unsigned short *)(base + off)); }
+
+/* --- Plan 4 fold probes (captured from the legacy compiler) --- */
+int g_counter;
+int (*g_fptable[4])(int);
+int (*g_fptable_src[4])(int);
+
+int probe_addr_of_global(void) { return (int)&g_counter; }
+int probe_addr_of_local(void) { int local; local = 0; return (int)&local; }
+int probe_sizeof_addr(int n) { return sizeof(&n); }
+
+int probe_postinc_expr(int n) { int a = n++; return a + n; }
+int probe_preinc_expr(int n) { int a = ++n; return a + n; }
+int probe_postdec_expr(int n) { int a = n--; return a + n; }
+int probe_predec_expr(int n) { int a = --n; return a + n; }
+int probe_postinc_expr_global(void) { int a = g_counter++; return a + g_counter; }
+int probe_preinc_expr_global(void) { int a = ++g_counter; return a + g_counter; }
+void probe_postinc_stmt(void) { g_counter++; }
+void probe_predec_stmt(void) { --g_counter; }
+void probe_postinc_stmt_local(int n) { n++; }
+void probe_predec_stmt_local(int n) { --n; }
+
+int probe_indexed_call_global_const(int x) { return g_fptable[1](x); }
+int probe_indexed_call_global_var(int i, int x) { return g_fptable[i](x); }
+int probe_indexed_call_global_const_exprval(int x) { int r = g_fptable[1](x); return r; }
+int probe_indexed_call_global_var_exprval(int i, int x) { int r = g_fptable[i](x); return r; }
+void probe_indexed_call_global_stmt(int x) { g_fptable[0](x); }
+int probe_indexed_call_local_const(int x) { int (*t[4])(int); t[2] = g_fptable_src[2]; return t[2](x); }
+int probe_indexed_call_local_var(int i, int x) { int (*t[4])(int); t[i] = g_fptable_src[i]; return t[i](x); }
+void probe_indexed_call_local_stmt(int x) { int (*t[4])(int); t[0] = g_fptable_src[0]; t[0](x); }
+
+/* --- Plan 4 new-shape probes (no legacy oracle; eyeballed + runtime-verified) --- */
+int g_arr[8];
+int *g_rows[4];
+
+int probe_addr_deref(int *p) { return (int)&*p; }
+int probe_named_array_postinc(int i) { g_arr[i] = 5; int pre = g_arr[i]++; return pre + g_arr[i]; }
+int probe_named_array_predec(int i) { g_arr[i] = 5; return --g_arr[i]; }
+void probe_named_array_postinc_stmt(int i) { g_arr[i]++; }
+int probe_double_index_postinc(int i, int j) { return g_rows[i][j]++; }
+void probe_double_index_postinc_stmt(int i, int j) { g_rows[i][j]++; }
+int probe_double_index_preinc(int i, int j) { return ++g_rows[i][j]; }
+void probe_named_array_predec_stmt(int i) { --g_arr[i]; }
+void probe_double_index_preinc_stmt(int i, int j) { ++g_rows[i][j]; }
+int probe_call_through_ptr(int (*fp)(int), int x) { return (*fp)(x); }
 """
 
 

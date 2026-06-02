@@ -278,17 +278,23 @@ def _iter_ast_var_names(node: object, /) -> Iterator[str]:
     if isinstance(node, ast_nodes.Var):
         yield node.name
         return
+    if isinstance(node, ast_nodes.VariablePlace):
+        # A ``VariablePlace`` names a variable through its ``name`` string
+        # field (not a Var node), so the Var-only recursion below cannot
+        # see it.  After the Place fold, a for-loop's ``i++`` step is
+        # ``PlaceIncrementDecrement(VariablePlace(i))`` whose sole mention of ``i`` is
+        # this string — missing it under-counts ``i``'s uses and (in the
+        # mirrored SSA filter) versions ``i`` as loop-invariant.
+        yield node.name
+        return
     # Lvalue targets and member/deref bases the AST stores as a bare string
-    # rather than a Var node: ``target_name`` (IncrementDecrement /
-    # DerefIncrement{,Assign}) and ``object_name`` (the Member* family).
+    # rather than a Var node: ``target_name`` (DerefIncrement{,Assign}) and
+    # ``object_name`` (the Member* family).
     # The Var-only recursion below cannot see these, so a variable
     # referenced *only* through one of them is invisible to callers that
-    # must enumerate every name an opaque region touches.  The canonical
-    # failure is a for-loop's ``i++`` step, whose sole mention of ``i`` is
-    # ``target_name``: missing it under-counts ``i``'s uses and (in the
-    # mirrored SSA filter) versions ``i`` as loop-invariant.  Both field
-    # names appear only on variable-bearing nodes, so reading them by
-    # attribute is unambiguous.
+    # must enumerate every name an opaque region touches.  Both field names
+    # appear only on variable-bearing nodes, so reading them by attribute
+    # is unambiguous.
     for bare_name_field in ("target_name", "object_name"):
         bare_name = getattr(node, bare_name_field, None)
         if isinstance(bare_name, str):
@@ -580,7 +586,7 @@ class Optimizer:
 
         References come from three sources: IR-level ``Jump`` /
         ``BranchFalse`` / ``CarryBranch`` targets, AST ``Goto`` nodes
-        buried inside ``Block`` subtrees (where ``IndexedCall`` etc.
+        buried inside ``Block`` subtrees (where ``PlaceCall`` etc.
         lower to opaque AST handlers), and IR instructions nested
         inside ``ir.Switch`` case bodies (which the optimizer doesn't
         currently recurse into but whose targets still need to keep
@@ -867,7 +873,7 @@ class Optimizer:
         # Rep-string recognition runs on the canonical pre-SSA loop shape
         # (``BranchFalse(left=IV, ...)`` with the IV's ``i++`` increment
         # still in the body).  The SSA round-trip below cannot see through
-        # the ``Block(IncrementDecrement)`` that the IR builder emits for
+        # the ``Block(PlaceIncrementDecrement)`` that the IR builder emits for
         # ``i++``, so it copy-propagates the IV's entry value (0) into the
         # comparison / index and erases the recognizable shape — running
         # the matcher after SSA would never fire on real loops.  Lowering

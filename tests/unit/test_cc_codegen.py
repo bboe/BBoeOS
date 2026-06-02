@@ -3195,7 +3195,7 @@ def test_member_increment_decrement_compiles_all_four_shapes() -> None:
             return n + s->len--;
         }
         """)
-    # The statement bump() should emit one inc/dec per member-incdec.
+    # The statement bump() should emit one inc/dec per member increment/decrement.
     bump_body = asm.split("bump:", 1)[1].split("snapshot:", 1)[0]
     # Both ``+1`` and ``-1`` forms reach the in-place update.  Codegen
     # may pick ``inc`` / ``dec`` or ``add ..., 1`` / ``sub ..., 1`` per

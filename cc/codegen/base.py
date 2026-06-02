@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING, ClassVar
 
 from cc import ir
 from cc.ast_nodes import (
-    AddressOf,
     ArrayDecl,
     Assign,
     BinaryOperation,
@@ -37,17 +36,19 @@ from cc.ast_nodes import (
     DerefIncrement,
     EnumDecl,
     If,
-    IncrementDecrement,
     Index,
     Int,
     IntegerOperand,
     LogicalAnd,
     Node,
+    PlaceIncrementDecrement,
     Return,
     String,
     TailCall,
     Var,
     VarDecl,
+    VariablePlace,
+    address_of_variable_name,
 )
 from cc.errors import CompileError
 from cc.utils import ast_contains
@@ -393,10 +394,10 @@ class CodeGeneratorBase:
             right = self._constant_expression(init.right)
             if left is not None and right is not None:
                 return f"({left}{init.operation}{right})"
-        if isinstance(init, AddressOf) and isinstance(init.var, Var):
-            name = init.var.name
-            if name in self.global_scalars or name in self.global_arrays:
-                return self._local_address(name)
+        if (taken_name := address_of_variable_name(init)) is not None and (
+            taken_name in self.global_scalars or taken_name in self.global_arrays
+        ):
+            return self._local_address(taken_name)
         if isinstance(init, Cast) and isinstance(init.expression, Int):
             return str(init.expression.value)
         return None
@@ -579,7 +580,7 @@ class CodeGeneratorBase:
         Per C usual arithmetic conversions, an unsigned operand on either
         side causes the whole comparison to be unsigned.  Detection is a
         leaf-aware walk over ``Var`` / ``Index`` / ``PlaceLoad`` /
-        ``BinaryOperation`` / ``AddressOf``; ``Int`` literals stay
+        ``BinaryOperation`` / ``PlaceAddressOf``; ``Int`` literals stay
         unsigned-neutral (they pick up the other operand's signedness).
         Conservative for shapes we don't recognise — falls back to
         signed, matching the historical default.
@@ -594,7 +595,7 @@ class CodeGeneratorBase:
         matching the historical default.  Extend on demand as kernel C
         runs into new patterns that need unsigned semantics.
         """
-        if isinstance(node, AddressOf):
+        if address_of_variable_name(node) is not None:
             # ``&x`` produces a pointer; pointers compare as unsigned offsets.
             return True
         if isinstance(node, Var):
@@ -777,18 +778,18 @@ class CodeGeneratorBase:
 
         ``&x`` at an ``out_register`` call-site is a fake address — the
         callee writes the named register and the caller captures it
-        back — so those occurrences don't count.  Every other AddressOf
-        does count.
+        back — so those occurrences don't count.  Every other
+        address-of does count.
         """
         if isinstance(node, Call):
             out_regs = self.out_register_params.get(node.name, {})
             for index, arg in enumerate(node.args):
-                if index in out_regs and isinstance(arg, AddressOf) and arg.var.name == name:
+                if index in out_regs and address_of_variable_name(arg) == name:
                     continue
                 if self._name_is_address_taken(name=name, node=arg):
                     return True
             return False
-        if isinstance(node, AddressOf) and node.var.name == name:
+        if address_of_variable_name(node) == name:
             return True
         for child_field in fields(node):
             value = getattr(node, child_field.name)
@@ -805,12 +806,16 @@ class CodeGeneratorBase:
     def _name_is_reassigned(*, name: str, node: Node) -> bool:
         """Return True if *node* contains a write to a variable named *name*.
 
-        Writes are ``Assign(name=name, ...)`` or
-        ``IncrementDecrement(target_name=name)``.
+        Writes are ``Assign(name=name, ...)`` or a postfix/prefix
+        increment of the named variable, which is
+        ``PlaceIncrementDecrement(place=VariablePlace(name))``.
         """
         return ast_contains(
             node,
-            lambda n: (isinstance(n, Assign) and n.name == name) or (isinstance(n, IncrementDecrement) and n.target_name == name),
+            lambda n: (
+                (isinstance(n, Assign) and n.name == name)
+                or (isinstance(n, PlaceIncrementDecrement) and isinstance(n.place, VariablePlace) and n.place.name == name)
+            ),
         )
 
     def _nasm_symbol(self, name: str, /) -> str:
@@ -1021,10 +1026,10 @@ class CodeGeneratorBase:
 
         Compound operand kinds (Index, Var, BinaryOperation, …) are
         delegated to per-kind ``_classify_*_operand`` helpers; trivial
-        leaves (Char, Int, String, AddressOf) and AST nodes that carry
-        the :class:`IntegerOperand` mixin resolve inline.
+        leaves (Char, Int, String, PlaceAddressOf) and AST nodes that
+        carry the :class:`IntegerOperand` mixin resolve inline.
         """
-        if isinstance(node, AddressOf):
+        if address_of_variable_name(node) is not None:
             return "pointer"
         if isinstance(node, BinaryOperation):
             return self._classify_binop_operand(node)

@@ -18,7 +18,6 @@ from typing import ClassVar, NamedTuple
 
 from cc import ir
 from cc.ast_nodes import (
-    AddressOf,
     ArrayDecl,
     Assign,
     BinaryOperation,
@@ -44,7 +43,9 @@ from cc.ast_nodes import (
     Node,
     Param,
     Place,
-    PlaceIncDec,
+    PlaceAddressOf,
+    PlaceCall,
+    PlaceIncrementDecrement,
     PlaceLoad,
     PlaceStore,
     SizeofExpr,
@@ -59,6 +60,7 @@ from cc.ast_nodes import (
     VarDecl,
     VariablePlace,
     While,
+    address_of_variable_name,
 )
 from cc.codegen.base import CodeGeneratorBase
 from cc.codegen.liveness import LivenessAnalysisError, LivenessAnalyzer
@@ -670,7 +672,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """Return every pinned register that *node*'s expression reads.
 
         Like :meth:`_arg_pinned_sources` but walks the full AST shape —
-        ``UnaryOperation``, ``AddressOf``, ``Index``, etc. — so it can
+        ``UnaryOperation``, ``PlaceAddressOf``, ``Index``, etc. — so it can
         be used to schedule syscall-builtin argument loads where the
         arg AST is not restricted to the simple-call shape.  Returns
         a set of register names (e.g. ``{"ebx", "edi"}``).
@@ -1299,7 +1301,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
     def _emit_dereference_place_load(self, place: DereferencePlace, /) -> None:
         """Load the value at a standalone ``DereferencePlace`` into the accumulator.
 
-        The ``AddressOf(Var)``-of-local fast path folds ``*(T *)&local``
+        The ``&local`` (``PlaceAddressOf(VariablePlace)``)-of-local fast path folds ``*(T *)&local``
         to a direct frame load (no ``lea`` / scratch register); the general
         path evaluates the pointer expression into the accumulator and loads
         through it.  The byte width uses the compact, target-aware
@@ -1308,16 +1310,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         ``_emit_pointer_dereference`` emitted.  Width comes from
         :meth:`_dereference_place_width`.  A
         ``Cast`` wrapping the pointer is transparent: the fast-path test
-        peers through it (the legacy parser keyed on the cast's inner
-        ``AddressOf``), and ``generate_expression`` on the cast emits the
+        peers through it (the fast-path test keys on the cast's inner
+        ``&local``), and ``generate_expression`` on the cast emits the
         identical bytes as evaluating the cast's inner (Cast codegen is
         identity).
         """
         pointer = place.pointer
         width = self._dereference_place_width(place)
         fast_path_target = pointer.expression if isinstance(pointer, Cast) else pointer
-        if isinstance(fast_path_target, AddressOf) and fast_path_target.var.name in self.locals:
-            address = f"[{self._local_address(fast_path_target.var.name)}]"
+        fast_path_name = address_of_variable_name(fast_path_target)
+        if fast_path_name is not None and fast_path_name in self.locals:
+            address = f"[{self._local_address(fast_path_name)}]"
             if width == 1:
                 self.emit_byte_load_zx(address)
             elif width == 2 and self.target.int_size > 2:
@@ -1345,7 +1348,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
           bare :class:`Var`): the ``out_register`` register-alias write and
           the ``_emit_load_var`` / ESI store at pointee width.
         - ``*(T *)e = v`` (cast or arbitrary address expression): the
-          ``AddressOf(Var)``-of-local fast store and the general
+          ``&local`` (``PlaceAddressOf(VariablePlace)``)-of-local fast store and the general
           push / ESI-scratch / pop sequence.
         """
         pointer = place.pointer
@@ -1379,8 +1382,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.generate_expression(value)
         accumulator = self.target.acc
         fast_path_target = pointer.expression if isinstance(pointer, Cast) else pointer
-        if isinstance(fast_path_target, AddressOf) and fast_path_target.var.name in self.locals:
-            destination = f"[{self._local_address(fast_path_target.var.name)}]"
+        fast_path_name = address_of_variable_name(fast_path_target)
+        if fast_path_name is not None and fast_path_name in self.locals:
+            destination = f"[{self._local_address(fast_path_name)}]"
             self._emit_store_accumulator_at_width(destination=destination, width=width)
             return
         scratch = self.target.si_register
@@ -1449,6 +1453,50 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.emit_byte_load_zx(f"[{si}]")
             else:
                 self.emit(f"        mov {self.target.acc}, [{si}]")
+        self.ax_clear()
+
+    def _emit_double_index_place_store(self, place: SubscriptPlace, value: Node, /) -> None:
+        """Store *value* into ``name[outer][inner]`` (a deref of an ``Index``).
+
+        Store companion to :meth:`_emit_double_index_place_load`: stage 1
+        loads ``name[outer]`` (the element pointer) into the accumulator via
+        the ordinary ``Index`` path, stage 2 adds the scaled inner index to
+        reach the element address in ESI, then the value (evaluated first and
+        stashed on the stack so the address computation is free to clobber the
+        accumulator) is written at the pointee width.  The inner stride is the
+        pointee size of the element's pointer type, matching the load helper.
+        """
+        outer_index_node = place.base.pointer
+        vname = outer_index_node.array.name
+        self._check_defined(vname, line=place.line)
+        element_type = self.variable_types.get(vname, "")
+        if element_type.endswith("*"):
+            pointee = element_type[:-1].rstrip()
+            try:
+                inner_size = self.target.type_size(pointee)
+            except KeyError:
+                inner_size = self.target.int_size
+        else:
+            inner_size = self.target.int_size
+        si = self.target.si_register
+        accumulator = self.target.acc
+        self.generate_expression(value)  # acc = value
+        self.emit(f"        push {accumulator}")
+        outer_load = Index(array=outer_index_node.array, index=outer_index_node.index, line=place.line)
+        self.generate_expression(outer_load)  # acc = name[outer] (element pointer)
+        self.emit(f"        mov {si}, {accumulator}")
+        inner = place.index
+        if isinstance(inner, Int):
+            offset = inner.value * (1 if inner_size == 1 else inner_size)
+            if offset:
+                self.emit(f"        add {si}, {offset}")
+        else:
+            self.generate_expression(inner)  # acc = inner index
+            if inner_size != 1:
+                self._emit_scale_index(accumulator, scale=inner_size)
+            self.emit(f"        add {si}, {accumulator}")
+        self.emit(f"        pop {accumulator}")  # acc = value
+        self._emit_store_accumulator_at_width(destination=f"[{si}]", width=inner_size)
         self.ax_clear()
 
     def _emit_field_load(self, *, addr: str, field_size: int) -> None:
@@ -2302,10 +2350,33 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
     def _emit_place_address_of(self, place: Place, /) -> None:
         """Emit the address of *place* into the accumulator (``&place``).
 
-        Handles the scalar member forms (``&obj.field`` /
-        ``&ptr->field``) and the element-address form
-        (``&base.field[index]``).
+        Handles the named-variable form (``&x``), the pointee form
+        (``&*p`` / ``&*(T *)e`` == the pointer value), the scalar member
+        forms (``&obj.field`` / ``&ptr->field``) and the element-address
+        form (``&base.field[index]``).
         """
+        if isinstance(place, VariablePlace):
+            # ``&x`` — reproduces the legacy address-of codegen byte-for-byte:
+            # locals lea their frame address, globals/constants mov their
+            # label, and out_register parameters have no addressable storage.
+            name = place.name
+            if name in self.out_register_locals:
+                message = f"cannot take address of out_register parameter '{name}'"
+                raise CompileError(message, line=place.line)
+            address = self._local_address(name)
+            if name in self.locals:
+                self.emit(f"        lea {self.target.acc}, [{address}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, {address}")
+            self.ax_local = None
+            self.ax_is_byte = False
+            return
+        if isinstance(place, DereferencePlace):
+            # ``&*p`` / ``&*(T *)e`` collapses to the pointer value itself —
+            # evaluate the pointer expression into the accumulator.  No load
+            # through the pointer happens (that would be the rvalue ``*p``).
+            self.generate_expression(place.pointer)
+            return
         if self._is_member_index_place(place):
             self.ax_clear()
             self._emit_member_index_access(place, address_of=True)
@@ -2371,15 +2442,133 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         message = "unsupported Place shape in _emit_place_address_of"
         raise CompileError(message, line=place.line)
 
-    def _emit_place_increment_decrement(self, node: PlaceIncDec, /) -> None:
+    def _emit_place_call(self, node: PlaceCall, /, *, discard_return: bool = False) -> None:
+        """Generate a call through a function-pointer *place*.
+
+        Two place shapes:
+
+        - ``SubscriptPlace(VariablePlace(array), index)`` — ``array[index](args)``.
+          Reproduces the legacy generate_indexed_call byte-for-byte (global vs.
+          local array, constant vs. variable index, pusha/save path, cdecl arg
+          push order, discard_return cleanup).
+        - ``DereferencePlace(pointer)`` — ``(*fp)(args)``.  The callee is the
+          pointer value: save pinned registers, push args cdecl, evaluate the
+          pointer expression into the accumulator, ``call acc``, clean up.
+        """
+        place = node.place
+        if isinstance(place, SubscriptPlace) and isinstance(place.base, VariablePlace):
+            self.generate_indexed_call(
+                array_name=place.base.name,
+                arguments=node.args,
+                discard_return=discard_return,
+                index=place.index,
+                line=node.line,
+            )
+            return
+        if isinstance(place, DereferencePlace):
+            self._emit_place_call_through_pointer(node, discard_return=discard_return)
+            return
+        message = "unsupported Place shape in _emit_place_call"
+        raise CompileError(message, line=node.line)
+
+    def _emit_place_call_through_pointer(self, node: PlaceCall, /, *, discard_return: bool = False) -> None:
+        """Call through ``(*pointer_expression)(args)``.
+
+        The callee address is the pointer value.  Mirrors the indirect-call
+        register-save / cdecl-push sequence of generate_indexed_call but
+        evaluates an arbitrary pointer expression into the accumulator
+        instead of computing a base+index*stride element address.
+        """
+        assert isinstance(node.place, DereferencePlace)
+        self.si_local = None
+        clobbers: frozenset[str] = frozenset(self.target.register_pool)
+        saved = self._pinned_registers_to_save(clobbers)
+        use_pusha = discard_return and len(saved) >= 3
+        if use_pusha:
+            self.emit("        pusha")
+        else:
+            for register in saved:
+                self.emit(f"        push {register}")
+        for argument in reversed(node.args):
+            self._emit_push_arg(argument)
+        self.generate_expression(node.place.pointer)  # acc = callee address
+        self.emit(f"        call {self.target.acc}")
+        if node.args:
+            self.emit(f"        add {self.target.stack_register}, {len(node.args) * self.target.int_size}")
+        if use_pusha:
+            self.emit("        popa")
+        else:
+            for register in reversed(saved):
+                self.emit(f"        pop {register}")
+        self.ax_clear()
+
+    def _emit_place_increment_decrement(self, node: PlaceIncrementDecrement, /) -> None:
         """Emit a postfix/prefix ``++`` / ``--`` over a Place.
 
-        Synthesizes ``place = place ± delta`` through :meth:`_emit_place_store`,
-        reloads the updated value with a :class:`PlaceLoad`, and — for the
-        postfix form — recovers the pre-update value with one ``sub`` / ``add``.
+        Named variables and named-array elements reproduce the legacy
+        increment-decrement / IndexAssign lowering byte-for-byte; member and
+        dereference places synthesize ``place = place ± delta`` through
+        :meth:`_emit_place_store`, reload with a :class:`PlaceLoad`, and — for
+        the postfix form — recover the pre-update value with one ``sub`` /
+        ``add``.
         """
         place = node.place
         delta_value = abs(node.delta)
+        if isinstance(place, VariablePlace):
+            # ``x++`` / ``++x`` — byte-identical to the legacy
+            # increment-decrement expression codegen: lower ``x ± 1`` through
+            # emit_store_local, reload x into the accumulator, then recover the
+            # pre-update value for postfix.
+            target = place.name
+            self._check_defined(target, line=node.line)
+            update_expression = BinaryOperation(
+                left=Var(line=node.line, name=target),
+                line=node.line,
+                operation="+" if node.delta > 0 else "-",
+                right=Int(line=node.line, value=delta_value),
+            )
+            self.emit_store_local(expression=update_expression, name=target)
+            self.generate_expression(Var(line=node.line, name=target))
+            if node.is_postfix:
+                reverse = "sub" if node.delta > 0 else "add"
+                self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
+                self.ax_clear()
+            return
+        if isinstance(place, SubscriptPlace) and isinstance(place.base, VariablePlace):
+            # ``a[i]++`` / ``a[i]--`` on a NAMED array.  _resolve_place does
+            # not model SubscriptPlace(VariablePlace) (Plan 5), so lower the
+            # store through the existing IndexAssign codegen — exactly the way
+            # the named-variable arm lowers through emit_store_local — and
+            # reload the element with an Index read.  Postfix recovers the
+            # pre-update value with one sub/add.
+            #
+            # Index re-evaluation caveat: the index is evaluated up to three
+            # times (store address, store RHS Index, reload Index).  For the
+            # supported shapes (a Var, an Int, or pure arithmetic) this is
+            # benign and matches C; an index with side effects (a[i++]++) is
+            # unsupported / undefined and is not exercised.
+            array_name = place.base.name
+            self._check_defined(array_name, line=node.line)
+            update_expression = BinaryOperation(
+                left=Index(array=Var(line=node.line, name=array_name), index=place.index, line=node.line),
+                line=node.line,
+                operation="+" if node.delta > 0 else "-",
+                right=Int(line=node.line, value=delta_value),
+            )
+            self.generate_index_assign(
+                IndexAssign(
+                    array=Var(line=node.line, name=array_name),
+                    expr=update_expression,
+                    index=place.index,
+                    line=node.line,
+                )
+            )
+            self.generate_expression(Index(array=Var(line=node.line, name=array_name), index=place.index, line=node.line))
+            if node.is_postfix:
+                reverse = "sub" if node.delta > 0 else "add"
+                self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
+                self.ax_clear()
+            return
         update_expression = BinaryOperation(
             left=PlaceLoad(line=node.line, place=place),
             line=node.line,
@@ -2448,6 +2637,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return
         if isinstance(place, MemberPlace) and self._match_struct_array_member(place) is None:
             self._emit_member_scalar_store(place, value)
+            return
+        if (
+            isinstance(place, SubscriptPlace)
+            and isinstance(place.base, DereferencePlace)
+            and isinstance(place.base.pointer, Index)
+            and isinstance(place.base.pointer.array, Var)
+        ):
+            # ``name[outer][inner] = value`` (chained subscript over an array
+            # of pointers): store companion to the bespoke two-stage load.
+            self._emit_double_index_place_store(place, value)
             return
         if isinstance(place, DereferencePlace):
             self._emit_dereference_place_store(place, value)
@@ -2746,9 +2945,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         compile-time constant.  Walks the AST shape to produce a type
         string in the same form as :attr:`variable_types` entries.
         """
-        if isinstance(node, AddressOf):
-            variable_type = self._expression_type(node.var)
-            return f"{variable_type} *"
         if isinstance(node, BinaryOperation):
             return "int"
         if isinstance(node, Cast):
@@ -2767,6 +2963,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # (sizeof('a') == sizeof(int)), so both flow through here — there
             # is deliberately no separate Char branch.
             return "int"
+        if isinstance(node, PlaceAddressOf):
+            # ``&place`` — a pointer to the place's declared type.  Reproduces
+            # the legacy address-of ("<type> *") result so sizeof(&x) is
+            # unchanged (the space before ``*`` is part of the contract).
+            return f"{self._place_type(node.place)} *"
         if isinstance(node, PlaceLoad):
             # Rvalue read of any Place — resolve the place's declared type.
             # Preserves the struct-array sizeof behavior: sizeof(arr[i].field)
@@ -2847,8 +3048,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 stores.append(instruction.destination)
             out_regs = self.out_register_params.get(instruction.name, {})
             for index, arg in enumerate(instruction.args):
-                if index in out_regs and isinstance(arg, AddressOf):
-                    stores.append(arg.var.name)
+                taken_name = address_of_variable_name(arg)
+                if index in out_regs and taken_name is not None:
+                    stores.append(taken_name)
             return stores
         if isinstance(instruction, ir.CarryBranch):
             # ``carry_return`` callees can also have ``out_register``
@@ -2858,8 +3060,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             stores = []
             out_regs = self.out_register_params.get(call_ast.name, {})
             for index, arg in enumerate(call_ast.args):
-                if index in out_regs and isinstance(arg, AddressOf):
-                    stores.append(arg.var.name)
+                taken_name = address_of_variable_name(arg)
+                if index in out_regs and taken_name is not None:
+                    stores.append(taken_name)
             return stores
         if isinstance(instruction, ir.IndexAssign):
             # IndexAssign writes through a base pointer, not to the
@@ -3603,7 +3806,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
           register, *base_is_register* True.
         - :class:`DereferencePlace` of any other expression — the
           ``((struct T *)e)->field`` / chained ``a->b.c`` form.  The
-          ``Cast(AddressOf(local))`` fast path returns the local's frame
+          ``Cast(&local)`` fast path returns the local's frame
           operand without a register; the general path evaluates the pointer
           expression into BX (``mov bx, acc``) and returns it.
         - :class:`MemberPlace` — chained ``a.b.c`` dot on a struct-value
@@ -3648,12 +3851,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 raise CompileError(message, line=line)
             tag = base_type[7:-1].rstrip()
             info = self._lookup_struct_field(tag, member_name, line)
-            if (
-                isinstance(pointer_expression, Cast)
-                and isinstance(pointer_expression.expression, AddressOf)
-                and pointer_expression.expression.var.name in self.locals
-            ):
-                direct_address = self._local_address(pointer_expression.expression.var.name)
+            cast_address_name = address_of_variable_name(pointer_expression.expression) if isinstance(pointer_expression, Cast) else None
+            if cast_address_name is not None and cast_address_name in self.locals:
+                direct_address = self._local_address(cast_address_name)
                 return direct_address, False, info
             self.generate_expression(pointer_expression)
             self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
@@ -4061,26 +4261,27 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # address and stays eligible for auto-pin.  Count those
             # args as a Var read (so the ref count reflects the
             # captured write that follows the call) but skip the
-            # ``address_taken`` mark the generic AddressOf branch
+            # ``address_taken`` mark the generic address-of branch
             # below would record.  Real-address args (anything else)
             # fall through to that branch.
             out_regs = self.out_register_params.get(node.name, {})
             for index, arg in enumerate(node.args):
-                if index in out_regs and isinstance(arg, AddressOf):
-                    self._tally_auto_pin_counts(arg.var, state=state)
+                taken_name = address_of_variable_name(arg)
+                if index in out_regs and taken_name is not None:
+                    self._tally_auto_pin_counts(Var(line=arg.line, name=taken_name), state=state)
                 else:
                     self._tally_auto_pin_counts(arg, state=state)
             return
-        if isinstance(node, AddressOf):
-            # ``&x`` computes an address, not a value read — pre-refactor
-            # AddressOf carried ``name`` as a plain str so the inner var
-            # never tallied; preserve that by skipping the generic walk's
-            # descent into ``var``.  Track the name so the candidate
+        if (taken_name := address_of_variable_name(node)) is not None:
+            # ``&x`` computes an address, not a value read — the inner
+            # ``VariablePlace`` carries ``name`` as a plain str so it never
+            # tallies as a Var read; preserve that by skipping the generic
+            # walk's descent into the place.  Track the name so the candidate
             # filter below can disqualify it: an auto-pinned register
             # has no memory address, and keeping the slot in sync with
             # the register across writes through the pointer would
             # require spill+reload at every access.
-            state.address_taken.add(node.var.name)
+            state.address_taken.add(taken_name)
             return
         if isinstance(node, PlaceStore) and isinstance(node.place, DereferencePlace):
             # ``*p = v`` / ``*(T *)e = v`` on the Place tree.  The
@@ -4184,8 +4385,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # subsequent call counts as post-store for them.
             out_regs = self.out_register_params.get(node.name, {})
             for index, arg in enumerate(node.args):
-                if index in out_regs and isinstance(arg, AddressOf) and arg.var.name in candidate_names:
-                    written[arg.var.name] = True
+                taken_name = address_of_variable_name(arg)
+                if index in out_regs and taken_name is not None and taken_name in candidate_names:
+                    written[taken_name] = True
             return
         if isinstance(node, Assign):
             self._tally_pre_store_clobbers(

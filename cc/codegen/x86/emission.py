@@ -30,7 +30,6 @@ if TYPE_CHECKING:
 
 from cc import ir
 from cc.ast_nodes import (
-    AddressOf,
     ArrayDecl,
     Assign,
     AssignExpr,
@@ -51,10 +50,8 @@ from cc.ast_nodes import (
     Function,
     Goto,
     If,
-    IncrementDecrement,
     Index,
     IndexAssign,
-    IndexedCall,
     InlineAsm,
     Int,
     Label,
@@ -65,7 +62,8 @@ from cc.ast_nodes import (
     Param,
     Place,
     PlaceAddressOf,
-    PlaceIncDec,
+    PlaceCall,
+    PlaceIncrementDecrement,
     PlaceLoad,
     PlaceStore,
     Return,
@@ -83,6 +81,7 @@ from cc.ast_nodes import (
     VarDecl,
     VariablePlace,
     While,
+    address_of_variable_name,
 )
 from cc.codegen.x86.jumps import (
     CMOV_WHEN_FALSE,
@@ -1449,7 +1448,7 @@ class EmissionMixin:
         """Convert an :data:`ir.Value` to the equivalent simple AST leaf node."""
         if isinstance(value, int):
             return Int(value=value)
-        if isinstance(value, AddressOf):
+        if isinstance(value, PlaceAddressOf):
             return value
         if value.startswith("_ir_s"):
             content = self._ir_string_map.get(value)
@@ -1469,7 +1468,7 @@ class EmissionMixin:
         to decide whether eliding the then-branch (which by the textual
         macro semantics would otherwise be re-evaluated) is safe.
         """
-        if isinstance(node, (Int, SizeofExpr, SizeofType, SizeofVar, String, Var, AddressOf, PlaceAddressOf)):
+        if isinstance(node, (Int, SizeofExpr, SizeofType, SizeofVar, String, Var, PlaceAddressOf)):
             return True
         if isinstance(node, BinaryOperation):
             return self._is_pure_expression(node.left) and self._is_pure_expression(node.right)
@@ -2417,8 +2416,9 @@ class EmissionMixin:
             # loop; the pop loop then has nothing to restore for them.
             captured_pinned_registers: set[str] = set()
             for _, capture_arg in out_reg_captures:
-                if isinstance(capture_arg, AddressOf) and capture_arg.var.name in self.pinned_register:
-                    captured_pinned_registers.add(self.pinned_register[capture_arg.var.name])
+                capture_name = address_of_variable_name(capture_arg)
+                if capture_name is not None and capture_name in self.pinned_register:
+                    captured_pinned_registers.add(self.pinned_register[capture_name])
             clobbers: frozenset[str] = frozenset(self.target.register_pool)
             saved = [r for r in self._pinned_registers_to_save(clobbers) if r not in captured_pinned_registers]
             use_pusha = discard_return and len(saved) >= 3
@@ -2475,10 +2475,10 @@ class EmissionMixin:
             pending = []
             pinned_dest = {}
             for reg, arg in out_reg_captures:
-                if not isinstance(arg, AddressOf):
+                dest_name = address_of_variable_name(arg)
+                if dest_name is None:
                     message = "out_register argument must be an address-of expression (&var)"
                     raise CompileError(message, line=statement.line)
-                dest_name = arg.var.name
                 dest_reg = self.pinned_register.get(dest_name) if dest_name in self.pinned_register else None
                 pending.append((reg, arg, dest_reg))
                 if dest_reg is not None:
@@ -2497,7 +2497,7 @@ class EmissionMixin:
                     raise CompileError(message, line=statement.line)
                 ordered.append(pending.pop(progress))
             for reg, arg, _dest_reg in ordered:
-                dest_name = arg.var.name
+                dest_name = address_of_variable_name(arg)
                 widened = self.target.widen_gp(reg)
                 if dest_name in self.pinned_register:
                     dest_reg = self.pinned_register[dest_name]
@@ -2650,19 +2650,7 @@ class EmissionMixin:
         # Skip load if AX already holds this variable's value.
         if isinstance(expression, Var) and expression.name == self.ax_local:
             return
-        if isinstance(expression, AddressOf):
-            name = expression.var.name
-            if name in self.out_register_locals:
-                message = f"cannot take address of out_register parameter '{name}'"
-                raise CompileError(message, line=expression.line)
-            addr = self._local_address(name)
-            if name in self.locals:
-                self.emit(f"        lea {self.target.acc}, [{addr}]")
-            else:
-                self.emit(f"        mov {self.target.acc}, {addr}")
-            self.ax_local = None
-            self.ax_is_byte = False
-        elif isinstance(expression, AssignExpr):
+        if isinstance(expression, AssignExpr):
             self._generate_assign_expr(expression)
         elif isinstance(expression, BinaryOperation):
             self._generate_binary_operation_expression(expression)
@@ -2701,34 +2689,8 @@ class EmissionMixin:
                 self._emit_pointer_bump(delta=expression.delta, line=expression.line, name=target)
                 self.ax_clear()
                 self._emit_place_load(pointee_place)
-        elif isinstance(expression, IncrementDecrement):
-            # Lower ``var ± 1`` through the normal Assign store path so
-            # register-pinned locals, byte locals, frame-slot locals,
-            # and globals all share one codegen surface.  The store's
-            # fast paths (``inc reg``, ``add [mem], 1``) skip the
-            # accumulator entirely, so we reload ``var`` afterwards to
-            # guarantee acc holds the post-update value — what prefix
-            # ``++var`` evaluates to.  Postfix ``var++`` wants the
-            # pre-update value: ``sub acc, delta`` recovers it.
-            target = expression.target_name
-            self._check_defined(target, line=expression.line)
-            delta_value = abs(expression.delta)
-            update_expression = BinaryOperation(
-                left=Var(line=expression.line, name=target),
-                line=expression.line,
-                operation="+" if expression.delta > 0 else "-",
-                right=Int(line=expression.line, value=delta_value),
-            )
-            self.emit_store_local(expression=update_expression, name=target)
-            self.generate_expression(Var(line=expression.line, name=target))
-            if expression.is_postfix:
-                reverse = "sub" if expression.delta > 0 else "add"
-                self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
-                self.ax_clear()
         elif isinstance(expression, Index):
             self._generate_index_expression(expression)
-        elif isinstance(expression, IndexedCall):
-            self.generate_indexed_call(expression)
         elif isinstance(expression, Int):
             self.ax_clear()
             if expression.value == 0:
@@ -2739,7 +2701,9 @@ class EmissionMixin:
             self._generate_logical_value(expression)
         elif isinstance(expression, PlaceAddressOf):
             self._emit_place_address_of(expression.place)
-        elif isinstance(expression, PlaceIncDec):
+        elif isinstance(expression, PlaceCall):
+            self._emit_place_call(expression)
+        elif isinstance(expression, PlaceIncrementDecrement):
             self._emit_place_increment_decrement(expression)
         elif isinstance(expression, PlaceLoad):
             self._emit_place_load(expression.place)
@@ -3633,7 +3597,9 @@ class EmissionMixin:
                 self.emit(f"        mov [{si}], {store_acc}")
                 self._si_scratch_guard_end(guarded=guarded)
 
-    def generate_indexed_call(self, statement: IndexedCall, /, *, discard_return: bool = False) -> None:
+    def generate_indexed_call(
+        self, *, array_name: str, arguments: list[Node], index: Node, line: int, discard_return: bool = False
+    ) -> None:
         """Generate assembly for a call through a function-pointer array element.
 
         Mirrors the indirect-call path in :meth:`generate_call` (the
@@ -3656,9 +3622,8 @@ class EmissionMixin:
         interactions.  Args are pushed before the element-address
         computation to free up the accumulator for the address load.
         """
-        name = statement.array.name
-        self._check_defined(name, line=statement.line)
-        arguments = statement.args
+        name = array_name
+        self._check_defined(name, line=line)
         self.si_local = None
         clobbers: frozenset[str] = frozenset(self.target.register_pool)
         saved = self._pinned_registers_to_save(clobbers)
@@ -3675,7 +3640,7 @@ class EmissionMixin:
         # The acc register is free here — all args have been pushed already.
         acc = self.target.acc
         si = self.target.si_register
-        index_expression = statement.index
+        index_expression = index
         if name in self.global_arrays:
             global_base = self._global_label(name)
             if isinstance(index_expression, Int):
@@ -4086,19 +4051,8 @@ class EmissionMixin:
             self.emit(f"        jmp .user_{statement.name}")
         elif isinstance(statement, If):
             self.generate_if(statement)
-        elif isinstance(statement, IncrementDecrement):
-            # ``var++;`` / ``--var;`` etc. at statement scope — value
-            # discarded.  Share the expression-form codegen; the
-            # accumulator load it produces is unused, but
-            # ``ax_clear()`` invalidates the AX-tracking shortcut so a
-            # later read of ``var`` doesn't reuse a stale value.
-            self.generate_expression(statement)
-            self.ax_clear()
         elif isinstance(statement, IndexAssign):
             self.generate_index_assign(statement)
-        elif isinstance(statement, IndexedCall):
-            self.generate_indexed_call(statement, discard_return=True)
-            self.ax_clear()
         elif isinstance(statement, InlineAsm):
             # Empty / inline-asm statement (produced by ``(void)expr;``
             # discard sites and any future statement-level asm escape).
@@ -4116,7 +4070,11 @@ class EmissionMixin:
             self.ax_clear()
             self.si_local = None
             self.emit(f".user_{statement.name}:")
-        elif isinstance(statement, PlaceIncDec):
+        elif isinstance(statement, PlaceCall):
+            # ``place(args);`` at statement scope — return value discarded.
+            self._emit_place_call(statement, discard_return=True)
+            self.ax_clear()
+        elif isinstance(statement, PlaceIncrementDecrement):
             # ``place++;`` / ``--place;`` at statement scope — value
             # discarded; route through the expression-form codegen.
             self.generate_expression(statement)
