@@ -136,7 +136,9 @@ lands here as `<date>-<topic>-plan.md` alongside the spec.
   and a recursive `_resolve_place` address core, so chained accesses
   like `a[i][j].f[k]` compose for free.  Includes the IR-vs-direct-emission
   rationale (why `Index` is in the IR but member access isn't).
-  Plan: [2026-06-01-cc-place-refactor-plan.md](./2026-06-01-cc-place-refactor-plan.md).
+  Plan 1: [2026-06-01-cc-place-refactor-plan.md](./2026-06-01-cc-place-refactor-plan.md).
+  Plan 2: [2026-06-01-cc-place-refactor-plan2.md](./2026-06-01-cc-place-refactor-plan2.md).
   Staged — Plan 1 = `Place` infra + the `IndexMember*` family as a
   byte-exact proof-of-concept, with the IR-touching `Index` fold
-  sequenced last behind a decision spike.  Status: planned.
+  sequenced last behind a decision spike.  Status: Plan 1 shipped (PR
+  #573); Plan 2 (the `Member*` family) planned.
