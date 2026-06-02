@@ -444,7 +444,7 @@ def _opaque_referenced_names(body: list[ir.Instruction], /) -> set[str]:
     """
     referenced: set[str] = set()
     for instruction in body:
-        if isinstance(instruction, ir.Block):
+        if isinstance(instruction, (ir.Access, ir.Block)):
             referenced.update(_iter_ast_var_names(instruction.node))
         elif isinstance(instruction, ir.CarryBranch):
             referenced.update(_iter_ast_var_names(instruction.call_ast))

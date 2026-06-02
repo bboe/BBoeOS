@@ -15,9 +15,9 @@ most one terminator (:class:`cc.ir.Jump`, :class:`cc.ir.BranchFalse`,
 Mid-block instructions never transfer control to a label.  Two opaque cases
 are treated as straight-line for now: :class:`cc.ir.Switch` (multi-way
 dispatch over nested case bodies — the outer CFG sees a single fall-through
-edge to whatever follows the Switch) and :class:`cc.ir.Block` /
-:class:`cc.ir.InlineAsm` (AST escape hatches whose internal control flow is
-invisible at the IR layer).  This keeps Phase 1 simple; Phase 2 SSA
+edge to whatever follows the Switch) and :class:`cc.ir.Access` /
+:class:`cc.ir.Block` / :class:`cc.ir.InlineAsm` (AST escape hatches whose
+internal control flow is invisible at the IR layer).  This keeps Phase 1 simple; Phase 2 SSA
 construction will revisit Switch when mem2reg needs to see across arms.
 
 :class:`cc.ir.LoopBoundary` is emission metadata (push/pop loop label

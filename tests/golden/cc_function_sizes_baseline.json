@@ -1,0 +1,460 @@
+{
+  "user/libbboeos/builtins.c": {
+    "__divdi3": 144,
+    "__moddi3": 117,
+    "__udivdi3": 36,
+    "__umoddi3": 39,
+    "udiv64_inner": 142
+  },
+  "user/libbboeos/ctype.c": {
+    "isalnum": 55,
+    "isalpha": 55,
+    "iscntrl": 55,
+    "isdigit": 55,
+    "islower": 55,
+    "isprint": 55,
+    "ispunct": 55,
+    "isspace": 55,
+    "isupper": 55,
+    "isxdigit": 57,
+    "tolower": 33,
+    "toupper": 33
+  },
+  "user/libbboeos/dirent.c": {
+    "closedir": 69,
+    "opendir": 107,
+    "readdir": 250,
+    "rewinddir": 61
+  },
+  "user/libbboeos/errno.c": {},
+  "user/libbboeos/math.c": {
+    "atan2": 30,
+    "atan2f": 24,
+    "ceil": 49,
+    "cos": 24,
+    "cosf": 10,
+    "exp": 44,
+    "fabs": 24,
+    "fabsf": 10,
+    "floor": 49,
+    "floorf": 10,
+    "log": 24,
+    "log10": 24,
+    "log2": 24,
+    "pow": 65,
+    "powf": 24,
+    "sin": 24,
+    "sinf": 10,
+    "sqrt": 24,
+    "sqrtf": 10,
+    "tan": 24
+  },
+  "user/libbboeos/signal.c": {
+    "alarm": 64,
+    "alarm_ms": 22,
+    "signal": 64
+  },
+  "user/libbboeos/stdio.c": {
+    "_emit": 117,
+    "_emit_pad": 41,
+    "_emit_str": 101,
+    "_utoa": 217,
+    "fclose": 62,
+    "feof": 18,
+    "ferror": 19,
+    "fflush": 7,
+    "fgetc": 68,
+    "fopen": 121,
+    "fprintf": 34,
+    "fputc": 78,
+    "fputs": 108,
+    "fread": 144,
+    "fseek": 62,
+    "ftell": 56,
+    "fwrite": 81,
+    "getchar": 15,
+    "printf": 33,
+    "putchar": 27,
+    "puts": 71,
+    "remove": 10,
+    "rename": 10,
+    "rewind": 5,
+    "snprintf": 45,
+    "sprintf": 44,
+    "sscanf": 7,
+    "vfprintf": 127,
+    "vprintf": 32,
+    "vsnprintf": 1767,
+    "vsprintf": 51
+  },
+  "user/libbboeos/stdlib.c": {
+    "_swap": 55,
+    "abort": 11,
+    "abs": 29,
+    "align_up": 45,
+    "atexit": 65,
+    "atof": 7,
+    "atoi": 30,
+    "atol": 30,
+    "bsearch": 136,
+    "calloc": 64,
+    "exit": 58,
+    "free": 47,
+    "getenv": 7,
+    "grow_heap": 95,
+    "malloc": 262,
+    "qsort": 734,
+    "rand": 34,
+    "realloc": 154,
+    "release": 236,
+    "srand": 10,
+    "strtol": 337,
+    "strtoul": 39,
+    "system": 10
+  },
+  "user/libbboeos/string.c": {
+    "memchr": 79,
+    "memcmp": 108,
+    "memcpy": 66,
+    "memmove": 98,
+    "memset": 54,
+    "strcasecmp": 113,
+    "strcat": 55,
+    "strchr": 77,
+    "strcmp": 93,
+    "strcpy": 42,
+    "strdup": 57,
+    "strerror": 193,
+    "strlen": 37,
+    "strncasecmp": 135,
+    "strncat": 101,
+    "strncmp": 115,
+    "strncpy": 79,
+    "strrchr": 86,
+    "strstr": 138
+  },
+  "user/libbboeos/syscall.c": {
+    "_errno_from_al": 146,
+    "_exit": 67,
+    "close": 66,
+    "getdents": 79,
+    "gettimeofday": 63,
+    "ioctl": 130,
+    "lseek": 79,
+    "mkdir": 10,
+    "open": 79,
+    "read": 79,
+    "sbrk": 86,
+    "sleep_ms": 30,
+    "stat": 10,
+    "uptime_ms": 9,
+    "video_map": 56,
+    "write": 79
+  },
+  "user/programs/arp.c": {
+    "main": 542
+  },
+  "user/programs/asm.c": {
+    "apply_binary": 133,
+    "cmov_handler": 268,
+    "compute_source_prefix": 89,
+    "define_label_here": 111,
+    "define_macro": 416,
+    "die_error_pass1_io": 184,
+    "emit_address_disp": 37,
+    "emit_address_size_prefix": 57,
+    "emit_alu_binop": 451,
+    "emit_alu_mem_imm": 570,
+    "emit_alu_reg_imm": 277,
+    "emit_byte": 76,
+    "emit_dword": 51,
+    "emit_indexed_mem": 305,
+    "emit_modrm_direct": 71,
+    "emit_modrm_disp": 110,
+    "emit_modrm_disp8": 56,
+    "emit_operand_size_prefix": 57,
+    "emit_sib_mem": 346,
+    "emit_sized": 51,
+    "emit_sized_imm": 61,
+    "emit_sized_mem": 59,
+    "emit_word": 29,
+    "encode_rel8_jump": 454,
+    "expand_macro": 453,
+    "find_macro": 183,
+    "flush_output": 47,
+    "handle_aam": 11,
+    "handle_adc": 11,
+    "handle_add": 36,
+    "handle_and": 36,
+    "handle_call": 269,
+    "handle_clc": 11,
+    "handle_cld": 11,
+    "handle_cli": 11,
+    "handle_cmove": 11,
+    "handle_cmovg": 11,
+    "handle_cmovge": 11,
+    "handle_cmovl": 11,
+    "handle_cmovle": 11,
+    "handle_cmovne": 11,
+    "handle_cmp": 650,
+    "handle_cmpsb": 11,
+    "handle_cmpsw": 21,
+    "handle_dec": 11,
+    "handle_div": 11,
+    "handle_imul": 163,
+    "handle_in": 139,
+    "handle_inc": 11,
+    "handle_int": 26,
+    "handle_ja": 11,
+    "handle_jb": 11,
+    "handle_jbe": 11,
+    "handle_jg": 11,
+    "handle_jge": 11,
+    "handle_jl": 11,
+    "handle_jle": 11,
+    "handle_jmp": 127,
+    "handle_jnc": 11,
+    "handle_jne": 11,
+    "handle_jns": 11,
+    "handle_jz": 11,
+    "handle_lea": 152,
+    "handle_lgdt": 47,
+    "handle_lidt": 47,
+    "handle_lodsb": 11,
+    "handle_lodsw": 21,
+    "handle_loop": 11,
+    "handle_mov": 1106,
+    "handle_movsb": 11,
+    "handle_movsd": 21,
+    "handle_movsw": 21,
+    "handle_movzx": 226,
+    "handle_mul": 11,
+    "handle_neg": 11,
+    "handle_not": 11,
+    "handle_or": 36,
+    "handle_out": 139,
+    "handle_pop": 85,
+    "handle_popa": 11,
+    "handle_push": 440,
+    "handle_pusha": 11,
+    "handle_rep": 21,
+    "handle_repne": 21,
+    "handle_ret": 11,
+    "handle_sbb": 11,
+    "handle_scasb": 11,
+    "handle_shl": 11,
+    "handle_shr": 11,
+    "handle_stc": 11,
+    "handle_stosb": 11,
+    "handle_stosd": 21,
+    "handle_stosw": 21,
+    "handle_sub": 36,
+    "handle_test": 392,
+    "handle_unknown_word": 261,
+    "handle_xchg": 181,
+    "handle_xor": 36,
+    "hex_digit": 81,
+    "inc_dec_handler": 242,
+    "include_pop": 80,
+    "include_push": 241,
+    "is_ident_char": 82,
+    "load_src_sector": 81,
+    "lookup_ident_here": 111,
+    "main": 348,
+    "make_modrm_reg_reg_impl": 54,
+    "match_seg_ds_es": 114,
+    "match_word": 104,
+    "mem_op_reg_emit": 82,
+    "op_precedence": 105,
+    "parse_atom": 295,
+    "parse_creg": 120,
+    "parse_d_values": 946,
+    "parse_expression": 121,
+    "parse_line": 2637,
+    "parse_register": 229,
+    "read_line": 114,
+    "reg_to_rm": 70,
+    "resolve_label": 31,
+    "resolve_value": 15,
+    "run_pass1": 184,
+    "run_pass2": 85,
+    "scan_ident_dot": 28,
+    "shift_handler": 132,
+    "skip_comma": 24,
+    "skip_ws": 24,
+    "symbol_add": 196,
+    "symbol_add_constant": 49,
+    "symbol_lookup": 186,
+    "symbol_set": 81,
+    "unary_f6f7": 1261
+  },
+  "user/programs/cat.c": {
+    "main": 166
+  },
+  "user/programs/chmod.c": {
+    "main": 165
+  },
+  "user/programs/cp.c": {
+    "main": 195
+  },
+  "user/programs/date.c": {
+    "main": 26
+  },
+  "user/programs/dns.c": {
+    "main": 1094
+  },
+  "user/programs/draw.c": {
+    "main": 664,
+    "trail_step": 52,
+    "trail_wrap": 46
+  },
+  "user/programs/echo.c": {
+    "interpret_escapes": 249,
+    "main": 438
+  },
+  "user/programs/edit.c": {
+    "buffer_length": 32,
+    "column_before": 42,
+    "gap_move_left": 72,
+    "gap_move_right": 66,
+    "main": 2886
+  },
+  "user/programs/exit_status.c": {
+    "main": 93
+  },
+  "user/programs/false.c": {
+    "main": 23
+  },
+  "user/programs/fd_helpers.c": {
+    "main": 330,
+    "run_dup2_self": 61,
+    "run_dup_console": 69,
+    "run_dup_vga": 99,
+    "run_noop": 50
+  },
+  "user/programs/grep.c": {
+    "fold_to_lower": 49,
+    "getopt": 189,
+    "line_matches": 106,
+    "main": 691,
+    "read_line": 158,
+    "tolower": 35
+  },
+  "user/programs/head.c": {
+    "isspace": 55,
+    "main": 498,
+    "read_line": 158,
+    "strtol": 182,
+    "tolower": 35
+  },
+  "user/programs/ls.c": {
+    "main": 643
+  },
+  "user/programs/mkdir.c": {
+    "main": 110
+  },
+  "user/programs/mv.c": {
+    "main": 161
+  },
+  "user/programs/ping.c": {
+    "main": 1325
+  },
+  "user/programs/pipe_consumer.c": {
+    "main": 383
+  },
+  "user/programs/pipe_drain.c": {
+    "main": 33
+  },
+  "user/programs/pipe_producer.c": {
+    "main": 225
+  },
+  "user/programs/pipe_spam.c": {
+    "main": 158
+  },
+  "user/programs/recursive_exec_test.c": {
+    "main": 100
+  },
+  "user/programs/rep_loops_test.c": {
+    "main": 225
+  },
+  "user/programs/rm.c": {
+    "main": 90
+  },
+  "user/programs/rmdir.c": {
+    "main": 110
+  },
+  "user/programs/seq.c": {
+    "main": 229,
+    "strtol": 173,
+    "tolower": 35
+  },
+  "user/programs/shell.c": {
+    "add_match": 210,
+    "apply_redirections": 410,
+    "build_bin_path": 105,
+    "build_command_argv": 606,
+    "collect_matches": 203,
+    "cursor_back": 36,
+    "delete_at_cursor": 113,
+    "dispatch_command": 393,
+    "execute_line": 282,
+    "execute_pipeline": 656,
+    "expand_word": 272,
+    "history_down": 180,
+    "history_up": 199,
+    "insert_char": 99,
+    "longest_common_prefix": 132,
+    "main": 1778,
+    "replace_line": 79,
+    "restore_redirections": 68,
+    "tab_complete": 1050,
+    "try_exec": 121,
+    "visual_bell": 38
+  },
+  "user/programs/sleep_forever.c": {
+    "main": 33
+  },
+  "user/programs/sort.c": {
+    "compare_lines": 63,
+    "isspace": 55,
+    "main": 1032,
+    "merge_pass": 228,
+    "numeric_compare": 99,
+    "strtol": 182,
+    "tolower": 35
+  },
+  "user/programs/tail.c": {
+    "isspace": 55,
+    "main": 395,
+    "read_line": 158,
+    "run_file_mode": 255,
+    "run_stdin_mode": 653,
+    "strtol": 182,
+    "tolower": 35
+  },
+  "user/programs/tee.c": {
+    "main": 159
+  },
+  "user/programs/tr.c": {
+    "main": 857,
+    "set2_next": 272
+  },
+  "user/programs/true.c": {
+    "main": 20
+  },
+  "user/programs/uniq.c": {
+    "emit": 69,
+    "main": 776,
+    "read_line": 158
+  },
+  "user/programs/uptime.c": {
+    "main": 84
+  },
+  "user/programs/wc.c": {
+    "main": 815,
+    "read_line": 158
+  },
+  "user/programs/yes.c": {
+    "main": 126
+  }
+}
