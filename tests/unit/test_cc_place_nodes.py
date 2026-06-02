@@ -53,3 +53,39 @@ def test_place_store_carries_value() -> None:
         value=ast_nodes.Int(value=5),
     )
     assert store.value == ast_nodes.Int(value=5)
+
+
+def test_member_place_over_dereference_models_arrow() -> None:
+    """ptr->field is MemberPlace(DereferencePlace(VariablePlace), field)."""
+    place = ast_nodes.MemberPlace(
+        base=ast_nodes.DereferencePlace(pointer=ast_nodes.VariablePlace(name="ptr")),
+        member_name="field",
+    )
+    assert isinstance(place.base, ast_nodes.DereferencePlace)
+    assert place.base.pointer.name == "ptr"
+
+
+def test_chained_member_place_nests() -> None:
+    """a->b.c is MemberPlace(MemberPlace(DereferencePlace(VariablePlace), b), c)."""
+    place = ast_nodes.MemberPlace(
+        base=ast_nodes.MemberPlace(
+            base=ast_nodes.DereferencePlace(pointer=ast_nodes.VariablePlace(name="a")),
+            member_name="b",
+        ),
+        member_name="c",
+    )
+    assert place.member_name == "c"
+    assert place.base.member_name == "b"
+
+
+def test_subscript_over_member_models_pointer_field_index() -> None:
+    """ptr->field[i] is SubscriptPlace(MemberPlace(...), index)."""
+    place = ast_nodes.SubscriptPlace(
+        base=ast_nodes.MemberPlace(
+            base=ast_nodes.DereferencePlace(pointer=ast_nodes.VariablePlace(name="ptr")),
+            member_name="field",
+        ),
+        index=ast_nodes.Var(name="i"),
+    )
+    assert isinstance(place.base, ast_nodes.MemberPlace)
+    assert isinstance(place.base.base, ast_nodes.DereferencePlace)

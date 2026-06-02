@@ -51,9 +51,6 @@ from cc.ast_nodes import (
     Label,
     LogicalAnd,
     LogicalOr,
-    MemberAccess,
-    MemberAssign,
-    MemberIndex,
     Node,
     Param,
     PointerDereferenceAssign,
@@ -173,11 +170,6 @@ class LivenessAnalyzer:
             self._add_expression_uses(expression.left, accumulator)
             self._add_expression_uses(expression.right, accumulator)
             return
-        if isinstance(expression, (MemberAccess, MemberIndex)):
-            accumulator.add(expression.object_name)
-            if isinstance(expression, MemberIndex):
-                self._add_expression_uses(expression.index, accumulator)
-            return
         if isinstance(expression, Var):
             accumulator.add(expression.name)
             return
@@ -267,10 +259,6 @@ class LivenessAnalyzer:
             # of the array name continue to be live.
             statement_info.uses.add(statement.array.name)
             self._add_expression_uses(statement.index, statement_info.uses)
-            self._add_expression_uses(statement.expr, statement_info.uses)
-            return
-        if isinstance(statement, MemberAssign):
-            statement_info.uses.add(statement.object_name)
             self._add_expression_uses(statement.expr, statement_info.uses)
             return
         if isinstance(statement, PointerDereferenceAssign):

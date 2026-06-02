@@ -61,14 +61,12 @@ from cc.ast_nodes import (
     Label,
     LogicalAnd,
     LogicalOr,
-    MemberAccess,
-    MemberAddressOf,
-    MemberAssign,
-    MemberIncrementDecrement,
-    MemberIndex,
-    MemberIndexAssign,
+    MemberPlace,
     Node,
     Param,
+    Place,
+    PlaceAddressOf,
+    PlaceIncDec,
     PlaceLoad,
     PlaceStore,
     PointerDereference,
@@ -85,6 +83,7 @@ from cc.ast_nodes import (
     VaArg,
     Var,
     VarDecl,
+    VariablePlace,
     While,
 )
 from cc.codegen.x86.jumps import (
@@ -788,17 +787,16 @@ class EmissionMixin:
                 message = f"too many initializers for 'struct {tag}'"
                 raise CompileError(message, line=init.line)
             assignments = list(zip(field_names, init.positional, strict=False))
-        # Per-field assignments via the existing member-assign codegen
-        # path.  Synthesize MemberAssign nodes and dispatch.
+        # Per-field assignments via the Place store codegen path.
+        # Synthesize ``name.field = value`` as a PlaceStore over a
+        # MemberPlace and emit it directly.
         for field_name, value_node in assignments:
-            synthetic = MemberAssign(
-                arrow=False,
-                expr=value_node,
+            place = MemberPlace(
+                base=VariablePlace(line=init.line, name=name),
                 line=init.line,
                 member_name=field_name,
-                object_name=name,
             )
-            self.generate_member_assign(synthetic)
+            self._emit_place_store(place, value_node)
 
     def _emit_switch_interleaved_arms(
         self,
@@ -912,14 +910,10 @@ class EmissionMixin:
             self.generate_statement(inner)
         elif isinstance(inner, IndexAssign):
             self.generate_index_assign(inner)
-        elif isinstance(inner, MemberAssign):
-            if self._member_assign_targets_bitfield(inner):
+        elif isinstance(inner, PlaceStore):
+            if self._place_targets_bitfield(inner.place):
                 message = "assignment-as-expression to bitfield fields is not supported"
                 raise CompileError(message, line=expression.line)
-            self.generate_member_assign(inner)
-        elif isinstance(inner, MemberIndexAssign):
-            self.generate_member_index_assign(inner)
-        elif isinstance(inner, PlaceStore):
             self._emit_place_store(inner.place, inner.value)
         elif isinstance(inner, PointerDereferenceAssign):
             self._emit_pointer_dereference_assign(inner)
@@ -1621,7 +1615,7 @@ class EmissionMixin:
         to decide whether eliding the then-branch (which by the textual
         macro semantics would otherwise be re-evaluated) is safe.
         """
-        if isinstance(node, (Int, SizeofExpr, SizeofType, SizeofVar, String, Var, AddressOf, MemberAddressOf)):
+        if isinstance(node, (Int, SizeofExpr, SizeofType, SizeofVar, String, Var, AddressOf, PlaceAddressOf)):
             return True
         if isinstance(node, BinaryOperation):
             return self._is_pure_expression(node.left) and self._is_pure_expression(node.right)
@@ -1631,8 +1625,6 @@ class EmissionMixin:
             # ``arr[i]`` reads from memory but doesn't write; the index
             # itself must also be pure.
             return self._is_pure_expression(node.index)
-        if isinstance(node, (MemberAccess, MemberIndex)):
-            return True
         if isinstance(node, PlaceLoad):
             return True
         if isinstance(node, Conditional):
@@ -1792,38 +1784,12 @@ class EmissionMixin:
             case ir.Block(node=node):
                 self.generate_statement(node)
 
-    def _member_assign_targets_bitfield(self, statement: MemberAssign, /) -> bool:
-        """Return True if *statement* writes to a bitfield member.
-
-        Uses the same ``struct_layouts`` / ``variable_types`` lookup as
-        :meth:`generate_member_assign` so the detection predicate is
-        consistent: ``info.bit_width is not None``.
-        """
-        if statement.base_expr is not None:
-            return False
-        struct_type = self.variable_types.get(statement.object_name, "")
-        if statement.arrow:
-            if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
-                return False
-            tag = struct_type[7:-1]
-        else:
-            if not struct_type.startswith("struct ") or struct_type.endswith("*"):
-                return False
-            tag = struct_type[7:]
-        layout = self.struct_layouts.get(tag)
-        if layout is None:
-            return False
-        info = layout.get(statement.member_name)
-        if info is None:
-            return False
-        return info.bit_width is not None
-
     def _node_contains_var(self, node: Node, name: str, /) -> bool:
         """Return True if node or any descendant is Var(name).
 
         Conservative: any str field equal to name is treated as a possible
-        variable read so that nodes like Assign and MemberAssign (which store
-        the target's name as a plain str rather than a Var) are not silently
+        variable read so that nodes like Assign (which store the
+        target's name as a plain str rather than a Var) are not silently
         missed.
         """
         if isinstance(node, Var):
@@ -1877,6 +1843,37 @@ class EmissionMixin:
         # the tail jmp is valid and the named register's stale value
         # is never used.
         return any(self._node_contains_var(stmt, param_name) for stmt in body)
+
+    def _place_targets_bitfield(self, place: Place, /) -> bool:
+        """Return True if *place*'s terminal member is a bitfield.
+
+        Used to reject assignment-as-expression to a bitfield (the
+        read-modify-write sequence clobbers AX, breaking the "AX holds
+        the assigned value" contract).  Only a terminal member access
+        can name a bitfield; any other place shape (subscript, plain
+        variable, dereference) returns False.  Resolution is
+        compile-time only (no code emitted) and any layout it cannot
+        resolve is treated conservatively as non-bitfield.
+        """
+        if not isinstance(place, MemberPlace):
+            return False
+        try:
+            base_type = self._place_type(place.base)
+        except CompileError:
+            return False
+        if base_type.startswith("struct ") and base_type.endswith("*"):
+            tag = base_type[7:-1].rstrip()
+        elif base_type.startswith("struct "):
+            tag = base_type[7:]
+        else:
+            return False
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            return False
+        info = layout.get(place.member_name)
+        if info is None:
+            return False
+        return info.bit_width is not None
 
     @staticmethod
     def _rep_width_suffix(element_size: int, /) -> str:
@@ -2867,53 +2864,10 @@ class EmissionMixin:
                 self.emit(f"        mov {self.target.acc}, {expression.value}")
         elif isinstance(expression, (LogicalAnd, LogicalOr)):
             self._generate_logical_value(expression)
-        elif isinstance(expression, MemberAccess):
-            self.generate_member_access(expression)
-        elif isinstance(expression, MemberAddressOf):
-            self.generate_member_address_of(expression)
-        elif isinstance(expression, MemberIncrementDecrement):
-            # Same lowering shape as IncrementDecrement, but for
-            # struct-member lvalues: synthesize ``s->f = s->f ± 1`` and
-            # route through generate_member_assign, then reload the
-            # member into acc so the surrounding expression sees the
-            # post-update value.  Postfix recovers the pre-value with
-            # one ``sub`` / ``add``.
-            delta_value = abs(expression.delta)
-            base_access = MemberAccess(
-                arrow=expression.arrow,
-                line=expression.line,
-                member_name=expression.member_name,
-                object_name=expression.object_name,
-            )
-            update_expression = BinaryOperation(
-                left=base_access,
-                line=expression.line,
-                operation="+" if expression.delta > 0 else "-",
-                right=Int(line=expression.line, value=delta_value),
-            )
-            self.generate_member_assign(
-                MemberAssign(
-                    arrow=expression.arrow,
-                    expr=update_expression,
-                    line=expression.line,
-                    member_name=expression.member_name,
-                    object_name=expression.object_name,
-                )
-            )
-            self.generate_expression(
-                MemberAccess(
-                    arrow=expression.arrow,
-                    line=expression.line,
-                    member_name=expression.member_name,
-                    object_name=expression.object_name,
-                )
-            )
-            if expression.is_postfix:
-                reverse = "sub" if expression.delta > 0 else "add"
-                self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
-                self.ax_clear()
-        elif isinstance(expression, MemberIndex):
-            self.generate_member_index(expression)
+        elif isinstance(expression, PlaceAddressOf):
+            self._emit_place_address_of(expression.place)
+        elif isinstance(expression, PlaceIncDec):
+            self._emit_place_increment_decrement(expression)
         elif isinstance(expression, PlaceLoad):
             self._emit_place_load(expression.place)
         elif isinstance(expression, PointerDereference):
@@ -4322,16 +4276,10 @@ class EmissionMixin:
             self.ax_clear()
             self.si_local = None
             self.emit(f".user_{statement.name}:")
-        elif isinstance(statement, MemberAssign):
-            self.generate_member_assign(statement)
-            self.ax_clear()
-        elif isinstance(statement, MemberIncrementDecrement):
-            # ``s->f++;`` / ``--s.f;`` at statement scope — value
+        elif isinstance(statement, PlaceIncDec):
+            # ``place++;`` / ``--place;`` at statement scope — value
             # discarded; route through the expression-form codegen.
             self.generate_expression(statement)
-            self.ax_clear()
-        elif isinstance(statement, MemberIndexAssign):
-            self.generate_member_index_assign(statement)
             self.ax_clear()
         elif isinstance(statement, PlaceStore):
             self._emit_place_store(statement.place, statement.value)

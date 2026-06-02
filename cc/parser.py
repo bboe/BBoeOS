@@ -25,6 +25,7 @@ from cc.ast_nodes import (
     Conditional,
     Continue,
     DerefAssign,
+    DereferencePlace,
     DerefIncrement,
     DerefIncrementAssign,
     DoubleIndex,
@@ -44,15 +45,11 @@ from cc.ast_nodes import (
     Label,
     LogicalAnd,
     LogicalOr,
-    MemberAccess,
-    MemberAddressOf,
-    MemberAssign,
-    MemberIncrementDecrement,
-    MemberIndex,
-    MemberIndexAssign,
     MemberPlace,
     Node,
     Param,
+    PlaceAddressOf,
+    PlaceIncDec,
     PlaceLoad,
     PlaceStore,
     PointerDereference,
@@ -208,6 +205,19 @@ class Parser:
         if token[0] in TYPE_TOKENS:
             return True
         return token[0] == "IDENT" and token[1] in self.typedef_aliases
+
+    @staticmethod
+    def _member_place_base(*, arrow: bool, line: int, object_name: str) -> Node:
+        """Build the base :class:`Place` for a named member access.
+
+        ``obj.field`` (dot) bases on the bare :class:`VariablePlace`;
+        ``ptr->field`` (arrow) bases on a :class:`DereferencePlace` of the
+        variable, since ``p->f`` is exactly ``(*p).f``.
+        """
+        variable = VariablePlace(line=line, name=object_name)
+        if arrow:
+            return DereferencePlace(line=line, pointer=variable)
+        return variable
 
     def _parse_asm_clobbers(self) -> list[str]:
         """Parse a comma-separated list of clobber string literals."""
@@ -845,49 +855,44 @@ class Parser:
             arrow = arrow_token[0] == "ARROW"
             member_token = self.eat("IDENT")
             # ``ptr->field[i]`` indexes into an array-typed member.
+            member_place = MemberPlace(
+                base=self._member_place_base(arrow=arrow, line=line, object_name=name),
+                line=line,
+                member_name=member_token[1],
+            )
             if self.peek()[0] == "LBRACKET":
                 self.eat("LBRACKET")
                 index = self.parse_expression()
                 self.eat("RBRACKET")
-                return MemberIndex(
-                    arrow=arrow,
-                    index=index,
+                return PlaceLoad(
                     line=line,
-                    member_name=member_token[1],
-                    object_name=name,
+                    place=SubscriptPlace(base=member_place, index=index, line=line),
                 )
             if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
                 # Postfix ``ptr->member++`` / ``s.member--`` as an
                 # expression — evaluates to the pre-update value.
                 operator_token = self.eat()
                 delta = self._delta_from_operator(operator_token[0])
-                return MemberIncrementDecrement(
-                    arrow=arrow,
+                return PlaceIncDec(
                     delta=delta,
                     is_postfix=True,
                     line=line,
-                    member_name=member_token[1],
-                    object_name=name,
+                    place=member_place,
                 )
-            result: Node = MemberAccess(
-                arrow=arrow,
-                line=line,
-                member_name=member_token[1],
-                object_name=name,
-            )
-            # Chained member access: ``a->b.c``, ``a->b.c.d``, etc.
+            # Chained member access: ``a->b.c``, ``a->b.c.d``, etc.  Each
+            # arrow link dereferences a loaded pointer value, so its base
+            # is ``DereferencePlace(PlaceLoad(prior))``; each dot link
+            # reuses the prior :class:`MemberPlace` as a struct-value base.
             while self.peek()[0] in ("DOT", "ARROW"):
                 chain_arrow_token = self.eat()
                 chain_arrow = chain_arrow_token[0] == "ARROW"
                 chain_member = self.eat("IDENT")
-                result = MemberAccess(
-                    arrow=chain_arrow,
-                    base_expr=result,
-                    line=line,
-                    member_name=chain_member[1],
-                    object_name="",
-                )
-            return result
+                if chain_arrow:
+                    chain_base: Node = DereferencePlace(line=line, pointer=PlaceLoad(line=line, place=member_place))
+                else:
+                    chain_base = member_place
+                member_place = MemberPlace(base=chain_base, line=line, member_name=chain_member[1])
+            return PlaceLoad(line=line, place=member_place)
         if name in self.enum_constants:
             # Enum variant used as a bare value: fold to its integer
             # constant so downstream code (case labels, array sizes,
@@ -1031,7 +1036,7 @@ class Parser:
             node = self.fold_binop(operator_token[1], node, right)
         return node
 
-    def _parse_member_assign_no_semi(self) -> MemberAssign | MemberIndexAssign:
+    def _parse_member_assign_no_semi(self) -> PlaceStore:
         """Parse ``name (. | ->) member = expr`` or the indexed variant without consuming the trailing semicolon.
 
         Also handles chained access: ``name->field.field2 = expr``.
@@ -1045,124 +1050,83 @@ class Parser:
         arrow_token = self.eat()
         arrow = arrow_token[0] == "ARROW"
         member_token = self.eat("IDENT")
+        member_place = MemberPlace(
+            base=self._member_place_base(arrow=arrow, line=token[2], object_name=object_name),
+            line=token[2],
+            member_name=member_token[1],
+        )
         if self.peek()[0] in ("DOT", "ARROW"):
-            base: Node = MemberAccess(
-                arrow=arrow,
-                line=token[2],
-                member_name=member_token[1],
-                object_name=object_name,
-            )
             while self.peek()[0] in ("DOT", "ARROW"):
                 chain_arrow_token = self.eat()
                 chain_arrow = chain_arrow_token[0] == "ARROW"
                 chain_member = self.eat("IDENT")
-                if self.peek()[0] in ("DOT", "ARROW"):
-                    base = MemberAccess(
-                        arrow=chain_arrow,
-                        base_expr=base,
-                        line=token[2],
-                        member_name=chain_member[1],
-                        object_name="",
-                    )
+                if chain_arrow:
+                    chain_base: Node = DereferencePlace(line=token[2], pointer=PlaceLoad(line=token[2], place=member_place))
                 else:
-                    self.eat("ASSIGN")
-                    expression = self.parse_expression()
-                    return MemberAssign(
-                        arrow=chain_arrow,
-                        base_expr=base,
-                        expr=expression,
-                        line=token[2],
-                        member_name=chain_member[1],
-                        object_name="",
-                    )
+                    chain_base = member_place
+                member_place = MemberPlace(base=chain_base, line=token[2], member_name=chain_member[1])
+            self.eat("ASSIGN")
+            expression = self.parse_expression()
+            return PlaceStore(line=token[2], place=member_place, value=expression)
         if self.peek()[0] == "LBRACKET":
             self.eat("LBRACKET")
             index_expression = self.parse_expression()
             self.eat("RBRACKET")
             self.eat("ASSIGN")
             value_expression = self.parse_expression()
-            return MemberIndexAssign(
-                arrow=arrow,
-                expr=value_expression,
-                index=index_expression,
+            return PlaceStore(
                 line=token[2],
-                member_name=member_token[1],
-                object_name=object_name,
+                place=SubscriptPlace(base=member_place, index=index_expression, line=token[2]),
+                value=value_expression,
             )
         self.eat("ASSIGN")
         expression = self.parse_expression()
-        return MemberAssign(
-            arrow=arrow,
-            expr=expression,
-            line=token[2],
-            member_name=member_token[1],
-            object_name=object_name,
-        )
+        return PlaceStore(line=token[2], place=member_place, value=expression)
 
-    def _parse_member_assignment(self) -> MemberAssign | MemberIncrementDecrement | MemberIndexAssign:
+    def _parse_member_assignment(self) -> PlaceIncDec | PlaceStore:
         """Parse a struct member assignment statement.
 
         Accepts ``name (. | ->) member = expr ;``, the indexed form
-        ``name (. | ->) member [ index ] = expr ;`` (yielding
-        :class:`MemberIndexAssign`), chained member access
-        ``name (. | ->) member (. | ->) member2 ... = expr ;``, and
-        the postfix increment/decrement forms
+        ``name (. | ->) member [ index ] = expr ;`` (yielding a
+        :class:`PlaceStore` over a :class:`SubscriptPlace`), chained
+        member access ``name (. | ->) member (. | ->) member2 ... =
+        expr ;``, and the postfix increment/decrement forms
         ``name (. | ->) member ++ ;`` / ``name (. | ->) member -- ;``
-        (yielding :class:`MemberIncrementDecrement` with
-        ``is_postfix=True``).
+        (yielding :class:`PlaceIncDec` with ``is_postfix=True``).
         """
         token = self.eat("IDENT")
         object_name = token[1]
         arrow_token = self.eat()
         arrow = arrow_token[0] == "ARROW"
         member_token = self.eat("IDENT")
-        # Chained member access: ``a->b.c = expr;``.  Build a
-        # MemberAccess chain for the intermediate accesses; the final
-        # member becomes the assignment target.
+        member_place = MemberPlace(
+            base=self._member_place_base(arrow=arrow, line=token[2], object_name=object_name),
+            line=token[2],
+            member_name=member_token[1],
+        )
+        # Chained member access: ``a->b.c = expr;``.  Build a nested
+        # MemberPlace for the intermediate accesses; the final member
+        # becomes the assignment target.
         if self.peek()[0] in ("DOT", "ARROW"):
-            base: Node = MemberAccess(
-                arrow=arrow,
-                line=token[2],
-                member_name=member_token[1],
-                object_name=object_name,
-            )
             while self.peek()[0] in ("DOT", "ARROW"):
                 chain_arrow_token = self.eat()
                 chain_arrow = chain_arrow_token[0] == "ARROW"
                 chain_member = self.eat("IDENT")
-                if self.peek()[0] in ("DOT", "ARROW"):
-                    base = MemberAccess(
-                        arrow=chain_arrow,
-                        base_expr=base,
-                        line=token[2],
-                        member_name=chain_member[1],
-                        object_name="",
-                    )
+                if chain_arrow:
+                    chain_base: Node = DereferencePlace(line=token[2], pointer=PlaceLoad(line=token[2], place=member_place))
                 else:
-                    # Final member — this is the assignment target.
-                    self.eat("ASSIGN")
-                    expression = self.parse_expression()
-                    self.eat("SEMI")
-                    return MemberAssign(
-                        arrow=chain_arrow,
-                        base_expr=base,
-                        expr=expression,
-                        line=token[2],
-                        member_name=chain_member[1],
-                        object_name="",
-                    )
+                    chain_base = member_place
+                member_place = MemberPlace(base=chain_base, line=token[2], member_name=chain_member[1])
+            # Final member — this is the assignment target.
+            self.eat("ASSIGN")
+            expression = self.parse_expression()
+            self.eat("SEMI")
+            return PlaceStore(line=token[2], place=member_place, value=expression)
         if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
             operator_token = self.eat()
             self.eat("SEMI")
             delta = self._delta_from_operator(operator_token[0])
-            return MemberIncrementDecrement(
-                arrow=arrow,
-                delta=delta,
-                is_postfix=True,
-                line=token[2],
-                member_name=member_token[1],
-                object_name=object_name,
-            )
+            return PlaceIncDec(delta=delta, is_postfix=True, line=token[2], place=member_place)
         if self.peek()[0] == "LBRACKET":
             self.eat("LBRACKET")
             index_expression = self.parse_expression()
@@ -1170,48 +1134,27 @@ class Parser:
             self.eat("ASSIGN")
             value_expression = self.parse_expression()
             self.eat("SEMI")
-            return MemberIndexAssign(
-                arrow=arrow,
-                expr=value_expression,
-                index=index_expression,
+            return PlaceStore(
                 line=token[2],
-                member_name=member_token[1],
-                object_name=object_name,
+                place=SubscriptPlace(base=member_place, index=index_expression, line=token[2]),
+                value=value_expression,
             )
         if self.peek()[0] in COMPOUND_ASSIGN_OPERATORS:
             operator_token = self.eat()
             operator = COMPOUND_ASSIGN_OPERATORS[operator_token[0]]
             right_expression = self.parse_expression()
             self.eat("SEMI")
-            member_access = MemberAccess(
-                arrow=arrow,
-                line=token[2],
-                member_name=member_token[1],
-                object_name=object_name,
-            )
             combined_expression = BinaryOperation(
-                left=member_access,
+                left=PlaceLoad(line=token[2], place=member_place),
                 line=token[2],
                 operation=operator,
                 right=right_expression,
             )
-            return MemberAssign(
-                arrow=arrow,
-                expr=combined_expression,
-                line=token[2],
-                member_name=member_token[1],
-                object_name=object_name,
-            )
+            return PlaceStore(line=token[2], place=member_place, value=combined_expression)
         self.eat("ASSIGN")
         expression = self.parse_expression()
         self.eat("SEMI")
-        return MemberAssign(
-            arrow=arrow,
-            expr=expression,
-            line=token[2],
-            member_name=member_token[1],
-            object_name=object_name,
-        )
+        return PlaceStore(line=token[2], place=member_place, value=expression)
 
     def _parse_one_declarator(self, *, line: int, type_string: str) -> Node:
         """Parse one declarator after the base type has been consumed.
@@ -1314,8 +1257,8 @@ class Parser:
         - ``IDENT[i] = rhs``                      → :class:`IndexAssign`
         - ``IDENT[i].m = rhs``                    → :class:`PlaceStore`
         - ``IDENT[i].m[j] = rhs``                 → :class:`PlaceStore`
-        - ``IDENT.m = rhs`` / ``IDENT->m = rhs``  → :class:`MemberAssign`
-        - ``IDENT.m[i] = rhs``                    → :class:`MemberIndexAssign`
+        - ``IDENT.m = rhs`` / ``IDENT->m = rhs``  → :class:`PlaceStore`
+        - ``IDENT.m[i] = rhs``                    → :class:`PlaceStore`
         - ``*p = rhs``                             → :class:`DerefAssign`
         - ``*p++ = rhs`` / ``*++p = rhs``         → :class:`DerefIncrementAssign`
         - ``*(T*)e = rhs``                         → :class:`PointerDereferenceAssign`
@@ -2230,13 +2173,15 @@ class Parser:
             if self.peek()[0] in ("DOT", "ARROW"):
                 arrow_token = self.eat()
                 member_token = self.eat("IDENT")
-                return MemberIncrementDecrement(
-                    arrow=arrow_token[0] == "ARROW",
+                return PlaceIncDec(
                     delta=delta,
                     is_postfix=False,
                     line=line,
-                    member_name=member_token[1],
-                    object_name=name_token[1],
+                    place=MemberPlace(
+                        base=self._member_place_base(arrow=arrow_token[0] == "ARROW", line=line, object_name=name_token[1]),
+                        line=line,
+                        member_name=member_token[1],
+                    ),
                 )
             return IncrementDecrement(delta=delta, is_postfix=False, line=line, target_name=name_token[1])
         if token[0] == "SIZEOF":
@@ -2293,27 +2238,23 @@ class Parser:
             if self.peek()[0] in ("DOT", "ARROW"):
                 arrow_token = self.eat()
                 member_token = self.eat("IDENT")
+                member_place = MemberPlace(
+                    base=self._member_place_base(arrow=arrow_token[0] == "ARROW", line=line, object_name=name_token[1]),
+                    line=line,
+                    member_name=member_token[1],
+                )
                 # ``&obj.field[i]`` / ``&ptr->field[i]`` — address of one
-                # element of an array/pointer member.  Reuses MemberIndex's
+                # element of an array/pointer member.  Reuses the subscript
                 # element-address scaling, lea'd instead of loaded.
                 if self.peek()[0] == "LBRACKET":
                     self.eat("LBRACKET")
                     index = self.parse_expression()
                     self.eat("RBRACKET")
-                    return MemberIndex(
-                        address_of=True,
-                        arrow=arrow_token[0] == "ARROW",
-                        index=index,
+                    return PlaceAddressOf(
                         line=line,
-                        member_name=member_token[1],
-                        object_name=name_token[1],
+                        place=SubscriptPlace(base=member_place, index=index, line=line),
                     )
-                return MemberAddressOf(
-                    arrow=arrow_token[0] == "ARROW",
-                    line=line,
-                    member_name=member_token[1],
-                    object_name=name_token[1],
-                )
+                return PlaceAddressOf(line=line, place=member_place)
             return AddressOf(line=line, var=Var(line=line, name=name_token[1]))
         if token[0] == "STAR":
             self.eat()
@@ -2337,12 +2278,13 @@ class Parser:
                 if self.peek()[0] == "ARROW":
                     self.eat("ARROW")
                     member_token = self.eat("IDENT")
-                    return MemberAccess(
-                        arrow=True,
-                        base_expr=cast,
+                    return PlaceLoad(
                         line=line,
-                        member_name=member_token[1],
-                        object_name="",
+                        place=MemberPlace(
+                            base=DereferencePlace(line=line, pointer=cast),
+                            line=line,
+                            member_name=member_token[1],
+                        ),
                     )
                 return cast
             # Parenthesised assignment-as-expression: ``(lvalue = rhs)``.
@@ -2362,12 +2304,13 @@ class Parser:
             if self.peek()[0] == "ARROW" and isinstance(expression, Cast):
                 self.eat("ARROW")
                 member_token = self.eat("IDENT")
-                return MemberAccess(
-                    arrow=True,
-                    base_expr=expression,
+                return PlaceLoad(
                     line=line,
-                    member_name=member_token[1],
-                    object_name="",
+                    place=MemberPlace(
+                        base=DereferencePlace(line=line, pointer=expression),
+                        line=line,
+                        member_name=member_token[1],
+                    ),
                 )
             return expression
         message = f"expected expression, got {token[0]} ({token[1]!r})"
@@ -2536,13 +2479,15 @@ class Parser:
                 arrow_token = self.eat()
                 member_token = self.eat("IDENT")
                 self.eat("SEMI")
-                return MemberIncrementDecrement(
-                    arrow=arrow_token[0] == "ARROW",
+                return PlaceIncDec(
                     delta=delta,
                     is_postfix=False,
                     line=token[2],
-                    member_name=member_token[1],
-                    object_name=name_token[1],
+                    place=MemberPlace(
+                        base=self._member_place_base(arrow=arrow_token[0] == "ARROW", line=token[2], object_name=name_token[1]),
+                        line=token[2],
+                        member_name=member_token[1],
+                    ),
                 )
             self.eat("SEMI")
             return IncrementDecrement(delta=delta, is_postfix=False, line=token[2], target_name=name_token[1])

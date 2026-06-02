@@ -80,6 +80,15 @@ class ArrayInit(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class AsmOperand(Node):
+    """A single output or input operand in an extended asm statement."""
+
+    constraint: str
+    expression: Node
+    name: str | None = field(default=None)
+
+
+@dataclass(kw_only=True, slots=True)
 class Assign(Node):
     """Assignment ``name = expr;`` or ``name += expr;`` (the latter lowers to ``name = name + expr``)."""
 
@@ -92,23 +101,14 @@ class AssignExpr(IntegerOperand, Node):
     """A parenthesized assignment used as an expression.
 
     Wraps an underlying ``*Assign`` AST node (``Assign``, ``DerefAssign``,
-    ``IndexAssign``, ``MemberAssign``, ``PointerDereferenceAssign``,
-    ``DerefIncrementAssign``, ``MemberIndexAssign``, ``PlaceStore``).
+    ``IndexAssign``, ``PointerDereferenceAssign``,
+    ``DerefIncrementAssign``, ``PlaceStore``).
     The value of the expression is the
     post-assignment value of the lvalue; the lvalue itself is not produced
     as an lvalue (chained ``a = b = c`` must be written ``a = (b = c)``).
     """
 
     inner: Node
-
-
-@dataclass(kw_only=True, slots=True)
-class AsmOperand(Node):
-    """A single output or input operand in an extended asm statement."""
-
-    constraint: str
-    expression: Node
-    name: str | None = field(default=None)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -495,122 +495,6 @@ class LogicalOr(IntegerOperand, Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class MemberAccess(IntegerOperand, Node):
-    """Member access expression: ``ptr->field`` or ``obj.field``.
-
-    ``arrow=True`` for ``->``, ``False`` for ``.``.  Only the
-    ``arrow=True`` form (pointer dereference) is fully supported in the
-    first cycle; ``arrow=False`` is parsed but may raise CompileError
-    in codegen if the base is not a pointer.
-
-    The base is either a named variable (``object_name``) or an
-    arbitrary pointer expression (``base_expr``) — exactly one is set.
-    The base-expression form covers ``((struct T *)expr)->field``,
-    where the cast's target type tells codegen which struct to use
-    for field-offset lookup.  ``object_name`` is the empty string when
-    ``base_expr`` is set.
-    """
-
-    arrow: bool
-    member_name: str
-    object_name: str
-    base_expr: Node | None = None
-
-
-@dataclass(kw_only=True, slots=True)
-class MemberAddressOf(Node):
-    """Address-of a struct member: ``&obj.field`` or ``&ptr->field``.
-
-    ``arrow=True`` for the ``->`` form; ``False`` for ``.``.
-    Rejected at codegen when ``field`` is a bitfield (bitfields have no
-    addressable storage).  For non-bitfield members the address is the
-    byte address of the containing struct plus the field's byte offset.
-    """
-
-    arrow: bool
-    member_name: str
-    object_name: str
-
-
-@dataclass(kw_only=True, slots=True)
-class MemberAssign(Node):
-    """Member assignment statement: ``ptr->field = expr;``.
-
-    Like :class:`MemberAccess` but with an ``expr`` to store.
-    When ``base_expr`` is set the target is a chained access
-    (e.g. ``ptr->inner.field = expr;``): ``base_expr`` resolves to
-    the address of the inner struct value (a :class:`MemberAccess`),
-    ``arrow`` is always ``False``, and ``object_name`` is the empty
-    string.
-    """
-
-    arrow: bool
-    expr: Node
-    member_name: str
-    object_name: str
-    base_expr: Node | None = None
-
-
-@dataclass(kw_only=True, slots=True)
-class MemberIncrementDecrement(IntegerOperand, Node):
-    """``++ptr->field`` / ``--ptr->field`` / ``ptr->field++`` / ``ptr->field--``.
-
-    Mirrors :class:`IncrementDecrement` (bare Var lvalue) for struct
-    member lvalues.  ``delta`` is ``+1`` or ``-1``; ``is_postfix``
-    selects whether the expression evaluates to the pre- or
-    post-update value.  In statement position the value is discarded.
-    Lowers via the existing :class:`MemberAssign` store path, then
-    reloads through :class:`MemberAccess` so the surrounding
-    expression sees the post-update value (postfix recovers the
-    pre-value with a single ``sub`` / ``add`` on the accumulator).
-    """
-
-    arrow: bool
-    delta: int
-    is_postfix: bool
-    member_name: str
-    object_name: str
-
-
-@dataclass(kw_only=True, slots=True)
-class MemberIndex(Node):
-    """Indexed access into a struct's array-typed member: ``ptr->field[i]``.
-
-    Loads one element (byte or word, per the field's element type) from
-    ``base + field_offset + index * element_size``.  ``ptr->field`` (no
-    index) is :class:`MemberAccess`, which yields the field's address for
-    array fields.
-
-    ``address_of=True`` is the ``&ptr->field[i]`` / ``&obj.field[i]``
-    form: codegen computes the same element address but emits a ``lea``
-    into the accumulator instead of loading the element value.
-    """
-
-    address_of: bool = False
-    arrow: bool
-    index: Node
-    member_name: str
-    object_name: str
-
-
-@dataclass(kw_only=True, slots=True)
-class MemberIndexAssign(Node):
-    """Indexed assignment into a struct member: ``ptr->field[i] = expr;``.
-
-    Stores one element (byte / word / dword, per the field's pointee or
-    element size) at ``base + index * element_size`` when ``field`` is a
-    pointer, or at ``base + field_offset + index * element_size`` when
-    ``field`` is an inline array.
-    """
-
-    arrow: bool
-    expr: Node
-    index: Node
-    member_name: str
-    object_name: str
-
-
-@dataclass(kw_only=True, slots=True)
 class MemberPlace(Place):
     """A member ``base.member_name``; ``base->m`` is ``.m`` on a :class:`DereferencePlace`."""
 
@@ -639,43 +523,6 @@ class Param:
     name: str
     out_register: str | None = field(default=None, kw_only=True)
     type: str
-
-
-@dataclass(kw_only=True, slots=True)
-class PointerDereference(Node):
-    """Read through a pointer expression: ``*(T *)expr``.
-
-    Used for the port-IO bridge idiom where a bitfield struct is read
-    out as a raw byte: ``unsigned char raw = *(unsigned char *)&s;``.
-    ``expression`` evaluates to an address; ``target_type`` selects the
-    load width (``unsigned char``, ``unsigned short``, or pointer width).
-
-    Unlike :class:`Index` (which assumes ``array`` is a :class:`Var`
-    holding a pointer), this node evaluates an arbitrary address
-    expression into the accumulator and then loads through it.
-    """
-
-    expression: Node
-    target_type: str
-
-
-@dataclass(kw_only=True, slots=True)
-class PointerDereferenceAssign(Node):
-    """Write through a pointer expression: ``*(T *)expr = value;``.
-
-    Write-side counterpart of :class:`PointerDereference`.  Used for the
-    port-IO bridge idiom where a bitfield struct receives a fresh byte
-    read from a hardware port:
-    ``*(unsigned char *)&imr = kernel_inb(IMR_PORT);``.
-
-    ``address`` is the inner address expression (without the leading
-    ``*(T *)``); ``target_type`` selects the store width;  ``value`` is
-    the right-hand side.
-    """
-
-    address: Node
-    target_type: str
-    value: Node
 
 
 @dataclass(kw_only=True, slots=True)
@@ -721,6 +568,43 @@ class PlaceStore(Node):
 
 
 @dataclass(kw_only=True, slots=True)
+class PointerDereference(Node):
+    """Read through a pointer expression: ``*(T *)expr``.
+
+    Used for the port-IO bridge idiom where a bitfield struct is read
+    out as a raw byte: ``unsigned char raw = *(unsigned char *)&s;``.
+    ``expression`` evaluates to an address; ``target_type`` selects the
+    load width (``unsigned char``, ``unsigned short``, or pointer width).
+
+    Unlike :class:`Index` (which assumes ``array`` is a :class:`Var`
+    holding a pointer), this node evaluates an arbitrary address
+    expression into the accumulator and then loads through it.
+    """
+
+    expression: Node
+    target_type: str
+
+
+@dataclass(kw_only=True, slots=True)
+class PointerDereferenceAssign(Node):
+    """Write through a pointer expression: ``*(T *)expr = value;``.
+
+    Write-side counterpart of :class:`PointerDereference`.  Used for the
+    port-IO bridge idiom where a bitfield struct receives a fresh byte
+    read from a hardware port:
+    ``*(unsigned char *)&imr = kernel_inb(IMR_PORT);``.
+
+    ``address`` is the inner address expression (without the leading
+    ``*(T *)``); ``target_type`` selects the store width;  ``value`` is
+    the right-hand side.
+    """
+
+    address: Node
+    target_type: str
+    value: Node
+
+
+@dataclass(kw_only=True, slots=True)
 class Program(Node):
     """Top-level AST: functions and file-scope global declarations.
 
@@ -760,6 +644,13 @@ class SizeofVar(IntegerOperand, Node):
     """``sizeof(name)`` expression (size of a declared variable)."""
 
     name: str
+
+
+@dataclass(kw_only=True, slots=True)
+class String(Node):
+    """String literal."""
+
+    content: str
 
 
 @dataclass(kw_only=True, slots=True)
@@ -810,13 +701,6 @@ class StructInitializer(Node):
 
     designated: dict[str, Node] | None = None
     positional: list[Node] | None = None
-
-
-@dataclass(kw_only=True, slots=True)
-class String(Node):
-    """String literal."""
-
-    content: str
 
 
 @dataclass(kw_only=True, slots=True)

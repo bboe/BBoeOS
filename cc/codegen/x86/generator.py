@@ -28,6 +28,7 @@ from cc.ast_nodes import (
     Compound,
     Conditional,
     DerefAssign,
+    DereferencePlace,
     DoubleIndex,
     DoWhile,
     EnumDecl,
@@ -41,15 +42,11 @@ from cc.ast_nodes import (
     Int,
     LogicalAnd,
     LogicalOr,
-    MemberAccess,
-    MemberAddressOf,
-    MemberAssign,
-    MemberIndex,
-    MemberIndexAssign,
     MemberPlace,
     Node,
     Param,
     Place,
+    PlaceIncDec,
     PlaceLoad,
     PointerDereference,
     SizeofExpr,
@@ -1722,6 +1719,243 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for instruction in getattr(self.target, "LONG_TO_EAX", ()):
             self.emit(f"        {instruction}")
 
+    def _emit_member_address(self, *, const_base: str, base_is_register: bool, is_global_label: bool, offset: int) -> None:
+        """Emit the address-yielding terminal for a bare struct-value / array member.
+
+        Reproduces the three legacy sequences: a global label folds the offset
+        into an immediate ``mov``; a local frame base uses ``lea``; a register
+        base uses ``lea [reg+offset]`` (or a bare ``mov acc, reg`` when the
+        offset is zero).
+        """
+        acc = self.target.acc
+        if base_is_register:
+            if offset:
+                self.emit(f"        lea {acc}, [{const_base}+{offset}]")
+            else:
+                self.emit(f"        mov {acc}, {const_base}")
+            return
+        if is_global_label:
+            # Global struct: load the address as a label-arithmetic immediate.
+            if offset:
+                self.emit(f"        mov {acc}, {const_base}+{offset}")
+            else:
+                self.emit(f"        mov {acc}, {const_base}")
+            return
+        # Local frame base: lea the field address.
+        if offset:
+            self.emit(f"        lea {acc}, [{const_base}+{offset}]")
+        else:
+            self.emit(f"        lea {acc}, [{const_base}]")
+
+    def _emit_member_arrow_store(self, place: MemberPlace, value: Node, /) -> None:
+        """Reproduce the arrow / via-expr ``ptr->field = value`` store.
+
+        The named-pointer arrow form (``ptr->field``) is rhs-before-base:
+        the value is evaluated into the accumulator first, then the shared
+        SI/BX base rule loads the struct pointer.  The via-expr form
+        (``((struct T *)e)->field``) is base-first, matching the legacy
+        via-expr store ordering: the base pointer expression is materialised
+        (inside ``_resolve_member_place_info``) before the value.
+        """
+        base = place.base
+        assert isinstance(base, DereferencePlace)
+        # Named-pointer arrow: ``ptr->field`` with the shared SI/BX base rule.
+        if isinstance(base.pointer, VariablePlace):
+            object_name = base.pointer.name
+            info = self._resolve_member_index_layout(
+                arrow=True,
+                line=place.line,
+                member_name=place.member_name,
+                object_name=object_name,
+            )
+            offset = info.byte_offset
+            field_size = info.field_size
+            if info.bit_width is not None:
+                if info.bit_width == 1 and isinstance(value, Int) and value.value in (0, 1):
+                    base_reg = self._load_member_base(object_name)
+                    addr = self._build_address(base_reg, offset)
+                    self._emit_bitfield_write_literal(info, addr=addr, value=value.value)
+                    return
+                self.ax_clear()
+                self.generate_expression(value)
+                base_reg = self._load_member_base(object_name)
+                addr = self._build_address(base_reg, offset)
+                self._emit_bitfield_write(info, addr=addr)
+                return
+            allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+            if field_size not in allowed_sizes:
+                message = f"writing '{place.member_name}' (size {field_size}) not yet supported; use asm()"
+                raise CompileError(message, line=place.line)
+            self.ax_clear()
+            self.generate_expression(value)
+            base_reg = self._load_member_base(object_name)
+            addr = self._build_address(base_reg, offset)
+            self._emit_field_store(addr=addr, field_size=field_size)
+            return
+        # Via-expr arrow: ``((struct T *)e)->field = v``.  The base pointer
+        # expression is materialised first (matching the legacy via-expr
+        # chained store ordering: base-first, then rhs).
+        const_base, _base_is_register, info = self._resolve_member_place_info(place)
+        offset = info.byte_offset
+        field_size = info.field_size
+        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        if field_size not in allowed_sizes:
+            message = f"writing '{place.member_name}' (size {field_size}) not yet supported; use asm()"
+            raise CompileError(message, line=place.line)
+        self.ax_clear()
+        self.generate_expression(value)
+        addr = self._build_address(const_base, offset)
+        self._emit_field_store(addr=addr, field_size=field_size)
+
+    def _emit_member_chained_store(self, place: MemberPlace, value: Node, /) -> None:
+        """Reproduce the chained ``a->b.c = value`` store (base materialised first)."""
+        base_type = self._place_type(place.base)
+        if not base_type.startswith("struct ") or base_type.endswith("*"):
+            message = f"'.' requires a struct value, got type '{base_type}'"
+            raise CompileError(message, line=place.line)
+        tag = base_type[7:]
+        info = self._lookup_struct_field(tag, place.member_name, place.line)
+        offset = info.byte_offset
+        field_size = info.field_size
+        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        if field_size not in allowed_sizes:
+            message = f"writing '{place.member_name}' (size {field_size}) not yet supported; use asm()"
+            raise CompileError(message, line=place.line)
+        self.ax_clear()
+        self.generate_expression(PlaceLoad(line=place.line, place=place.base))
+        self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
+        self.ax_clear()
+        self.generate_expression(value)
+        addr = self._build_address(self.target.bx_register, offset)
+        self._emit_field_store(addr=addr, field_size=field_size)
+
+    def _emit_member_dot_store(self, place: MemberPlace, value: Node, /) -> None:
+        """Reproduce the dot ``obj.field = value`` store (no push/pop)."""
+        base = place.base
+        assert isinstance(base, VariablePlace)
+        struct_type = self.variable_types.get(base.name)
+        if struct_type is None:
+            message = f"undefined variable '{base.name}'"
+            raise CompileError(message, line=place.line)
+        if struct_type.endswith("*") or not struct_type.startswith("struct "):
+            message = f"'.' requires a struct value, got type '{struct_type}'"
+            raise CompileError(message, line=place.line)
+        tag = struct_type[7:]
+        info = self._lookup_struct_field(tag, place.member_name, place.line)
+        base_operand = self._resolve_struct_value_base(base.name, line=place.line)
+        offset = info.byte_offset
+        field_size = info.field_size
+        addr = self._build_address(base_operand, offset)
+        if info.bit_width is not None:
+            if info.bit_width == 1 and isinstance(value, Int) and value.value in (0, 1):
+                self._emit_bitfield_write_literal(info, addr=addr, value=value.value)
+                return
+            if isinstance(value, Int):
+                slot = self._parse_local_byte_addr(addr)
+                if slot is not None and slot in self.known_local_bytes:
+                    field_mask = ((1 << info.bit_width) - 1) << info.bit_offset
+                    clear_mask = (~field_mask) & 0xFF
+                    known = self.known_local_bytes[slot]
+                    rhs = value.value & ((1 << info.bit_width) - 1)
+                    new_byte = (known & clear_mask) | (rhs << info.bit_offset)
+                    self.emit(f"        mov byte {addr}, {new_byte}")
+                    return
+            self.ax_clear()
+            self.generate_expression(value)
+            self._emit_bitfield_write(info, addr=addr)
+            return
+        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        if field_size not in allowed_sizes:
+            message = f"writing '{place.member_name}' (size {field_size}) not yet supported; use asm()"
+            raise CompileError(message, line=place.line)
+        self.ax_clear()
+        self.generate_expression(value)
+        self._emit_field_store(addr=addr, field_size=field_size)
+
+    def _emit_member_index_access(self, place: SubscriptPlace, /, *, address_of: bool) -> None:
+        """Reproduce ``generate_member_index`` for ``base.field[index]``.
+
+        Emits the value load (or, when *address_of*, the element ``lea``)
+        for both inline-array and pointer fields, with constant indices
+        folded into the displacement and variable indices scaled and added
+        through BX, byte-for-byte with the legacy lowerer.
+        """
+        member = place.base
+        assert isinstance(member, MemberPlace)
+        resolved = self._member_index_arrow_object(member)
+        if resolved is None:
+            message = "unsupported member-index base in _emit_member_index_access"
+            raise CompileError(message, line=place.line)
+        arrow, object_name = resolved
+        index = place.index
+        info = self._resolve_member_index_layout(
+            arrow=arrow,
+            line=place.line,
+            member_name=member.member_name,
+            object_name=object_name,
+        )
+        if info.bit_width is not None:
+            message = f"indexing bitfield '{member.member_name}' is not supported"
+            raise CompileError(message, line=place.line)
+        element_size, is_pointer_field = self._member_index_element_size(info)
+        allowed_sizes = (1, 2, 4) if is_pointer_field else (1, 2)
+        if not address_of and element_size not in allowed_sizes:
+            message = f"indexing '{member.member_name}' (element size {element_size}) not supported"
+            raise CompileError(message, line=place.line)
+        field_offset = info.byte_offset
+
+        def emit_load(addr: str) -> None:
+            if address_of:
+                self.emit(f"        lea {self.target.acc}, {addr}")
+            elif element_size == 1:
+                self.emit_byte_load_zx(addr)
+            else:
+                self.emit(f"        mov {self.target.acc}, {addr}")
+
+        # Constant index: fold offset + index*element_size into a displacement.
+        if isinstance(index, Int):
+            self.ax_clear()
+            if arrow and self.si_local == object_name:
+                base_reg = self.target.si_register
+            else:
+                self._emit_member_index_base(arrow=arrow, object_name=object_name, register=self.target.bx_register)
+                base_reg = self.target.bx_register
+            if is_pointer_field:
+                ptr_addr = self._build_address(base_reg, field_offset)
+                self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
+                disp = index.value * element_size
+                addr = self._build_address(self.target.bx_register, disp)
+            else:
+                total_offset = field_offset + index.value * element_size
+                addr = self._build_address(base_reg, total_offset)
+            emit_load(addr)
+            self.ax_clear()
+            return
+        # Variable index: AX = index, scale, add base+offset, load.
+        self.ax_clear()
+        self.generate_expression(index)
+        if element_size in (2, 4):
+            shift = 1 if element_size == 2 else 2
+            self.emit(f"        shl {self.target.acc}, {shift}")
+        elif element_size != 1:
+            self.emit(f"        imul {self.target.acc}, {element_size}")
+        self.emit(f"        push {self.target.acc}")
+        if arrow and self.si_local == object_name:
+            self.emit(f"        mov {self.target.bx_register}, {self.target.si_register}")
+        else:
+            self._emit_member_index_base(arrow=arrow, object_name=object_name, register=self.target.bx_register)
+        if is_pointer_field:
+            ptr_addr = self._build_address(self.target.bx_register, field_offset)
+            self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
+        self.emit(f"        pop {self.target.acc}")
+        self.emit(f"        add {self.target.bx_register}, {self.target.acc}")
+        if is_pointer_field:
+            addr = f"[{self.target.bx_register}]"
+        else:
+            addr = self._build_address(self.target.bx_register, field_offset)
+        emit_load(addr)
+        self.ax_clear()
+
     def _emit_member_index_base(self, *, arrow: bool, object_name: str, register: str) -> None:
         """Load the struct base address into *register* for member-index codegen.
 
@@ -1740,6 +1974,150 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"undefined variable '{object_name}'"
             raise CompileError(message)
 
+    def _emit_member_index_load(self, place: SubscriptPlace, /) -> None:
+        """Reproduce ``generate_member_index`` for a ``base.field[index]`` rvalue."""
+        self._emit_member_index_access(place, address_of=False)
+
+    def _emit_member_index_store(self, place: SubscriptPlace, value: Node, /) -> None:
+        """Reproduce ``generate_member_index_assign`` for ``base.field[index] = value``."""
+        member = place.base
+        assert isinstance(member, MemberPlace)
+        resolved = self._member_index_arrow_object(member)
+        if resolved is None:
+            message = "unsupported member-index base in _emit_member_index_store"
+            raise CompileError(message, line=place.line)
+        arrow, object_name = resolved
+        index = place.index
+        info = self._resolve_member_index_layout(
+            arrow=arrow,
+            line=place.line,
+            member_name=member.member_name,
+            object_name=object_name,
+        )
+        if info.bit_width is not None:
+            message = f"indexed assignment to bitfield '{member.member_name}' is not supported"
+            raise CompileError(message, line=place.line)
+        element_size, is_pointer_field = self._member_index_element_size(info)
+        allowed_sizes = (1, 2, 4) if is_pointer_field else (1, 2)
+        if element_size not in allowed_sizes:
+            message = f"indexed assignment to '{member.member_name}' (element size {element_size}) not supported"
+            raise CompileError(message, line=place.line)
+        field_offset = info.byte_offset
+
+        def emit_store(addr: str) -> None:
+            if element_size == 1:
+                self.emit(f"        mov byte {addr}, al")
+            elif element_size == 2 and self.target.int_size == 4:
+                self.emit(f"        mov word {addr}, ax")
+            else:
+                self.emit(f"        mov {addr}, {self.target.acc}")
+
+        # Constant index: fold into displacement.
+        if isinstance(index, Int):
+            self.ax_clear()
+            self.generate_expression(value)  # rhs → EAX
+            if arrow and self.si_local == object_name:
+                base_reg = self.target.si_register
+            else:
+                self._emit_member_index_base(arrow=arrow, object_name=object_name, register=self.target.bx_register)
+                base_reg = self.target.bx_register
+            if is_pointer_field:
+                ptr_addr = self._build_address(base_reg, field_offset)
+                self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
+                disp = index.value * element_size
+                addr = self._build_address(self.target.bx_register, disp)
+            else:
+                total_offset = field_offset + index.value * element_size
+                addr = self._build_address(base_reg, total_offset)
+            emit_store(addr)
+            self.ax_clear()
+            return
+        # Variable index: rhs first, push; index scaled, push; base; pop both.
+        self.ax_clear()
+        self.generate_expression(value)
+        self.emit(f"        push {self.target.acc}")  # save rhs
+        self.ax_clear()
+        self.generate_expression(index)  # AX = index
+        if element_size in (2, 4):
+            shift = 1 if element_size == 2 else 2
+            self.emit(f"        shl {self.target.acc}, {shift}")
+        self.emit(f"        push {self.target.acc}")
+        if arrow and self.si_local == object_name:
+            self.emit(f"        mov {self.target.bx_register}, {self.target.si_register}")
+        else:
+            self._emit_member_index_base(arrow=arrow, object_name=object_name, register=self.target.bx_register)
+        if is_pointer_field:
+            ptr_addr = self._build_address(self.target.bx_register, field_offset)
+            self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
+        self.emit(f"        pop {self.target.acc}")  # scaled index
+        self.emit(f"        add {self.target.bx_register}, {self.target.acc}")
+        self.emit(f"        pop {self.target.acc}")  # restore rhs
+        if is_pointer_field:
+            addr = f"[{self.target.bx_register}]"
+        else:
+            addr = self._build_address(self.target.bx_register, field_offset)
+        emit_store(addr)
+        self.ax_clear()
+
+    def _emit_member_scalar_load(self, place: MemberPlace, /) -> None:
+        """Reproduce ``generate_member_access`` for a non-array member rvalue.
+
+        Resolves the base (dot / arrow / via-expr / chained) and emits the
+        yields-address (lea / immediate / register), bitfield-read, or plain
+        field-load terminal byte-for-byte.
+        """
+        self.ax_clear()
+        const_base, base_is_register, info = self._resolve_member_place_info(place)
+        offset = info.byte_offset
+        field_size = info.field_size
+        element_size = info.element_size
+        is_array_field = field_size != element_size
+        is_struct_value = info.type_name.startswith("struct ") and not info.type_name.endswith("*")
+        if is_array_field or is_struct_value:
+            self._emit_member_address(
+                const_base=const_base,
+                base_is_register=base_is_register,
+                is_global_label=self._member_dot_targets_global(place),
+                offset=offset,
+            )
+            self.ax_clear()
+            return
+        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        if field_size not in allowed_sizes:
+            message = f"reading '{place.member_name}' (size {field_size}) not yet supported; use asm()"
+            raise CompileError(message, line=place.line)
+        addr = self._build_address(const_base, offset)
+        if info.bit_width is not None:
+            self._emit_bitfield_read(info, addr=addr)
+            return
+        self._emit_field_load(addr=addr, field_size=field_size)
+        self.ax_clear()
+
+    def _emit_member_scalar_store(self, place: MemberPlace, value: Node, /) -> None:
+        """Reproduce ``generate_member_assign`` for a non-array member store.
+
+        Handles the three legacy orderings byte-for-byte: the dot-static
+        store evaluates the rhs and stores to the resolved static address
+        (no push/pop); the arrow / via-expr register-base store evaluates
+        the rhs FIRST and then materialises the base register; the chained
+        ``a->b.c`` store materialises the base FIRST.  The four bitfield
+        store paths (1-bit literal, const-fold, general RMW, arrow
+        rhs-before-base) are reproduced as well.
+        """
+        base = place.base
+        # Dot-static store: ``obj.field = v`` on a struct value (named base).
+        if isinstance(base, VariablePlace):
+            self._emit_member_dot_store(place, value)
+            return
+        # Chained store: ``a->b.c = v`` where the base is itself a member
+        # (struct-value address materialised base-first).
+        if isinstance(base, MemberPlace):
+            self._emit_member_chained_store(place, value)
+            return
+        # Arrow store: ``ptr->field = v`` (named pointer) and the cast /
+        # general via-expr forms — rhs evaluated before the base register.
+        self._emit_member_arrow_store(place, value)
+
     def _emit_mov_from_acc(self, register: str, /) -> None:
         """Move the accumulator into *register*, narrowing the low word when needed.
 
@@ -1753,8 +2131,112 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
         self.emit(f"        mov {register}, {source}")
 
+    def _emit_place_address_of(self, place: Place, /) -> None:
+        """Emit the address of *place* into the accumulator (``&place``).
+
+        Handles the scalar member forms (``&obj.field`` /
+        ``&ptr->field``) and the element-address form
+        (``&base.field[index]``).
+        """
+        if self._is_member_index_place(place):
+            self.ax_clear()
+            self._emit_member_index_access(place, address_of=True)
+            return
+        assert isinstance(place, MemberPlace)
+        base = place.base
+        # Arrow form: ``&ptr->field`` (named pointer).
+        if isinstance(base, DereferencePlace) and isinstance(base.pointer, VariablePlace):
+            object_name = base.pointer.name
+            struct_type = self.variable_types.get(object_name)
+            if struct_type is None:
+                message = f"undefined variable '{object_name}'"
+                raise CompileError(message, line=place.line)
+            if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
+                message = f"'->' requires a pointer to struct, got type '{struct_type}'"
+                raise CompileError(message, line=place.line)
+            tag = struct_type[7:-1]
+            info = self._lookup_struct_field(tag, place.member_name, place.line)
+            if info.bit_width is not None:
+                message = f"cannot take address of bitfield '{place.member_name}'"
+                raise CompileError(message, line=place.line)
+            self.ax_clear()
+            self._emit_load_var(object_name, register=self.target.acc)
+            if info.byte_offset:
+                self.emit(f"        add {self.target.acc}, {info.byte_offset}")
+            self.ax_clear()
+            return
+        # Dot form: ``&obj.field`` (named struct value).
+        if isinstance(base, VariablePlace):
+            object_name = base.name
+            struct_type = self.variable_types.get(object_name)
+            if struct_type is None:
+                message = f"undefined variable '{object_name}'"
+                raise CompileError(message, line=place.line)
+            if struct_type.endswith("*"):
+                message = "'&obj.field' requires a struct value, not a pointer; use '&ptr->field' or '&(*ptr).field'"
+                raise CompileError(message, line=place.line)
+            if not struct_type.startswith("struct "):
+                message = f"'.' requires a struct value, got type '{struct_type}'"
+                raise CompileError(message, line=place.line)
+            tag = struct_type[7:]
+            info = self._lookup_struct_field(tag, place.member_name, place.line)
+            if info.bit_width is not None:
+                message = f"cannot take address of bitfield '{place.member_name}'"
+                raise CompileError(message, line=place.line)
+            if object_name in self.global_scalars:
+                base_label = self._local_address(object_name)
+                if info.byte_offset:
+                    self.emit(f"        lea {self.target.acc}, [{base_label}+{info.byte_offset}]")
+                else:
+                    self.emit(f"        lea {self.target.acc}, [{base_label}]")
+            elif object_name in self.locals:
+                frame_offset = self.locals[object_name]
+                if info.byte_offset:
+                    self.emit(f"        lea {self.target.acc}, [ebp-{frame_offset}+{info.byte_offset}]")
+                else:
+                    self.emit(f"        lea {self.target.acc}, [ebp-{frame_offset}]")
+            else:
+                message = f"undefined variable '{object_name}'"
+                raise CompileError(message, line=place.line)
+            self.ax_clear()
+            return
+        message = "unsupported Place shape in _emit_place_address_of"
+        raise CompileError(message, line=place.line)
+
+    def _emit_place_increment_decrement(self, node: PlaceIncDec, /) -> None:
+        """Emit a postfix/prefix ``++`` / ``--`` over a Place.
+
+        Synthesizes ``place = place ± delta`` through :meth:`_emit_place_store`,
+        reloads the updated value with a :class:`PlaceLoad`, and — for the
+        postfix form — recovers the pre-update value with one ``sub`` / ``add``.
+        """
+        place = node.place
+        delta_value = abs(node.delta)
+        update_expression = BinaryOperation(
+            left=PlaceLoad(line=node.line, place=place),
+            line=node.line,
+            operation="+" if node.delta > 0 else "-",
+            right=Int(line=node.line, value=delta_value),
+        )
+        self._emit_place_store(place, update_expression)
+        self.generate_expression(PlaceLoad(line=node.line, place=place))
+        if node.is_postfix:
+            reverse = "sub" if node.delta > 0 else "add"
+            self.emit(f"        {reverse} {self.target.acc}, {delta_value}")
+            self.ax_clear()
+
     def _emit_place_load(self, place: Place, /) -> None:
         """Load the value at *place* into the accumulator (rvalue)."""
+        # Member shapes (dot / arrow / chained scalar, and member-index
+        # subscript) own their own base register and never push/pop BX
+        # around it; route them through their dedicated emitters so the
+        # byte output matches the legacy generate_member_* lowerers.
+        if self._is_member_index_place(place):
+            self._emit_member_index_load(place)
+            return
+        if isinstance(place, MemberPlace) and self._match_struct_array_member(place) is None:
+            self._emit_member_scalar_load(place)
+            return
         self.ax_clear()
         protect_bx = self._bx_holds_pinned_var()
         if protect_bx:
@@ -1774,6 +2256,12 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
     def _emit_place_store(self, place: Place, value: Node, /) -> None:
         """Store the result of *value* into *place*."""
+        if self._is_member_index_place(place):
+            self._emit_member_index_store(place, value)
+            return
+        if isinstance(place, MemberPlace) and self._match_struct_array_member(place) is None:
+            self._emit_member_scalar_store(place, value)
+            return
         allowed = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
         self.ax_clear()
         protect_bx = self._bx_holds_pinned_var()
@@ -2071,50 +2559,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # (sizeof('a') == sizeof(int)), so both flow through here — there
             # is deliberately no separate Char branch.
             return "int"
-        if isinstance(node, MemberAccess):
-            # p->field — look up the field's declared type.
-            if node.object_name:
-                base_type = self.variable_types.get(node.object_name, "")
-            elif node.base_expr is not None:
-                base_type = self._expression_type(node.base_expr)
-            else:
-                message = "sizeof: cannot determine struct type for member access"
-                raise CompileError(message, line=node.line)
-            if node.arrow:
-                if not base_type.endswith("*"):
-                    message = f"sizeof: arrow on non-pointer type '{base_type}'"
-                    raise CompileError(message, line=node.line)
-                tag = base_type[7:-1].rstrip() if base_type.startswith("struct ") else ""
-            else:
-                tag = base_type[7:] if base_type.startswith("struct ") else ""
-            layout = self.struct_layouts.get(tag)
-            if layout is None:
-                message = f"sizeof: unknown struct tag '{tag}'"
-                raise CompileError(message, line=node.line)
-            field_info = layout.get(node.member_name)
-            if field_info is None:
-                message = f"sizeof: unknown field '{node.member_name}' in struct '{tag}'"
-                raise CompileError(message, line=node.line)
-            return field_info.type_name
         if isinstance(node, PlaceLoad):
-            # arr[i].field rvalue — look up the field's declared type (dot form;
-            # this codegen path treats arr[i] as an array of struct values).
-            matched = self._match_struct_array_member(node.place)
-            if matched is None:
-                message = f"sizeof: cannot determine type of {type(node.place).__name__}"
-                raise CompileError(message, line=node.line)
-            array_name, _index, member_name = matched
-            base_type = self.variable_types.get(array_name, "")
-            tag = base_type[7:] if base_type.startswith("struct ") else ""
-            layout = self.struct_layouts.get(tag)
-            if layout is None:
-                message = f"sizeof: unknown struct tag '{tag}'"
-                raise CompileError(message, line=node.line)
-            field_info = layout.get(member_name)
-            if field_info is None:
-                message = f"sizeof: unknown field '{member_name}' in struct '{tag}'"
-                raise CompileError(message, line=node.line)
-            return field_info.type_name
+            # Rvalue read of any Place — resolve the place's declared type.
+            # Preserves the struct-array sizeof behavior: sizeof(arr[i].field)
+            # resolves through MemberPlace/SubscriptPlace to the field type.
+            return self._place_type(node.place)
+        if isinstance(node, Place):
+            # A bare Place used as an expression operand (e.g. the pointer
+            # inside a DereferencePlace) — resolve its declared type.
+            return self._place_type(node)
         if isinstance(node, PointerDereference):
             return node.target_type
         if isinstance(node, (SizeofType, SizeofVar, SizeofExpr)):
@@ -2129,133 +2582,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return variable_type
         message = f"sizeof: cannot determine type of {type(node).__name__}"
         raise CompileError(message, line=node.line)
-
-    def _generate_member_access_via_expr(self, expression: MemberAccess, /) -> None:
-        """Generate code for member access through an expression base.
-
-        Handles both the ``((struct T *)expr)->field`` cast form and
-        the chained ``a->b.c`` form (where ``base_expr`` is itself a
-        :class:`MemberAccess`).  Evaluates the base expression into
-        BX/EBX, then loads the field with the same offset / bitfield /
-        byte-width handling as the named-pointer form.
-        """
-        base = expression.base_expr
-        assert base is not None
-        base_type = self._expression_type(base)
-        if expression.arrow:
-            if not (base_type.startswith("struct ") and base_type.endswith("*")):
-                message = f"'->' requires a struct-pointer cast, got '{base_type}'"
-                raise CompileError(message, line=expression.line)
-            tag = base_type[7:-1]
-        else:
-            if not base_type.startswith("struct ") or base_type.endswith("*"):
-                message = f"'.' requires a struct value, got type '{base_type}'"
-                raise CompileError(message, line=expression.line)
-            tag = base_type[7:]
-        layout = self.struct_layouts.get(tag)
-        if layout is None:
-            message = f"unknown struct '{tag}'"
-            raise CompileError(message, line=expression.line)
-        if expression.member_name not in layout:
-            message = f"struct '{tag}' has no field '{expression.member_name}'"
-            raise CompileError(message, line=expression.line)
-        info = layout[expression.member_name]
-        offset = info.byte_offset
-        field_size = info.field_size
-        element_size = info.element_size
-        is_array_field = field_size != element_size
-        is_struct_value = info.type_name.startswith("struct ") and not info.type_name.endswith("*")
-        # Fast path: when the base is a Cast wrapping ``&local`` (the
-        # port-IO bridge idiom ``((struct T *)&raw)->field``), the base
-        # pointer is a known frame address — skip the ``lea + mov ebx,
-        # eax + mov al, [ebx]`` indirection and load directly from
-        # ``[ebp-K+offset]``.
-        direct_address: str | None = None
-        if isinstance(base, Cast) and isinstance(base.expression, AddressOf) and base.expression.var.name in self.locals:
-            direct_address = self._local_address(base.expression.var.name)
-        if direct_address is not None:
-            self.ax_clear()
-            if is_array_field or is_struct_value:
-                if offset:
-                    self.emit(f"        lea {self.target.acc}, [{direct_address}+{offset}]")
-                else:
-                    self.emit(f"        lea {self.target.acc}, [{direct_address}]")
-                self.ax_clear()
-                return
-            allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
-            if field_size not in allowed_sizes:
-                message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
-                raise CompileError(message, line=expression.line)
-            addr = self._build_address(direct_address, offset)
-            if info.bit_width is not None:
-                self._emit_bitfield_read(info, addr=addr)
-                return
-            self._emit_field_load(addr=addr, field_size=field_size)
-            self.ax_clear()
-            return
-        # General path: materialise the base address into BX/EBX.
-        self.generate_expression(base)
-        self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
-        base_reg = self.target.bx_register
-        self.ax_clear()
-        if is_array_field or is_struct_value:
-            if offset:
-                self.emit(f"        lea {self.target.acc}, [{base_reg}+{offset}]")
-            else:
-                self.emit(f"        mov {self.target.acc}, {base_reg}")
-            self.ax_clear()
-            return
-        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
-        if field_size not in allowed_sizes:
-            message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
-            raise CompileError(message, line=expression.line)
-        addr = self._build_address(base_reg, offset)
-        if info.bit_width is not None:
-            self._emit_bitfield_read(info, addr=addr)
-            return
-        self._emit_field_load(addr=addr, field_size=field_size)
-        self.ax_clear()
-
-    def _generate_member_assign_via_expr(self, statement: MemberAssign, /) -> None:
-        """Generate code for chained member assignment ``a->b.c = expr;``.
-
-        Evaluates ``base_expr`` (a :class:`MemberAccess` chain) to
-        produce the address of the intermediate struct, then stores the
-        RHS into the final field at the appropriate offset.
-        """
-        assert statement.base_expr is not None
-        base_type = self._expression_type(statement.base_expr)
-        if statement.arrow:
-            if not base_type.endswith("*") or not base_type.startswith("struct "):
-                message = f"'->' requires a pointer to struct, got type '{base_type}'"
-                raise CompileError(message, line=statement.line)
-            tag = base_type[7:-1]
-        else:
-            if not base_type.startswith("struct ") or base_type.endswith("*"):
-                message = f"'.' requires a struct value, got type '{base_type}'"
-                raise CompileError(message, line=statement.line)
-            tag = base_type[7:]
-        layout = self.struct_layouts.get(tag)
-        if layout is None:
-            message = f"unknown struct '{tag}'"
-            raise CompileError(message, line=statement.line)
-        if statement.member_name not in layout:
-            message = f"struct '{tag}' has no field '{statement.member_name}'"
-            raise CompileError(message, line=statement.line)
-        info = layout[statement.member_name]
-        offset = info.byte_offset
-        field_size = info.field_size
-        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
-        if field_size not in allowed_sizes:
-            message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
-            raise CompileError(message, line=statement.line)
-        self.ax_clear()
-        self.generate_expression(statement.base_expr)
-        self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
-        self.ax_clear()
-        self.generate_expression(statement.expr)
-        addr = self._build_address(self.target.bx_register, offset)
-        self._emit_field_store(addr=addr, field_size=field_size)
 
     def _has_remainder(self, left: Node, right: Node, /) -> bool:
         """Check if DX already holds left % right.
@@ -2298,14 +2624,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # through Block.  Pinned-to-register locals can't be
             # ``unsigned long`` (they wouldn't fit a single register),
             # so only the VarDecl case can hit a pinned target —
-            # but we still extract Assign / MemberAssign destinations
-            # defensively in case future IR shapes wrap them.
+            # but we still extract Assign destinations defensively in
+            # case future IR shapes wrap them.
             node = instruction.node
             if isinstance(node, Assign):
                 return [node.name]
             if isinstance(node, VarDecl) and node.init is not None:
                 return [node.name]
-            # MemberAssign / IndexAssign / inline asm write through
+            # PlaceStore / IndexAssign / inline asm write through
             # pointers or are opaque — they don't store to a single
             # named local register.  Skip.
             return []
@@ -2378,6 +2704,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return False
         return isinstance(init_expr.get(name), (Call, Index, BinaryOperation))
 
+    def _is_member_index_place(self, place: Place, /) -> bool:
+        """Return True if *place* is ``base.field[index]`` (member-index, not struct-array)."""
+        return (
+            isinstance(place, SubscriptPlace)
+            and isinstance(place.base, MemberPlace)
+            and self._match_struct_array_member(place.base) is None
+        )
+
     def _load_member_base(self, object_name: str, /) -> str:
         """Return a base register holding the struct address for ``object_name``.
 
@@ -2420,6 +2754,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return self._global_label(name)
         message = f"no address for '{name}' (not a local or global scalar)"
         raise CompileError(message)
+
+    def _lookup_struct_field(self, tag: str, member_name: str, line: int, /) -> FieldInfo:
+        """Return the :class:`FieldInfo` for ``member_name`` of struct ``tag``.
+
+        Raises :class:`CompileError` for an unknown struct tag or field,
+        with the same message strings the legacy ``generate_member_*``
+        lowerers emit.
+        """
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            message = f"unknown struct '{tag}'"
+            raise CompileError(message, line=line)
+        if member_name not in layout:
+            message = f"struct '{tag}' has no field '{member_name}'"
+            raise CompileError(message, line=line)
+        return layout[member_name]
 
     @staticmethod
     def _loop_assigned_names(statements: list[Node], /) -> set[str]:
@@ -2469,6 +2819,31 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit("section .data")
         self.emit(";; --- global data ---")
         self._data_header_emitted = True
+
+    def _member_dot_targets_global(self, place: MemberPlace, /) -> bool:
+        """Return True if *place* is ``global.field`` on a file-scope struct global.
+
+        Only the dot access of a named global struct loads the field address
+        as a label-arithmetic immediate; locals (and the cast / chained
+        register bases) use ``lea`` / ``mov reg`` instead.
+        """
+        return isinstance(place.base, VariablePlace) and place.base.name in self.global_scalars
+
+    @staticmethod
+    def _member_index_arrow_object(member: MemberPlace, /) -> tuple[bool, str] | None:
+        """Return ``(arrow, object_name)`` for a named member-index base.
+
+        ``ptr->field[i]`` has base ``MemberPlace(DereferencePlace(Var), field)``
+        → ``(True, ptr)``; ``obj.field[i]`` has base
+        ``MemberPlace(Var, field)`` → ``(False, obj)``.  Returns ``None`` for
+        any other base shape (handled elsewhere).
+        """
+        base = member.base
+        if isinstance(base, DereferencePlace) and isinstance(base.pointer, VariablePlace):
+            return True, base.pointer.name
+        if isinstance(base, VariablePlace):
+            return False, base.name
+        return None
 
     def _member_index_element_size(self, info: FieldInfo, /) -> tuple[int, bool]:
         """Return ``(element_size, is_pointer_field)`` for an indexed field access.
@@ -2621,6 +2996,55 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             and low_word(register) != "ax"
             and (initialized_filter is None or register in initialized_filter)
         })
+
+    def _place_type(self, place: Place, /) -> str:
+        """Infer the declared type string of *place* (compile-time, never evaluated).
+
+        Recursive companion to :meth:`_expression_type` for the ``Place``
+        lvalue tree.  ``VariablePlace`` reads :attr:`variable_types`;
+        ``SubscriptPlace`` strips one pointer / array level off its base;
+        ``DereferencePlace`` strips the pointer of its pointee expression;
+        ``MemberPlace`` resolves the field's declared type from the struct
+        layout.  Used for ``sizeof`` and to recover the struct tag when a
+        chained member access dots through a struct-value member.
+        """
+        if isinstance(place, VariablePlace):
+            variable_type = self.variable_types.get(place.name)
+            if variable_type is None:
+                message = f"sizeof: unknown variable '{place.name}'"
+                raise CompileError(message, line=place.line)
+            return variable_type
+        if isinstance(place, SubscriptPlace):
+            base_type = self._place_type(place.base)
+            if base_type.endswith("*"):
+                return base_type[:-1].rstrip()
+            if "[" in base_type:
+                return base_type[: base_type.index("[")].rstrip()
+            if base_type.startswith("struct "):
+                # An array of struct values stores its element type bare
+                # (``struct point``); ``arr[i]`` yields that struct value.
+                return base_type
+            message = f"sizeof: cannot index non-pointer type '{base_type}'"
+            raise CompileError(message, line=place.line)
+        if isinstance(place, DereferencePlace):
+            pointer_type = self._expression_type(place.pointer)
+            if not pointer_type.endswith("*"):
+                message = f"sizeof: cannot dereference non-pointer type '{pointer_type}'"
+                raise CompileError(message, line=place.line)
+            return pointer_type[:-1].rstrip()
+        if isinstance(place, MemberPlace):
+            base_type = self._place_type(place.base)
+            if base_type.startswith("struct ") and base_type.endswith("*"):
+                tag = base_type[7:-1].rstrip()
+            elif base_type.startswith("struct "):
+                tag = base_type[7:]
+            else:
+                message = f"sizeof: member access on non-struct type '{base_type}'"
+                raise CompileError(message, line=place.line)
+            info = self._lookup_struct_field(tag, place.member_name, place.line)
+            return info.type_name
+        message = f"sizeof: cannot determine type of {type(place).__name__}"
+        raise CompileError(message, line=place.line)
 
     def _prologue_initialized_pinned_registers(self) -> set[str]:
         """Return the set of pinned registers whose value is meaningful at function entry.
@@ -2957,6 +3381,94 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"struct '{tag}' has no field '{member_name}'"
             raise CompileError(message, line=line)
         return layout[member_name]
+
+    def _resolve_member_place_info(self, place: MemberPlace, /) -> tuple[str, bool, FieldInfo]:
+        """Resolve the base operand and field info for a non-array member ``place``.
+
+        Returns ``(const_base, base_is_register, info)``.  Dispatches on
+        ``place.base`` to reproduce the legacy member-codegen base
+        materialization byte-for-byte:
+
+        - :class:`VariablePlace` — dot access ``obj.field`` on a struct value.
+          *const_base* is the struct's memory operand (``_g_obj`` or
+          ``ebp-N``); no register is emitted, *base_is_register* False.
+        - :class:`DereferencePlace` of a :class:`VariablePlace` — arrow access
+          ``ptr->field``.  Emits the shared SI-or-BX base load and returns the
+          register, *base_is_register* True.
+        - :class:`DereferencePlace` of any other expression — the
+          ``((struct T *)e)->field`` / chained ``a->b.c`` form.  The
+          ``Cast(AddressOf(local))`` fast path returns the local's frame
+          operand without a register; the general path evaluates the pointer
+          expression into BX (``mov bx, acc``) and returns it.
+        - :class:`MemberPlace` — chained ``a.b.c`` dot on a struct-value
+          member.  Evaluates ``PlaceLoad(place.base)`` (the intermediate
+          struct address) into BX and returns it, *base_is_register* True.
+        """
+        base = place.base
+        member_name = place.member_name
+        line = place.line
+        # Dot access on a named struct value: ``obj.field``.
+        if isinstance(base, VariablePlace):
+            struct_type = self.variable_types.get(base.name)
+            if struct_type is None:
+                message = f"undefined variable '{base.name}'"
+                raise CompileError(message, line=line)
+            if struct_type.endswith("*") or not struct_type.startswith("struct "):
+                message = f"'.' requires a struct value, got type '{struct_type}'"
+                raise CompileError(message, line=line)
+            tag = struct_type[7:]
+            info = self._lookup_struct_field(tag, member_name, line)
+            base_operand = self._resolve_struct_value_base(base.name, line=line)
+            return base_operand, False, info
+        # Arrow access on a named pointer: ``ptr->field``.
+        if isinstance(base, DereferencePlace) and isinstance(base.pointer, VariablePlace):
+            object_name = base.pointer.name
+            info = self._resolve_member_index_layout(
+                arrow=True,
+                line=line,
+                member_name=member_name,
+                object_name=object_name,
+            )
+            base_register = self._load_member_base(object_name)
+            return base_register, True, info
+        # Arrow access through an arbitrary pointer expression:
+        # ``((struct T *)e)->field`` or chained ``a->b.c`` (DereferencePlace
+        # wrapping a PlaceLoad of the inner pointer member).
+        if isinstance(base, DereferencePlace):
+            pointer_expression = base.pointer
+            base_type = self._expression_type(pointer_expression)
+            if not base_type.startswith("struct ") or not base_type.endswith("*"):
+                message = f"'->' requires a pointer to struct, got type '{base_type}'"
+                raise CompileError(message, line=line)
+            tag = base_type[7:-1].rstrip()
+            info = self._lookup_struct_field(tag, member_name, line)
+            if (
+                isinstance(pointer_expression, Cast)
+                and isinstance(pointer_expression.expression, AddressOf)
+                and pointer_expression.expression.var.name in self.locals
+            ):
+                direct_address = self._local_address(pointer_expression.expression.var.name)
+                return direct_address, False, info
+            self.generate_expression(pointer_expression)
+            self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
+            self.ax_clear()
+            return self.target.bx_register, True, info
+        # Chained dot on a struct-value member: ``a.b.c`` (or ``a->b.c`` where
+        # the inner ``a->b`` yields a struct-value address).
+        if isinstance(base, MemberPlace):
+            base_type = self._place_type(base)
+            if not base_type.startswith("struct ") or base_type.endswith("*"):
+                message = f"'.' requires a struct value, got type '{base_type}'"
+                raise CompileError(message, line=line)
+            tag = base_type[7:]
+            info = self._lookup_struct_field(tag, member_name, line)
+            self.ax_clear()
+            self.generate_expression(PlaceLoad(line=line, place=base))
+            self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
+            self.ax_clear()
+            return self.target.bx_register, True, info
+        message = "unsupported member Place base in _resolve_member_place_info"
+        raise CompileError(message, line=line)
 
     def _resolve_place(self, place: Place, /) -> PlaceAddress:
         """Emit dynamic-offset code (into BX when needed); return a PlaceAddress.
@@ -4555,455 +5067,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # reload happens naturally.
         if self._peephole_will_strand_ax():
             self.ax_local = None
-
-    def generate_member_access(self, expression: MemberAccess, /) -> None:
-        """Generate code for ``ptr->field`` or ``obj.field`` as an rvalue.
-
-        The pointer form (``ptr->field``) loads the base via the pointer
-        variable.  The dot form (``obj.field``) is supported only for
-        file-scope struct globals where the address of the struct is a
-        compile-time symbol (``[_g_obj+offset]``); for those, no base
-        register is needed.
-
-        When ``expression.base_expr`` is set (the ``(struct T *)expr``
-        cast form), the base pointer is materialised by evaluating that
-        expression into BX/EBX; the field load then proceeds the same
-        way as the named-variable form.
-        """
-        if expression.base_expr is not None:
-            self._generate_member_access_via_expr(expression)
-            return
-        object_name = expression.object_name
-        struct_type = self.variable_types.get(object_name)
-        if struct_type is None:
-            message = f"undefined variable '{object_name}'"
-            raise CompileError(message, line=expression.line)
-        # Dot-access path: ``obj.field`` on a file-scope struct global.
-        # The base address resolves to the symbol literal ``_g_<obj>``
-        # (or the asm_name target / extern-resolved name); the field load
-        # just adds the field offset.
-        if not expression.arrow:
-            if struct_type.endswith("*") or not struct_type.startswith("struct "):
-                message = f"'.' requires a struct value, got type '{struct_type}'"
-                raise CompileError(message, line=expression.line)
-            base_operand = self._resolve_struct_value_base(object_name, line=expression.line)
-            tag = struct_type[7:]
-            layout = self.struct_layouts.get(tag)
-            if layout is None:
-                message = f"unknown struct '{tag}'"
-                raise CompileError(message, line=expression.line)
-            if expression.member_name not in layout:
-                message = f"struct '{tag}' has no field '{expression.member_name}'"
-                raise CompileError(message, line=expression.line)
-            info = layout[expression.member_name]
-            offset = info.byte_offset
-            field_size = info.field_size
-            element_size = info.element_size
-            is_array_field = field_size != element_size
-            is_struct_value = info.type_name.startswith("struct ") and not info.type_name.endswith("*")
-            self.ax_clear()
-            if is_array_field or is_struct_value:
-                if object_name in self.global_scalars:
-                    # Global: load address as immediate (label arithmetic).
-                    if offset:
-                        self.emit(f"        mov {self.target.acc}, {base_operand}+{offset}")
-                    else:
-                        self.emit(f"        mov {self.target.acc}, {base_operand}")
-                # Local: use lea against the frame base.
-                elif offset:
-                    self.emit(f"        lea {self.target.acc}, [{base_operand}+{offset}]")
-                else:
-                    self.emit(f"        lea {self.target.acc}, [{base_operand}]")
-                self.ax_clear()
-                return
-            allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
-            if field_size not in allowed_sizes:
-                message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
-                raise CompileError(message, line=expression.line)
-            addr = self._build_address(base_operand, offset)
-            if info.bit_width is not None:
-                self._emit_bitfield_read(info, addr=addr)
-                return
-            self._emit_field_load(addr=addr, field_size=field_size)
-            self.ax_clear()
-            return
-        info = self._resolve_member_index_layout(
-            arrow=True,
-            line=expression.line,
-            member_name=expression.member_name,
-            object_name=object_name,
-        )
-        offset = info.byte_offset
-        field_size = info.field_size
-        element_size = info.element_size
-        is_array_field = field_size != element_size
-        is_struct_value = info.type_name.startswith("struct ") and not info.type_name.endswith("*")
-        # Array fields and embedded struct values evaluate to the
-        # field's address (so callers can chain ``.subfield``, pass
-        # them to memcpy / memcmp, or a function expecting a pointer).
-        if is_array_field or is_struct_value:
-            self.ax_clear()
-            base_reg = self._load_member_base(object_name)
-            if offset:
-                self.emit(f"        lea {self.target.acc}, [{base_reg}+{offset}]")
-            else:
-                self.emit(f"        mov {self.target.acc}, {base_reg}")
-            self.ax_clear()
-            return
-        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
-        if field_size not in allowed_sizes:
-            message = f"reading '{expression.member_name}' (size {field_size}) not yet supported; use asm()"
-            raise CompileError(message, line=expression.line)
-        self.ax_clear()
-        base_reg = self._load_member_base(object_name)
-        addr = self._build_address(base_reg, offset)
-        if info.bit_width is not None:
-            self._emit_bitfield_read(info, addr=addr)
-            return
-        self._emit_field_load(addr=addr, field_size=field_size)
-        self.ax_clear()
-
-    def generate_member_address_of(self, expression: MemberAddressOf, /) -> None:
-        """Generate code for ``&obj.field`` or ``&ptr->field``.
-
-        Bitfield members have no addressable storage and are always rejected
-        with a :class:`~cc.errors.CompileError`.  Both file-scope struct
-        globals (``_g_obj + offset`` via ``mov``) and local struct values
-        (``[ebp-N+offset]`` via ``lea``) are supported.  The arrow form
-        loads the base pointer first and then adds the field offset.
-        """
-        object_name = expression.object_name
-        struct_type = self.variable_types.get(object_name)
-        if struct_type is None:
-            message = f"undefined variable '{object_name}'"
-            raise CompileError(message, line=expression.line)
-        if expression.arrow:
-            if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
-                message = f"'->' requires a pointer to struct, got type '{struct_type}'"
-                raise CompileError(message, line=expression.line)
-            tag = struct_type[7:-1]
-        else:
-            if struct_type.endswith("*"):
-                message = "'&obj.field' requires a struct value, not a pointer; use '&ptr->field' or '&(*ptr).field'"
-                raise CompileError(message, line=expression.line)
-            if not struct_type.startswith("struct "):
-                message = f"'.' requires a struct value, got type '{struct_type}'"
-                raise CompileError(message, line=expression.line)
-            tag = struct_type[7:]
-        layout = self.struct_layouts.get(tag)
-        if layout is None:
-            message = f"unknown struct '{tag}'"
-            raise CompileError(message, line=expression.line)
-        info = layout.get(expression.member_name)
-        if info is None:
-            message = f"struct '{tag}' has no field '{expression.member_name}'"
-            raise CompileError(message, line=expression.line)
-        if info.bit_width is not None:
-            message = f"cannot take address of bitfield '{expression.member_name}'"
-            raise CompileError(message, line=expression.line)
-        if expression.arrow:
-            self.ax_clear()
-            self._emit_load_var(object_name, register=self.target.acc)
-            if info.byte_offset:
-                self.emit(f"        add {self.target.acc}, {info.byte_offset}")
-            self.ax_clear()
-            return
-        # Non-bitfield dot form: emit the field address.
-        if object_name in self.global_scalars:
-            base_label = self._local_address(object_name)
-            if info.byte_offset:
-                self.emit(f"        lea {self.target.acc}, [{base_label}+{info.byte_offset}]")
-            else:
-                self.emit(f"        lea {self.target.acc}, [{base_label}]")
-        elif object_name in self.locals:
-            frame_offset = self.locals[object_name]
-            if info.byte_offset:
-                self.emit(f"        lea {self.target.acc}, [ebp-{frame_offset}+{info.byte_offset}]")
-            else:
-                self.emit(f"        lea {self.target.acc}, [ebp-{frame_offset}]")
-        else:
-            message = f"undefined variable '{object_name}'"
-            raise CompileError(message, line=expression.line)
-        self.ax_clear()
-
-    def generate_member_assign(self, statement: MemberAssign, /) -> None:
-        """Generate code for ``ptr->field = expr;`` or ``obj.field = expr;``.
-
-        The dot form is supported on file-scope struct globals; the
-        target address resolves to ``[_g_obj+offset]`` directly.
-
-        When ``base_expr`` is set (chained access like ``a->b.c = v;``),
-        the base expression is evaluated first to produce the address of
-        the intermediate struct, then the final field store proceeds at
-        the appropriate offset from that address.
-        """
-        if statement.base_expr is not None:
-            self._generate_member_assign_via_expr(statement)
-            return
-        object_name = statement.object_name
-        struct_type = self.variable_types.get(object_name)
-        if struct_type is None:
-            message = f"undefined variable '{object_name}'"
-            raise CompileError(message, line=statement.line)
-        if not statement.arrow:
-            if struct_type.endswith("*") or not struct_type.startswith("struct "):
-                message = f"'.' requires a struct value, got type '{struct_type}'"
-                raise CompileError(message, line=statement.line)
-            base_operand = self._resolve_struct_value_base(object_name, line=statement.line)
-            tag = struct_type[7:]
-            layout = self.struct_layouts.get(tag)
-            if layout is None:
-                message = f"unknown struct '{tag}'"
-                raise CompileError(message, line=statement.line)
-            if statement.member_name not in layout:
-                message = f"struct '{tag}' has no field '{statement.member_name}'"
-                raise CompileError(message, line=statement.line)
-            info = layout[statement.member_name]
-            offset = info.byte_offset
-            field_size = info.field_size
-            addr = self._build_address(base_operand, offset)
-            if info.bit_width is not None:
-                if info.bit_width == 1 and isinstance(statement.expr, Int) and statement.expr.value in (0, 1):
-                    self._emit_bitfield_write_literal(info, addr=addr, value=statement.expr.value)
-                    return
-                # Const-fold: literal rhs on a known-constant local byte.
-                # Compute the new byte entirely at compile time and emit a
-                # single mov byte without a preceding mov eax load.  This
-                # keeps the store consecutive with adjacent mov-byte emits
-                # so the last-write-wins peephole in emit() can fire.
-                if isinstance(statement.expr, Int):
-                    slot = self._parse_local_byte_addr(addr)
-                    if slot is not None and slot in self.known_local_bytes:
-                        field_mask = ((1 << info.bit_width) - 1) << info.bit_offset
-                        clear_mask = (~field_mask) & 0xFF
-                        known = self.known_local_bytes[slot]
-                        rhs = statement.expr.value & ((1 << info.bit_width) - 1)
-                        new_byte = (known & clear_mask) | (rhs << info.bit_offset)
-                        self.emit(f"        mov byte {addr}, {new_byte}")
-                        return
-                self.ax_clear()
-                self.generate_expression(statement.expr)  # rhs → EAX (low byte = AL)
-                self._emit_bitfield_write(info, addr=addr)
-                return
-            allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
-            if field_size not in allowed_sizes:
-                message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
-                raise CompileError(message, line=statement.line)
-            self.ax_clear()
-            self.generate_expression(statement.expr)
-            self._emit_field_store(addr=addr, field_size=field_size)
-            return
-        info = self._resolve_member_index_layout(
-            arrow=True,
-            line=statement.line,
-            member_name=statement.member_name,
-            object_name=object_name,
-        )
-        offset = info.byte_offset
-        field_size = info.field_size
-        if info.bit_width is not None:
-            # Peephole: 1-bit field with a literal 0 / 1 rhs — no expression
-            # evaluation needed, so resolve the base register and addr first.
-            if info.bit_width == 1 and isinstance(statement.expr, Int) and statement.expr.value in (0, 1):
-                base_reg = self._load_member_base(object_name)
-                addr = self._build_address(base_reg, offset)
-                self._emit_bitfield_write_literal(info, addr=addr, value=statement.expr.value)
-                return
-            # General read-modify-write.  Evaluate rhs first so that
-            # generate_expression cannot clobber the base register we load next.
-            self.ax_clear()
-            self.generate_expression(statement.expr)  # rhs → EAX (low byte = AL)
-            # If SI still holds the struct pointer (no intervening call), use it
-            # directly as the base register to avoid a BX round-trip.
-            base_reg = self._load_member_base(object_name)
-            addr = self._build_address(base_reg, offset)
-            self._emit_bitfield_write(info, addr=addr)
-            return
-        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
-        if field_size not in allowed_sizes:
-            message = f"writing '{statement.member_name}' (size {field_size}) not yet supported; use asm()"
-            raise CompileError(message, line=statement.line)
-        self.ax_clear()
-        self.generate_expression(statement.expr)
-        # If SI still holds the struct pointer (no intervening call), use it
-        # directly as the base register to avoid a BX round-trip.
-        base_reg = self._load_member_base(object_name)
-        addr = self._build_address(base_reg, offset)
-        self._emit_field_store(addr=addr, field_size=field_size)
-
-    def generate_member_index(self, expression: MemberIndex, /) -> None:
-        """Generate code for ``ptr->field[index]`` or ``obj.field[index]``.
-
-        For inline-array fields, loads one element from ``base +
-        field_offset + index * element_size``.  For pointer fields,
-        loads the pointer from ``[base + field_offset]`` and then
-        loads one element of the pointee type from ``ptr + index *
-        pointee_size``.  Supported element sizes: 1, 2, and 4 (the
-        last only for pointer fields with int/pointer pointee).
-        Constant indices fold into the displacement.
-        """
-        info = self._resolve_member_index_layout(
-            arrow=expression.arrow,
-            line=expression.line,
-            member_name=expression.member_name,
-            object_name=expression.object_name,
-        )
-        if info.bit_width is not None:
-            message = f"indexing bitfield '{expression.member_name}' is not supported"
-            raise CompileError(message, line=expression.line)
-        object_name = expression.object_name
-        element_size, is_pointer_field = self._member_index_element_size(info)
-        # The element-size restriction only constrains the value *load*
-        # (emit_byte_load_zx / a word/dword mov).  The ``&obj.field[i]``
-        # address-of form just lea's the element address, so any element
-        # size is fine there — the index is scaled with a general imul.
-        allowed_sizes = (1, 2, 4) if is_pointer_field else (1, 2)
-        if not expression.address_of and element_size not in allowed_sizes:
-            message = f"indexing '{expression.member_name}' (element size {element_size}) not supported"
-            raise CompileError(message, line=expression.line)
-        field_offset = info.byte_offset
-
-        def emit_load(addr: str) -> None:
-            # ``&obj.field[i]`` wants the element address, not its value.
-            if expression.address_of:
-                self.emit(f"        lea {self.target.acc}, {addr}")
-            elif element_size == 1:
-                self.emit_byte_load_zx(addr)
-            else:
-                self.emit(f"        mov {self.target.acc}, {addr}")
-
-        # Constant index: fold offset + index*element_size into a single displacement
-        # (inline-array case) or into the pointer-load displacement (pointer case).
-        if isinstance(expression.index, Int):
-            self.ax_clear()
-            if expression.arrow and self.si_local == object_name:
-                base_reg = self.target.si_register
-            else:
-                self._emit_member_index_base(arrow=expression.arrow, object_name=object_name, register=self.target.bx_register)
-                base_reg = self.target.bx_register
-            if is_pointer_field:
-                # Load pointer, then offset by index*element_size.
-                ptr_addr = self._build_address(base_reg, field_offset)
-                self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
-                disp = expression.index.value * element_size
-                addr = self._build_address(self.target.bx_register, disp)
-            else:
-                total_offset = field_offset + expression.index.value * element_size
-                addr = self._build_address(base_reg, total_offset)
-            emit_load(addr)
-            self.ax_clear()
-            return
-        # Variable index: AX = index, scale, add base+offset, load.
-        self.ax_clear()
-        self.generate_expression(expression.index)
-        if element_size in (2, 4):
-            shift = 1 if element_size == 2 else 2
-            self.emit(f"        shl {self.target.acc}, {shift}")
-        elif element_size != 1:
-            # Arbitrary element size — only reachable for the address-of
-            # form (a struct-sized element); scale with a general multiply.
-            self.emit(f"        imul {self.target.acc}, {element_size}")
-        # Save scaled index, load base.
-        self.emit(f"        push {self.target.acc}")
-        if expression.arrow and self.si_local == object_name:
-            self.emit(f"        mov {self.target.bx_register}, {self.target.si_register}")
-        else:
-            self._emit_member_index_base(arrow=expression.arrow, object_name=object_name, register=self.target.bx_register)
-        if is_pointer_field:
-            ptr_addr = self._build_address(self.target.bx_register, field_offset)
-            self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
-        self.emit(f"        pop {self.target.acc}")
-        self.emit(f"        add {self.target.bx_register}, {self.target.acc}")
-        if is_pointer_field:
-            addr = f"[{self.target.bx_register}]"
-        else:
-            addr = self._build_address(self.target.bx_register, field_offset)
-        emit_load(addr)
-        self.ax_clear()
-
-    def generate_member_index_assign(self, statement: MemberIndexAssign, /) -> None:
-        """Generate code for ``ptr->field[index] = expr;``.
-
-        Mirrors :meth:`generate_member_index` on the store side.  For
-        inline-array fields, stores at ``base + field_offset + index *
-        element_size``; for pointer fields, loads the pointer first
-        and stores at ``ptr + index * pointee_size``.  Bitfield index
-        assigns and the dot form on local struct values are rejected.
-        """
-        info = self._resolve_member_index_layout(
-            arrow=statement.arrow,
-            line=statement.line,
-            member_name=statement.member_name,
-            object_name=statement.object_name,
-        )
-        if info.bit_width is not None:
-            message = f"indexed assignment to bitfield '{statement.member_name}' is not supported"
-            raise CompileError(message, line=statement.line)
-        object_name = statement.object_name
-        element_size, is_pointer_field = self._member_index_element_size(info)
-        allowed_sizes = (1, 2, 4) if is_pointer_field else (1, 2)
-        if element_size not in allowed_sizes:
-            message = f"indexed assignment to '{statement.member_name}' (element size {element_size}) not supported"
-            raise CompileError(message, line=statement.line)
-        field_offset = info.byte_offset
-
-        def emit_store(addr: str) -> None:
-            if element_size == 1:
-                self.emit(f"        mov byte {addr}, al")
-            elif element_size == 2 and self.target.int_size == 4:
-                self.emit(f"        mov word {addr}, ax")
-            else:
-                self.emit(f"        mov {addr}, {self.target.acc}")
-
-        # Constant index: fold into displacement.
-        if isinstance(statement.index, Int):
-            self.ax_clear()
-            self.generate_expression(statement.expr)  # rhs → EAX
-            if statement.arrow and self.si_local == object_name:
-                base_reg = self.target.si_register
-            else:
-                self._emit_member_index_base(arrow=statement.arrow, object_name=object_name, register=self.target.bx_register)
-                base_reg = self.target.bx_register
-            if is_pointer_field:
-                ptr_addr = self._build_address(base_reg, field_offset)
-                self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
-                disp = statement.index.value * element_size
-                addr = self._build_address(self.target.bx_register, disp)
-            else:
-                total_offset = field_offset + statement.index.value * element_size
-                addr = self._build_address(base_reg, total_offset)
-            emit_store(addr)
-            self.ax_clear()
-            return
-        # Variable index.  Evaluate rhs first into EAX, push to preserve
-        # across the index evaluation, then compute the address, then pop
-        # the value back into EAX for the store.
-        self.ax_clear()
-        self.generate_expression(statement.expr)
-        self.emit(f"        push {self.target.acc}")  # save rhs
-        self.ax_clear()
-        self.generate_expression(statement.index)  # AX = index
-        if element_size in (2, 4):
-            shift = 1 if element_size == 2 else 2
-            self.emit(f"        shl {self.target.acc}, {shift}")
-        # Save scaled index, load base.
-        self.emit(f"        push {self.target.acc}")
-        if statement.arrow and self.si_local == object_name:
-            self.emit(f"        mov {self.target.bx_register}, {self.target.si_register}")
-        else:
-            self._emit_member_index_base(arrow=statement.arrow, object_name=object_name, register=self.target.bx_register)
-        if is_pointer_field:
-            ptr_addr = self._build_address(self.target.bx_register, field_offset)
-            self.emit(f"        mov {self.target.bx_register}, {ptr_addr}")
-        self.emit(f"        pop {self.target.acc}")  # scaled index
-        self.emit(f"        add {self.target.bx_register}, {self.target.acc}")
-        self.emit(f"        pop {self.target.acc}")  # restore rhs
-        if is_pointer_field:
-            addr = f"[{self.target.bx_register}]"
-        else:
-            addr = self._build_address(self.target.bx_register, field_offset)
-        emit_store(addr)
-        self.ax_clear()
 
     def scan_locals(self, statements: list[Node], /, *, top_level: bool = True) -> None:
         """Recursively find variable declarations.
