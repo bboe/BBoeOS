@@ -1,8 +1,22 @@
 # cc.py Place Refactor — Plan 5 / Stage 2 Design: structured operands for ir.Access
 
-**Status:** Designed (brainstormed + approved). Supersedes the decision-spike's
-original "Stage 2 = optimizer port (rewrite the rep-string matcher)" framing —
-see "Resequencing" below.
+**Status:** MERGED INTO STAGE 3 — not implemented as a standalone stage.
+Planning revealed that operand lowering's consumers (CSE / LICM / SSA) all live
+in Stage 3, so lowering in a standalone Stage 2 is pure byte cost with no
+Stage-2 benefit and would fail the byte-efficiency gate on compound-index
+accesses (e.g. `names[i][j+1]`: `j+1` lowered to a temp + load vs today's inline
+eval, with nothing in Stage 2 to recover it). The two genuine Stage-2 wins
+(copy-prop into accesses; dead-pure-load DCE) need only the
+`substitute_access_operand` primitive over the *existing* access AST — no
+lowering. Decision: fold those two wins, operand lowering, the `Index` fold,
+recursive `_resolve_place`, CSE/LICM/SSA-over-accesses, and the rep-string
+matcher rewrite into a single Stage 3. This document's operand model, the two
+primitives (`iter_access_operands` / `substitute_access_operand`), the
+linear-pass changes, and the byte-efficiency analysis are retained as **inputs
+to the Stage 3 design**, not as a separate deliverable.
+
+Original framing below (superseded as a standalone stage; content reused by
+Stage 3):
 
 **Goal:** Give `ir.Access` first-class IR operands by lowering every
 value-bearing sub-expression of a migrated Place to an IR temp, and teach the
