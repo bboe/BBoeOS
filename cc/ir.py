@@ -367,10 +367,10 @@ class Builder:
         """Return the attribute name that holds the RHS expression for any *Assign node.
 
         Every ``*Assign`` dataclass in ``cc/ast_nodes.py`` exposes the RHS
-        as ``expr``, except :class:`~ast_nodes.PointerDereferenceAssign`
-        which uses ``value``.
+        as ``expr``, except :class:`~ast_nodes.PlaceStore` which uses
+        ``value``.
         """
-        if isinstance(node, ast_nodes.PointerDereferenceAssign):
+        if isinstance(node, ast_nodes.PlaceStore):
             return "value"
         return "expr"
 

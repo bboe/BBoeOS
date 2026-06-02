@@ -18,6 +18,18 @@ index; &member and &member[i]; bitfield read; bitfield general write;
 1-bit-literal bitfield write; const-folded bitfield write into a known local
 byte; postfix ++ on a member; and prefix -- on a member.
 
+The fixture is further extended to capture the legacy output of the full
+dereference family ahead of its Plan 3 conversion onto the recursive Place
+abstraction.  These deref probes cover: *p read/store for char (byte), int
+(full) and unsigned short (word) pointees; the *(T *)&local AddressOf-of-local
+fast path for byte and word widths (read and write); the general *(T *)e
+read/store path for byte and word widths; a[i][j] double indexing for byte
+(char *[]), full (int *[]) and word (unsigned short *[]) pointees with constant,
+variable and general inner indices; postfix/prefix ++/-- deref reads and stores;
+the purity traps of a deref read and a double-index read used in an if
+condition; (*p = v), (*p++ = v) and (*(T *)e = v) assignment-as-expression
+values; and sizeof(*p) / sizeof(*(unsigned short *)e).
+
 Asserts the cc.py-emitted assembly is identical to a checked-in golden file.
 Regenerate the golden deliberately with BBOE_UPDATE_GOLDEN=1 only when output
 is intended to change.
@@ -102,6 +114,49 @@ int probe_bitfield_constfold(void) { struct flags local; local.a = 0; local.b = 
 int probe_member_incdec(struct buf *b) { int pre = b->n++; return pre + b->n; }
 int probe_member_predec(struct buf *b) { return --b->n; }
 int probe_addr_of_dot(void) { return (int)&g_outer.in; }
+
+/* --- Plan 3 deref-family probes (captured from the legacy compiler) --- */
+struct flags2 { unsigned char hi; unsigned char lo; };
+
+int probe_deref_read_char(char *p) { return *p; }
+int probe_deref_read_int(int *p) { return *p; }
+int probe_deref_read_ushort(unsigned short *p) { return *p; }
+int probe_deref_store_char(char *p, int v) { *p = v; return *p; }
+int probe_deref_store_int(int *p, int v) { *p = v; return *p; }
+int probe_deref_store_ushort(unsigned short *p, int v) { *p = v; return *p; }
+
+int probe_cast_deref_uchar_local(void) { struct flags2 s; s.hi = 7; return *(unsigned char *)&s; }
+int probe_cast_deref_ushort_local(void) { int box; box = 0; return *(unsigned short *)&box; }
+int probe_cast_deref_uchar_expr(char *base, int off) { return *(unsigned char *)(base + off); }
+int probe_cast_deref_ushort_expr(char *base, int off) { return *(unsigned short *)(base + off); }
+void probe_cast_deref_store_uchar_local(int v) { struct flags2 s; *(unsigned char *)&s = v; }
+void probe_cast_deref_store_uchar_expr(char *base, int off, int v) { *(unsigned char *)(base + off) = v; }
+void probe_cast_deref_store_ushort_expr(char *base, int off, int v) { *(unsigned short *)(base + off) = v; }
+
+char *names[4];
+int *ints[4];
+unsigned short *words[4];
+int probe_double_index_byte_const(void) { return names[1][2]; }
+int probe_double_index_byte_var(int i, int j) { return names[i][j]; }
+int probe_double_index_byte_expr(int i, int j) { return names[i][j + 1]; }
+int probe_double_index_int_const(void) { return ints[1][2]; }
+int probe_double_index_int_var(int i, int j) { return ints[i][j]; }
+int probe_double_index_word_var(int i, int j) { return words[i][j]; }
+
+int probe_deref_postinc_read(int *p) { int a = *p++; return a; }
+int probe_deref_preinc_read(int *p) { int a = *++p; return a; }
+int probe_deref_postdec_read(char *p) { int a = *p--; return a; }
+int probe_deref_predec_read(int *p) { int a = *--p; return a; }
+void probe_deref_postinc_store(char *out, int v) { *out++ = v; }
+void probe_deref_preinc_store(int *out, int v) { *++out = v; }
+
+int probe_deref_in_if(int *p) { if (*p) { return 1; } return 0; }
+int probe_double_index_in_if(int i, int j) { if (ints[i][j]) { return 1; } return 0; }
+int probe_deref_assign_expr(int *p, int v) { int y = (*p = v); return y; }
+int probe_deref_incassign_expr(char *out, int v) { int y = (*out++ = v); return y; }
+int probe_cast_deref_assign_expr(char *base, int off, int v) { int y = (*(unsigned char *)(base + off) = v); return y; }
+int probe_sizeof_deref(int *p) { return sizeof(*p); }
+int probe_sizeof_cast_deref_expr(char *base, int off) { return sizeof(*(unsigned short *)(base + off)); }
 """
 
 

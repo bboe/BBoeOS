@@ -35,7 +35,6 @@ from cc.ast_nodes import (
     Char,
     Continue,
     DerefIncrement,
-    DoubleIndex,
     EnumDecl,
     If,
     IncrementDecrement,
@@ -982,14 +981,6 @@ class CodeGeneratorBase:
                 return "pointer"
         return "integer"
 
-    def _classify_double_index_operand(self, node: DoubleIndex, /) -> str:
-        # ``name[outer][inner]`` for ``T *name[N]`` yields the pointee
-        # type of ``T*`` — that's ``char`` for ``char *foo[]``,
-        # ``integer`` for ``int *foo[]`` / ``unsigned T *foo[]``.
-        if self.variable_types.get(node.array.name) == "char*":
-            return "char"
-        return "integer"
-
     def _classify_index_operand(self, node: Index, /) -> str:
         name = node.array.name
         variable_type = self.variable_types.get(name)
@@ -1043,8 +1034,6 @@ class CodeGeneratorBase:
             return "char"
         if isinstance(node, DerefIncrement):
             return self._classify_deref_increment_operand(node)
-        if isinstance(node, DoubleIndex):
-            return self._classify_double_index_operand(node)
         if isinstance(node, Index):
             return self._classify_index_operand(node)
         if isinstance(node, Int):

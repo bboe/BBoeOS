@@ -1250,7 +1250,7 @@ def test_deref_postfix_decrement_char_pointer_read() -> None:
         bits=32,
     )
     body = asm.split("read_back:", 1)[1]
-    assert "movzx eax, byte [esi]" in body, f"expected byte-zero-extend load\n{asm}"
+    assert "movzx eax, byte [eax]" in body, f"expected compact byte zero-extend load\n{asm}"
     assert "dec dword [ebp-4]" in body, f"expected dec on char* slot\n{asm}"
 
 
@@ -1293,7 +1293,7 @@ def test_deref_postfix_increment_char_pointer_read() -> None:
         bits=32,
     )
     body = asm.split("read_byte:", 1)[1]
-    assert "movzx eax, byte [esi]" in body, f"expected byte-zero-extend load\n{asm}"
+    assert "movzx eax, byte [eax]" in body, f"expected compact byte zero-extend load\n{asm}"
     assert "inc dword [ebp-4]" in body, f"expected inc on char* slot\n{asm}"
 
 
@@ -1308,7 +1308,7 @@ def test_deref_postfix_increment_int_pointer_read() -> None:
         bits=32,
     )
     body = asm.split("read_word:", 1)[1]
-    assert "mov eax, [esi]" in body, f"expected 4-byte load through ESI\n{asm}"
+    assert "mov eax, [eax]" in body, f"expected 4-byte load through the accumulator\n{asm}"
     assert "add dword [ebp-4], 4" in body, f"expected int* bump by 4\n{asm}"
 
 
@@ -1329,9 +1329,9 @@ def test_deref_prefix_decrement_char_pointer_read() -> None:
     )
     body = asm.split("read_back:", 1)[1]
     decrement_index = body.find("dec dword [ebp-4]")
-    load_index = body.find("movzx eax, byte [esi]")
+    load_index = body.find("movzx eax, byte [eax]")
     assert decrement_index != -1, f"expected dec on char* slot\n{asm}"
-    assert load_index != -1, f"expected byte-zero-extend load\n{asm}"
+    assert load_index != -1, f"expected compact byte zero-extend load\n{asm}"
     assert decrement_index < load_index, f"expected dec before load (prefix order)\n{asm}"
 
 
@@ -1376,9 +1376,9 @@ def test_deref_prefix_increment_char_pointer_read() -> None:
     )
     body = asm.split("read_byte:", 1)[1]
     increment_index = body.find("inc dword [ebp-4]")
-    load_index = body.find("movzx eax, byte [esi]")
+    load_index = body.find("movzx eax, byte [eax]")
     assert increment_index != -1, f"expected inc on char* slot\n{asm}"
-    assert load_index != -1, f"expected byte-zero-extend load\n{asm}"
+    assert load_index != -1, f"expected compact byte zero-extend load\n{asm}"
     assert increment_index < load_index, f"expected inc before load (prefix order)\n{asm}"
 
 
@@ -1394,9 +1394,9 @@ def test_deref_prefix_increment_int_pointer_read() -> None:
     )
     body = asm.split("read_word:", 1)[1]
     increment_index = body.find("add dword [ebp-4], 4")
-    load_index = body.find("mov eax, [esi]")
+    load_index = body.find("mov eax, [eax]")
     assert increment_index != -1, f"expected int* bump by 4\n{asm}"
-    assert load_index != -1, f"expected 4-byte load through ESI\n{asm}"
+    assert load_index != -1, f"expected 4-byte load through the accumulator\n{asm}"
     assert increment_index < load_index, f"expected bump before load (prefix order)\n{asm}"
 
 

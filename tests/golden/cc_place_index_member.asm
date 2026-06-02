@@ -464,17 +464,464 @@ probe_addr_of_dot:
         pop ebp
         ret
 
+probe_deref_read_char:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov esi, [ebp-4]
+        movzx eax, byte [esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_read_int:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov esi, [ebp-4]
+        mov eax, [esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_read_ushort:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov esi, [ebp-4]
+        movzx eax, word [esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_store_char:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov eax, [ebp-8]
+        mov esi, [ebp-4]
+        mov [esi], al
+        movzx eax, byte [esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_store_int:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov eax, [ebp-8]
+        mov esi, [ebp-4]
+        mov [esi], eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_store_ushort:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov eax, [ebp-8]
+        mov esi, [ebp-4]
+        mov [esi], eax
+        movzx eax, word [esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_cast_deref_uchar_local:
+        push ebp
+        mov ebp, esp
+        sub esp, 6
+        mov eax, 7
+        mov byte [ebp-2], al
+        movzx eax, byte [ebp-2]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_cast_deref_ushort_local:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        xor eax, eax
+        mov [ebp-4], eax
+        movzx eax, word [ebp-4]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_cast_deref_uchar_expr:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov eax, [ebp-4]
+        add eax, [ebp-8]
+        movzx eax, byte [eax]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_cast_deref_ushort_expr:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov eax, [ebp-4]
+        add eax, [ebp-8]
+        movzx eax, word [eax]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_cast_deref_store_uchar_local:
+        push ebp
+        mov ebp, esp
+        pop ebp
+        ret
+
+probe_cast_deref_store_uchar_expr:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov [ebp-12], ecx
+        mov eax, [ebp-12]
+        push eax
+        mov eax, [ebp-4]
+        add eax, [ebp-8]
+        mov esi, eax
+        pop eax
+        mov [esi], al
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_cast_deref_store_ushort_expr:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov [ebp-12], ecx
+        mov eax, [ebp-12]
+        push eax
+        mov eax, [ebp-4]
+        add eax, [ebp-8]
+        mov esi, eax
+        pop eax
+        mov word [esi], ax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_double_index_byte_const:
+        push ebp
+        mov ebp, esp
+        mov eax, [_g_names+4]
+        mov esi, eax
+        movzx eax, byte [esi+2]
+        pop ebp
+        ret
+
+probe_double_index_byte_var:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_names+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        add esi, eax
+        movzx eax, byte [esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_double_index_byte_expr:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_names+esi]
+        mov esi, eax
+        push esi
+        mov eax, [ebp-8]
+        inc eax
+        pop esi
+        add esi, eax
+        movzx eax, byte [esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_double_index_int_const:
+        push ebp
+        mov ebp, esp
+        mov eax, [_g_ints+4]
+        mov esi, eax
+        mov eax, [esi+8]
+        pop ebp
+        ret
+
+probe_double_index_int_var:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_ints+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        mov eax, [esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_double_index_word_var:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_words+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        add eax, eax
+        add esi, eax
+        mov eax, [esi]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_postinc_read:
+        push ebp
+        mov ebp, esp
+        sub esp, 4
+        mov [ebp-4], eax
+        mov eax, [eax]
+        add dword [ebp-4], 4
+        mov edx, eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_preinc_read:
+        push ebp
+        mov ebp, esp
+        sub esp, 4
+        mov [ebp-4], eax
+        add dword [ebp-4], 4
+        mov eax, [ebp-4]
+        mov eax, [eax]
+        mov edx, eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_postdec_read:
+        push ebp
+        mov ebp, esp
+        sub esp, 4
+        mov [ebp-4], eax
+        movzx eax, byte [eax]
+        dec dword [ebp-4]
+        mov edx, eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_predec_read:
+        push ebp
+        mov ebp, esp
+        sub esp, 4
+        mov [ebp-4], eax
+        sub dword [ebp-4], 4
+        mov eax, [ebp-4]
+        mov eax, [eax]
+        mov edx, eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_postinc_store:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov eax, [ebp-8]
+        mov esi, [ebp-4]
+        mov [esi], al
+        inc dword [ebp-4]
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_preinc_store:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        add dword [ebp-4], 4
+        mov eax, [ebp-8]
+        mov esi, [ebp-4]
+        mov [esi], eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_in_if:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov esi, [ebp-4]
+        mov eax, [esi]
+        test eax, eax
+        je ._ir_endif39
+        mov eax, 1
+        mov esp, ebp
+        pop ebp
+        ret
+._ir_endif39:
+        xor eax, eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_double_index_in_if:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_ints+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        mov eax, [esi]
+        test eax, eax
+        je ._ir_endif41
+        mov eax, 1
+        mov esp, ebp
+        pop ebp
+        ret
+._ir_endif41:
+        xor eax, eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_assign_expr:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov eax, [ebp-8]
+        mov esi, [ebp-4]
+        mov [esi], eax
+        mov eax, [ebp-8]
+        mov edx, eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_deref_incassign_expr:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov eax, [ebp-8]
+        mov esi, [ebp-4]
+        mov [esi], al
+        inc dword [ebp-4]
+        mov edx, eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_cast_deref_assign_expr:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov [ebp-12], ecx
+        mov eax, [ebp-12]
+        push eax
+        mov eax, [ebp-4]
+        add eax, [ebp-8]
+        mov esi, eax
+        pop eax
+        mov [esi], al
+        mov edx, eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_sizeof_deref:
+        push ebp
+        mov ebp, esp
+        mov eax, 4
+        pop ebp
+        ret
+
+probe_sizeof_cast_deref_expr:
+        push ebp
+        mov ebp, esp
+        mov eax, 2
+        pop ebp
+        ret
+
 ;; --- global data ---
-        dd 214
+        dd 262
         dw 0B032h
 _program_end:
-_bss_end equ _program_end + 214
+_bss_end equ _program_end + 262
 ;; --- BSS (zero-initialized) ---
 _g_g_flags equ _program_end
 g_flags equ _g_g_flags
 _g_g_outer equ _program_end + 5
 g_outer equ _g_g_outer
-_g_points equ _program_end + 14
+_g_ints equ _program_end + 14
+ints equ _g_ints
+_g_names equ _program_end + 30
+names equ _g_names
+_g_points equ _program_end + 46
 points equ _g_points
-_g_wrecs equ _program_end + 118
+_g_words equ _program_end + 150
+words equ _g_words
+_g_wrecs equ _program_end + 166
 wrecs equ _g_wrecs

@@ -39,8 +39,7 @@ from cc.ast_nodes import (
     Compound,
     Conditional,
     Continue,
-    DerefAssign,
-    DoubleIndex,
+    DereferencePlace,
     DoWhile,
     Goto,
     If,
@@ -53,12 +52,14 @@ from cc.ast_nodes import (
     LogicalOr,
     Node,
     Param,
-    PointerDereferenceAssign,
+    PlaceLoad,
+    PlaceStore,
     Return,
     SizeofExpr,
     SizeofType,
     SizeofVar,
     String,
+    SubscriptPlace,
     Switch,
     TailCall,
     Var,
@@ -154,11 +155,6 @@ class LivenessAnalyzer:
             self._add_expression_uses(expression.then_expr, accumulator)
             self._add_expression_uses(expression.else_expr, accumulator)
             return
-        if isinstance(expression, DoubleIndex):
-            accumulator.add(expression.array.name)
-            self._add_expression_uses(expression.outer_index, accumulator)
-            self._add_expression_uses(expression.inner_index, accumulator)
-            return
         if isinstance(expression, Index):
             accumulator.add(expression.array.name)
             self._add_expression_uses(expression.index, accumulator)
@@ -170,12 +166,49 @@ class LivenessAnalyzer:
             self._add_expression_uses(expression.left, accumulator)
             self._add_expression_uses(expression.right, accumulator)
             return
+        if isinstance(expression, PlaceLoad):
+            self._add_place_uses(expression.place, accumulator)
+            return
         if isinstance(expression, Var):
             accumulator.add(expression.name)
             return
         if isinstance(expression, Node):
             message = f"liveness: unhandled expression node {type(expression).__name__}"
             raise LivenessAnalysisError(message)
+
+    def _add_place_uses(self, place: object, accumulator: set[str]) -> None:
+        """Record every ``Var`` read while addressing a deref-rooted *place*.
+
+        Scoped to the dereference shapes Plan 3 converts onto the recursive
+        ``Place`` tree.  Member-rooted places (``MemberPlace`` and a
+        ``SubscriptPlace`` over a ``MemberPlace``) are NOT modelled here:
+        they were left unhandled when the Member* family moved onto the
+        Place core, so any function that uses them already skips the auto-pin
+        optimization (the unhandled node raises ``LivenessAnalysisError``,
+        which the caller swallows).  Closing that gap would *enable* auto-pin
+        where it was off and change output, so this method preserves it by
+        raising for non-deref-rooted shapes.
+
+        Records the use sets for the deref shapes:
+
+        - ``DereferencePlace(Var(p))`` reads ``p``.
+        - ``DereferencePlace(expression)`` reads the expression's variables.
+        - ``SubscriptPlace`` over a ``DereferencePlace`` records the base's
+          uses and the index's uses; for ``name[i][j]`` this yields
+          ``{array, i, j}``.
+        """
+        if isinstance(place, DereferencePlace):
+            self._add_expression_uses(place.pointer, accumulator)
+            return
+        if isinstance(place, SubscriptPlace) and self._place_is_dereference_rooted(place.base):
+            self._add_place_uses(place.base, accumulator)
+            self._add_expression_uses(place.index, accumulator)
+            return
+        # Member-rooted (and any other) place shapes stay unmodelled so the
+        # auto-pin optimization remains off for functions that use them,
+        # exactly as before this plan.
+        message = f"liveness: unhandled place node {type(place).__name__}"
+        raise LivenessAnalysisError(message)
 
     def _build_control_flow_graph(self, body: list[Node], *, fallthrough: int) -> int:
         """Wire successor edges across *body*.
@@ -245,10 +278,6 @@ class LivenessAnalyzer:
             for argument in statement.args:
                 self._add_expression_uses(argument, statement_info.uses)
             return
-        if isinstance(statement, DerefAssign):
-            statement_info.uses.add(statement.pointer.name)
-            self._add_expression_uses(statement.expr, statement_info.uses)
-            return
         if isinstance(statement, (DoWhile, If, While)):
             self._add_expression_uses(statement.cond, statement_info.uses)
             return
@@ -261,8 +290,13 @@ class LivenessAnalyzer:
             self._add_expression_uses(statement.index, statement_info.uses)
             self._add_expression_uses(statement.expr, statement_info.uses)
             return
-        if isinstance(statement, PointerDereferenceAssign):
-            self._add_expression_uses(statement.address, statement_info.uses)
+        if isinstance(statement, PlaceStore) and self._place_is_dereference_rooted(statement.place):
+            # ``*p = v;`` / ``*(T *)e = v;`` — addressing *place* reads its
+            # pointer / address Vars and the RHS reads its own Vars, recorded
+            # via _add_place_uses.  Member-rooted PlaceStores fall through to
+            # the final raise so auto-pin stays off for them, exactly as
+            # before this plan.
+            self._add_place_uses(statement.place, statement_info.uses)
             self._add_expression_uses(statement.value, statement_info.uses)
             return
         if isinstance(statement, Return):
@@ -345,6 +379,19 @@ class LivenessAnalyzer:
                 self._number_children(case.body)
         elif isinstance(statement, Compound):
             self._number_children(statement.body)
+
+    def _place_is_dereference_rooted(self, place: object) -> bool:
+        """Return True when *place*'s addressing chain bottoms out at a ``DereferencePlace``.
+
+        Used to scope the liveness use/def modelling to the dereference
+        shapes Plan 3 owns; member-rooted shapes return False so they keep
+        raising ``LivenessAnalysisError`` (auto-pin stays off for them).
+        """
+        if isinstance(place, DereferencePlace):
+            return True
+        if isinstance(place, SubscriptPlace):
+            return self._place_is_dereference_rooted(place.base)
+        return False
 
     def _wire_statement(self, statement: Node, *, fallthrough: int) -> None:
         """Populate successor edges + control flow for *statement*."""
