@@ -132,7 +132,7 @@ def test_addressof_local_field_emits_lea(*, work: Path) -> None:
 
 
 def test_array_of_structs_indexed_access(*, work: Path) -> None:
-    """Reading ``arr[2].field`` from a local struct array uses frame-relative indexed addressing."""
+    """``arr[2].field`` on a local struct array folds the constant index into the frame displacement (no runtime imul)."""
     asm = compile_snippet(
         name="array_of_structs",
         source=(
@@ -148,8 +148,12 @@ def test_array_of_structs_indexed_access(*, work: Path) -> None:
     )
     wrap_body = asm.split("wrap:", 1)[1]
     wrap_body = wrap_body.split("\nmain:", 1)[0]
-    # Index 2 * sizeof(struct point) == 16 must appear as a factor.
-    assert "imul" in wrap_body.lower(), f"expected 'imul' for index * struct_size in wrap body:\n{wrap_body}"
+    # The recursive address resolver folds the constant index at compile time:
+    # arr[2].x == base + 2 * sizeof(struct point) (== 16) + offsetof(x) (== 0),
+    # so the element offset 16 lands directly in the frame displacement and no
+    # runtime ``imul`` for index * struct_size is emitted.
+    assert "imul" not in wrap_body.lower(), f"constant index should fold, not emit imul:\n{wrap_body}"
+    assert "+16" in wrap_body, f"expected folded element offset (2 * sizeof(point) == 16):\n{wrap_body}"
     # The frame-relative base must reference ebp.
     assert "ebp-" in wrap_body, f"expected 'ebp-N' frame-relative addressing in wrap body:\n{wrap_body}"
 

@@ -684,6 +684,14 @@ class EmissionMixin:
 
         Scale 1 is a no-op (byte stride); 2 emits ``add reg, reg``; 4
         emits ``shl reg, 2``.  Other widths fall back to ``imul``.
+
+        The fallback uses the two-operand ``imul reg, imm`` form (NASM
+        encodes it identically to the three-operand ``imul reg, reg, imm``
+        — e.g. both ``6B C0 26`` for stride 38).  The self-hosted assembler
+        in ``user/programs/asm.c`` only parses the two-operand spelling, so
+        emitting the three-operand form here breaks the asm.c self-host when
+        a struct-array stride (such as ``sizeof(struct Symbol)`` = 38) lands
+        in this branch.
         """
         if scale == 1:
             return
@@ -692,7 +700,7 @@ class EmissionMixin:
         elif scale == 4:
             self.emit(f"        shl {register}, 2")
         else:
-            self.emit(f"        imul {register}, {register}, {scale}")
+            self.emit(f"        imul {register}, {scale}")
 
     def _emit_scale_int_index(self, register: str, /) -> None:
         """Multiply *register* by ``self.target.int_size`` (2 or 4) in place.
@@ -1189,6 +1197,16 @@ class EmissionMixin:
         # store left ``ax_local`` == ``temp``) can short-circuit
         # its reload via :meth:`generate_expression`'s
         # ``Var(name=ax_local)`` fast path.
+        # Nested-Index array base: an array-of-pointers read whose own array
+        # is itself a subscript expression (e.g. ``grid[i0][i1]`` feeding the
+        # next ``[i2]``), produced by the arbitrary-depth array-of-pointers
+        # reconstruct.  The inner Index evaluates to a pointer in the
+        # accumulator; index off it with the pointee stride.  No ``vname``
+        # exists (there is no Var base), so this MUST precede the name-based
+        # paths below.
+        if isinstance(expression.array, Index):
+            self._generate_nested_index_expression(expression)
+            return
         vname = expression.array.name
         if vname in self.pointer_array_types:
             # A single subscript of a pointer-to-array ``int (*p)[3]`` is a
@@ -1332,7 +1350,10 @@ class EmissionMixin:
                     elif scale_size == 4:
                         emitter.emit(f"        shl {register}, 2")
                     else:
-                        emitter.emit(f"        imul {register}, {register}, {scale_size}")
+                        # Two-operand imul (NASM-identical encoding to the
+                        # three-operand form); the asm.c self-hosted assembler
+                        # only parses ``imul reg, imm``.
+                        emitter.emit(f"        imul {register}, {scale_size}")
 
                 # If the index is a pinned variable and the access is
                 # byte-sized, load it without clobbering SI.
@@ -1428,6 +1449,58 @@ class EmissionMixin:
             self.emit(f"{one_label}:")
             self.emit(f"        mov {self.target.acc}, 1")
         self.emit(f"{end_label}:")
+        self.ax_clear()
+
+    def _generate_nested_index_expression(self, expression: Index, /) -> None:
+        """Lower ``<inner-index-expr>[i]`` where the array is itself an ``Index``.
+
+        Produced by the arbitrary-depth array-of-pointers reconstruct
+        (``_reconstruct_double_index_place``): the inner ``Index`` reads one
+        pointer level of an array-of-pointers chain (``grid[i0][i1]``), and
+        this outer subscript indexes the resulting pointer.  Evaluate the
+        inner expression to a pointer in the accumulator, move it to SI, then
+        add ``index * sizeof(*pointer)`` and load the element.  Element width
+        derives from the inner expression's pointee type so a narrow or byte
+        pointee sizes its scale and load correctly.
+        """
+        pointer_type = self._expression_type(expression.array)
+        pointee_type = pointer_type[:-1].rstrip() if pointer_type.endswith("*") else pointer_type
+        is_byte = pointee_type in self.BYTE_TYPES
+        if is_byte:
+            stride = 1
+        elif pointee_type == "unsigned short" and self.target.int_size > 2:
+            stride = 2
+        else:
+            stride = self.target.int_size
+        si = self.target.si_register
+        # Evaluate the inner array-of-pointers read (the base pointer).
+        self.generate_expression(expression.array)
+        self.emit(f"        mov {si}, {self.target.acc}")
+        index_expression = expression.index
+        if isinstance(index_expression, Int):
+            offset = index_expression.value * stride
+            address = f"{si}+{offset}" if offset else si
+        else:
+            self.emit(f"        push {si}")
+            self.generate_expression(index_expression)
+            if stride == 2:
+                self.emit(f"        add {self.target.acc}, {self.target.acc}")
+            elif stride == 4:
+                self.emit(f"        shl {self.target.acc}, 2")
+            elif stride not in (0, 1):
+                self.emit(f"        imul {self.target.acc}, {self.target.acc}, {stride}")
+            self.emit(f"        pop {si}")
+            self.emit(f"        add {si}, {self.target.acc}")
+            address = si
+        if is_byte:
+            self.emit_byte_load_zx(f"[{address}]")
+        elif stride == 2:
+            if self.target.int_size > 2:
+                self.emit(f"        movzx {self.target.acc}, word [{address}]")
+            else:
+                self.emit(f"        mov {self.target.acc}, [{address}]")
+        else:
+            self.emit(f"        mov {self.target.acc}, [{address}]")
         self.ax_clear()
 
     def _generate_tail_dispatch_if(self, statement: If, /) -> None:
