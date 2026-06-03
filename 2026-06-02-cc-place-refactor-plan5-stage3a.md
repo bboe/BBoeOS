@@ -27,6 +27,29 @@ to the 2-operand `imul` spelling. Two depth shapes remain DEFERRED to frontend
 work (NOT codegen): pointer-to-multidim-array declarations (`int (*pm)[2][3]`)
 and subscript-then-member access (`arr[i][j].member`).
 
+## Follow-ups (deferred — separate byte-changing PRs)
+
+These are correctness fixes intentionally kept OUT of the byte-neutral Stage 3a
+(each changes emitted bytes on an untested path, so each wants its own commit +
+runtime probe — same reasoning that kept the `asm.c` 3-operand-`imul` fix in its
+own PR #584):
+
+- **`unsigned short *` width-gap family.** The migration preserved a latent legacy
+  gap byte-for-byte: a 2-byte (`unsigned short`) pointee is loaded/stored with a
+  full-width `mov` instead of `movzx word` / `mov word`, leaking/reading two
+  garbage high bytes. It survives in three spots:
+  - `_emit_double_index_resolved_load` (`generator.py`) — a near-duplicate of
+    `_emit_field_load` that exists ONLY to reproduce this gap for the
+    array-of-pointers `name[i][j]` load. Fixing the width lets it collapse into
+    `_emit_field_load` and the duplicate method is deleted.
+  - the standalone-deref store (the `NOTE` comment in the `DereferencePlace`
+    arm of `_emit_place_store`) — named-pointer `unsigned short *` write.
+  - (audit the standalone-deref *load* for the same gap while there.)
+  A single follow-up PR: switch these to width-correct `movzx word` / `mov word`,
+  collapse `_emit_double_index_resolved_load` into `_emit_field_load`, add a
+  runtime probe (`unsigned short *p[]; p[i][j]` round-trip with high bits set in a
+  neighbouring slot to prove no leak). Unexercised by current first/third-party C.
+
 ---
 
 ## Re-scope (2026-06-02) — read before executing
