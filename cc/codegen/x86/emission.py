@@ -2719,18 +2719,35 @@ class EmissionMixin:
             vname = expression.name
             if vname in self.global_arrays:
                 declaration = self.global_arrays[vname]
-                stride = 1 if declaration.type_name in self.BYTE_TYPES else self.target.int_size
-                if declaration.init is not None:
-                    size = len(declaration.init.elements) * stride
+                # Multidimensional arrays: use the registered ArrayType which
+                # knows all dimensions and the real element size.
+                if vname in self.array_types:
+                    size = self.array_types[vname].sizeof(
+                        pointer_width=self.target.int_size,
+                        scalar_width=self._type_size,
+                    )
                     self.emit(f"        mov {self.target.acc}, {size}")
                 else:
-                    size_expression = self._constant_expression(declaration.size)
-                    self.emit(f"        mov {self.target.acc}, ({size_expression})*{stride}")
+                    # Single-dimension array: use the real element stride so
+                    # ``unsigned short`` uses 2 bytes, not ``int_size`` (4).
+                    stride = self._type_size(declaration.type_name)
+                    if declaration.init is not None:
+                        size = len(declaration.init.elements) * stride
+                        self.emit(f"        mov {self.target.acc}, {size}")
+                    else:
+                        size_expression = self._constant_expression(declaration.size)
+                        if size_expression is not None and size_expression.isdigit():
+                            self.emit(f"        mov {self.target.acc}, {int(size_expression) * stride}")
+                        else:
+                            self.emit(f"        mov {self.target.acc}, ({size_expression})*{stride}")
             elif vname in self.local_stack_arrays:
                 size = self.local_stack_arrays[vname]
                 self.emit(f"        mov {self.target.acc}, {size}")
             elif vname in self.array_sizes:
-                size = self.array_sizes[vname] * self.target.int_size  # word-sized elements
+                # array_sizes stores element count; use the real element stride
+                # so ``unsigned short`` uses 2 bytes, not ``int_size`` (4).
+                stride = self._type_size(self.variable_types.get(vname, "int"))
+                size = self.array_sizes[vname] * stride
                 self.emit(f"        mov {self.target.acc}, {size}")
             elif (
                 vname in self.variable_types
