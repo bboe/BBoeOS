@@ -129,6 +129,27 @@ class FieldInfo(NamedTuple):
     type_name: str
 
 
+@dataclass(kw_only=True, slots=True)
+class MemoryOperand:
+    """A machine memory operand ``[base (+displacement) (+index)]``.
+
+    base_kind selects how *base* reads: a NASM label ("_g_arr"), a
+    frame-relative string ("ebp-12"), or a register holding an address
+    materialized by a prior dereference.  *displacement* sums member
+    offsets and constant subscripts; *index* (when not None) is a register
+    holding the summed dynamic byte-offset.  *field_size* / *element_size*
+    size the terminal load/store (field_size != element_size marks an
+    array-typed member whose load decays to its address via ``lea``).
+    """
+
+    base: str
+    base_kind: str  # "label" | "frame" | "register"
+    displacement: int = 0
+    element_size: int = 0
+    field_size: int = 0
+    index: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class PlaceAddress:
     """Symbolic address of a Place: ``[const_base + offset (+ BX)]``.
@@ -367,6 +388,30 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.struct_layouts: dict[str, dict[str, FieldInfo]] = {}
         self.struct_sizes: dict[str, int] = {}
         self.target_mode: str = target_mode
+
+    def _accumulate_subscript(self, operand: MemoryOperand, /, *, index: Node, element_size: int) -> None:
+        """Add *index * element_size* into *operand*, folding constants into displacement.
+
+        Constant indices (ast_nodes.Int) fold into *operand.displacement*.
+        Dynamic indices are evaluated into AX, scaled by *element_size* using
+        :meth:`_emit_scale_index`, and accumulated into a BX index register so
+        that multiple dynamic subscripts on the same base sum correctly (shape B
+        in _resolve_place uses the same ``add bx, ax`` pattern).
+        """
+        if isinstance(index, Int):
+            operand.displacement += index.value * element_size
+            return
+        bx = self.target.bx_register
+        if operand.index is not None:
+            self.emit(f"        push {bx}")
+        self.generate_expression(index)  # AX = dynamic index
+        self._emit_scale_index(self.target.acc, scale=element_size)  # AX = byte offset
+        if operand.index is not None:
+            self.emit(f"        pop {bx}")
+            self.emit(f"        add {bx}, {self.target.acc}")  # BX = accumulated byte offset
+        else:
+            self.emit(f"        mov {bx}, {self.target.acc}")  # BX = byte offset
+            operand.index = bx
 
     def _analyze_user_function_conventions(self, functions: list[Node], /) -> None:
         """Pre-compute each user function's pinned-param register map.
@@ -3274,6 +3319,41 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # Scalar struct field — not indexable.
         return info.element_size, False
 
+    def _member_layout_on(self, base: Place, member_name: str, /, *, line: int) -> tuple[int, int, int]:
+        """Return ``(field_offset, field_size, element_size)`` for *member_name*.
+
+        Dispatches on the struct type that *base* denotes.  For a struct-array
+        base (SubscriptPlace over a VariablePlace, the shape handled by
+        _match_struct_array_member) the layout comes from
+        _resolve_index_member_layout.  For a struct-value base (VariablePlace
+        naming a local or global struct value) it is resolved by looking up the
+        struct tag from variable_types and consulting the struct layout table
+        (the same path _resolve_member_place_info takes for the dot-access case).
+        element_size equals field_size for scalar fields, or the per-element byte
+        count for array-typed members.
+        """
+        # Struct-array base: arr[i].member — layout from _resolve_index_member_layout.
+        if (matched := self._match_struct_array_member(MemberPlace(base=base, member_name=member_name, line=line))) is not None:
+            array_name, _index_node, matched_member_name = matched
+            _const_base, _struct_size, field_offset, field_size, element_size = self._resolve_index_member_layout(
+                array_name, matched_member_name, line
+            )
+            return field_offset, field_size, element_size
+        # Struct-value base: obj.member — resolve tag from variable_types, then look up layout.
+        if isinstance(base, VariablePlace):
+            struct_type = self.variable_types.get(base.name)
+            if struct_type is None:
+                message = f"undefined variable '{base.name}'"
+                raise CompileError(message, line=line)
+            if struct_type.endswith("*") or not struct_type.startswith("struct "):
+                message = f"'.' requires a struct value, got type '{struct_type}'"
+                raise CompileError(message, line=line)
+            tag = struct_type[7:]
+            info = self._lookup_struct_field(tag, member_name, line)
+            return info.byte_offset, info.field_size, info.element_size
+        message = f"unsupported base shape for member '{member_name}' in _member_layout_on"
+        raise CompileError(message, line=line)
+
     @staticmethod
     def _parse_local_byte_addr(addr: str) -> int | None:
         """Return the frame slot K if addr is ``[ebp-N]`` or ``[ebp-N+M]``; otherwise None.
@@ -3595,6 +3675,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.variable_types[name] = "function_pointer"
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
+                if declaration.dimensions is not None:
+                    message = f"multidimensional array '{declaration.name}' is not yet supported in codegen"
+                    raise CompileError(message, line=declaration.line)
                 if (
                     declaration.type_name not in self.GLOBAL_ARRAY_PRIMITIVE_TYPES
                     and not declaration.type_name.startswith("struct ")
@@ -3686,6 +3769,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 cursor += 1
                 run_bits = 0
             ftype = declaration_field.type_name
+            if ftype.count("[") > 1:
+                message = f"multidimensional array field '{declaration_field.field_name}' is not yet supported in codegen"
+                raise CompileError(message, line=declaration_field.line)
             if "[" in ftype:
                 # "char[15]" → element_type="char", count=15
                 bracket = ftype.index("[")
@@ -3709,6 +3795,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             cursor += 1
         self.struct_layouts[declaration.name] = layout
         self.struct_sizes[declaration.name] = cursor
+
+    def _resolve_dereference(self, place: DereferencePlace, /) -> MemoryOperand:  # noqa: PLR6301
+        """Resolve a DereferencePlace to a register-base MemoryOperand (Task 3)."""
+        message = "dereference not yet in resolve_address"
+        raise CompileError(message, line=place.line)
 
     def _resolve_index_member_layout(self, name: str, member_name: str, line: int, /) -> tuple[str, int, int, int, int]:
         """Return layout tuple for a struct array member access.
@@ -4817,6 +4908,24 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             for reference in self._collect_constant_references(value_node):
                 self.emit_constant_reference(reference)
 
+    def _variable_base(self, name: str, /, *, line: int) -> tuple[str, str]:
+        """Return ``(base_kind, base)`` for the memory operand of *name*.
+
+        Mirrors the base-string logic of _resolve_struct_value_base and
+        _resolve_index_member_layout so that downstream MemoryOperand emission
+        produces the same label / frame strings as the existing codegen.
+
+        Returns ("label", "_g_<name>") for a global array or scalar, and
+        ("frame", "<base_register>-<offset>") (or the elide_frame "_l_<name>"
+        variant) for a local variable.  Raises CompileError for undefined names.
+        """
+        if name in self.global_arrays or name in self.global_scalars:
+            return "label", self._global_label(name)
+        if name in self.locals:
+            return "frame", self._local_address(name)
+        message = f"undefined variable '{name}'"
+        raise CompileError(message, line=line)
+
     def allocate_local(self, name: str, /, *, size: int | None = None) -> int:
         """Allocate a local variable on the stack frame.
 
@@ -5503,6 +5612,37 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if self._peephole_will_strand_ax():
             self.ax_local = None
 
+    def resolve_address(self, place: Place, /) -> MemoryOperand:
+        """Resolve *place* to a MemoryOperand, emitting side-effect code as needed.
+
+        Follows the GCC get_inner_reference / LLVM EmitLValue model: deref-free
+        segments fold into one operand; a DereferencePlace breaks the chain into
+        a fresh register base (added in a later task).  Member offsets and
+        constant subscripts sum into displacement; dynamic subscripts are scaled
+        and summed into a single index register.
+        """
+        match place:
+            case DereferencePlace():
+                return self._resolve_dereference(place)
+            case MemberPlace(base=base, member_name=member_name):
+                operand = self.resolve_address(base)
+                field_offset, field_size, element_size = self._member_layout_on(base, member_name, line=place.line)
+                operand.displacement += field_offset
+                operand.field_size = field_size
+                operand.element_size = element_size
+                return operand
+            case SubscriptPlace(base=base, index=index):
+                operand = self.resolve_address(base)
+                self._accumulate_subscript(operand, index=index, element_size=operand.element_size or operand.field_size)
+                operand.field_size = operand.element_size
+                return operand
+            case VariablePlace(name=name):
+                base_kind, base = self._variable_base(name, line=place.line)
+                return MemoryOperand(base_kind=base_kind, base=base)
+            case _:
+                message = "unsupported Place shape in resolve_address"
+                raise CompileError(message, line=place.line)
+
     def scan_locals(self, statements: list[Node], /, *, top_level: bool = True) -> None:
         """Recursively find variable declarations.
 
@@ -5571,6 +5711,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 if top_level and self.elide_frame and isinstance(statement.init, Int) and statement.init.value == 0 and size in (1, 2):
                     self.zero_init_skippable.add(statement.name)
             elif isinstance(statement, ArrayDecl):
+                if statement.dimensions is not None:
+                    message = f"multidimensional array '{statement.name}' is not yet supported in codegen"
+                    raise CompileError(message, line=statement.line)
                 self.variable_types[statement.name] = statement.type_name
                 self.variable_arrays.add(statement.name)
                 stride = self._type_size(statement.type_name)

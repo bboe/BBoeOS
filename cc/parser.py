@@ -706,12 +706,20 @@ class Parser:
         while True:
             is_array = False
             size_expression: Node | None = None
-            if self.peek()[0] == "LBRACKET":
+            dimension_expressions: list[Node] = []
+            while self.peek()[0] == "LBRACKET":
                 self.eat("LBRACKET")
                 is_array = True
+                bracket_size: Node | None = None
                 if self.peek()[0] != "RBRACKET":
-                    size_expression = self.parse_expression()
+                    bracket_size = self.parse_expression()
                 self.eat("RBRACKET")
+                dimension_expressions.append(bracket_size)
+            if dimension_expressions:
+                # ``size`` keeps the outermost dimension for the legacy
+                # single-dimension codegen path; ``dimensions`` is only
+                # populated for genuine multidimensional declarators.
+                size_expression = dimension_expressions[0]
             init: Node | None = None
             if self.peek()[0] == "ASSIGN":
                 self.eat("ASSIGN")
@@ -735,7 +743,15 @@ class Parser:
                     message = f"global array '{current_name}' needs either a size or an initializer"
                     raise CompileError(message, line=line)
                 declarations.append(
-                    ArrayDecl(init=init, is_extern=is_extern, line=line, name=current_name, size=size_expression, type_name=current_type),
+                    ArrayDecl(
+                        dimensions=dimension_expressions if len(dimension_expressions) > 1 else None,
+                        init=init,
+                        is_extern=is_extern,
+                        line=line,
+                        name=current_name,
+                        size=size_expression,
+                        type_name=current_type,
+                    ),
                 )
             else:
                 declarations.append(
@@ -1291,12 +1307,21 @@ class Parser:
         # inside the parenthesised group, so no outer ``LBRACKET`` check runs.
         is_array = local_fptr_array_size is not None
         size_expression: Node | None = local_fptr_array_size
-        if not is_array and self.peek()[0] == "LBRACKET":
-            self.eat("LBRACKET")
-            is_array = True
-            if self.peek()[0] != "RBRACKET":
-                size_expression = self.parse_expression()
-            self.eat("RBRACKET")
+        dimension_expressions: list[Node] = []
+        if not is_array:
+            while self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                is_array = True
+                bracket_size: Node | None = None
+                if self.peek()[0] != "RBRACKET":
+                    bracket_size = self.parse_expression()
+                self.eat("RBRACKET")
+                dimension_expressions.append(bracket_size)
+            if dimension_expressions:
+                # ``size`` keeps the outermost dimension for the legacy
+                # single-dimension codegen path; ``dimensions`` is only
+                # populated for genuine multidimensional declarators.
+                size_expression = dimension_expressions[0]
         init = None
         if self.peek()[0] == "ASSIGN":
             self.eat("ASSIGN")
@@ -1307,7 +1332,14 @@ class Parser:
             else:
                 init = self.parse_expression()
         if is_array:
-            return ArrayDecl(init=init, line=line, name=name, size=size_expression, type_name=local_type_string)
+            return ArrayDecl(
+                dimensions=dimension_expressions if len(dimension_expressions) > 1 else None,
+                init=init,
+                line=line,
+                name=name,
+                size=size_expression,
+                type_name=local_type_string,
+            )
         return VarDecl(
             function_pointer_params=function_pointer_params_list,
             init=init,
@@ -1594,11 +1626,15 @@ class Parser:
                     self.eat("COLON")
                     bit_width = int(self.eat("NUMBER")[1])
                 elif self.peek()[0] == "LBRACKET":
-                    # Optional [N] fixed-size array field (e.g. ``char _reserved[15]``).
-                    self.eat("LBRACKET")
-                    count_token = self.eat("NUMBER")
-                    self.eat("RBRACKET")
-                    declarator_type = f"{base_type}[{count_token[1]}]"
+                    # One or more ``[N]`` fixed-size array dimensions
+                    # (``char _reserved[15]`` or multidimensional
+                    # ``int m[2][3]``), baked left-to-right (outermost
+                    # first) into the flat field type string.
+                    while self.peek()[0] == "LBRACKET":
+                        self.eat("LBRACKET")
+                        count_token = self.eat("NUMBER")
+                        self.eat("RBRACKET")
+                        declarator_type = f"{declarator_type}[{count_token[1]}]"
                 if bit_width is not None:
                     if base_type != "unsigned char":
                         message = f"bitfield container must be unsigned char (got {base_type!r}) at line {line}"
@@ -2182,10 +2218,17 @@ class Parser:
         in_register: str | None = None
         is_array = False
         out_register: str | None = None
-        if self.peek()[0] == "LBRACKET":
+        parameter_dimensions: list[Node | None] = []
+        while self.peek()[0] == "LBRACKET":
+            # ``int m[]`` (decays to a pointer) or multidimensional
+            # ``int m[2][3]`` / ``int m[][3]`` (pointer to array).  Each
+            # bracket size is optional; dimensions are recorded only for
+            # the genuine multidimensional forms.
             self.eat("LBRACKET")
+            bracket_size = None if self.peek()[0] == "RBRACKET" else self.parse_expression()
             self.eat("RBRACKET")
             is_array = True
+            parameter_dimensions.append(bracket_size)
         if self.peek()[0] == "IDENT" and self.peek()[1] == "__attribute__":
             kind, value = self._parse_attribute(line=name_token[2])
             if kind == "in_register":
@@ -2195,7 +2238,14 @@ class Parser:
             else:
                 message = f"unsupported parameter attribute '{kind}'"
                 raise CompileError(message, line=name_token[2])
-        return Param(in_register=in_register, is_array=is_array, name=name, out_register=out_register, type=type_string)
+        return Param(
+            dimensions=parameter_dimensions if len(parameter_dimensions) > 1 else None,
+            in_register=in_register,
+            is_array=is_array,
+            name=name,
+            out_register=out_register,
+            type=type_string,
+        )
 
     def parse_parameters(self, *, allow_variadic: bool = False) -> tuple[list[Param], bool]:
         """Parse a function parameter list.

@@ -70,8 +70,15 @@ class ArrayDecl(Node):
     ``is_extern`` is set for ``extern T name[N];`` file-scope declarations
     that name a symbol whose storage lives in another translation unit;
     the generator skips emitting ``_g_<name>:`` storage for these.
+
+    ``dimensions`` holds the full outer-to-inner list of bracket size
+    expressions for a multidimensional declarator (``int m[2][3]`` →
+    ``[Int(2), Int(3)]``).  It stays ``None`` for an ordinary single-``[N]``
+    array so the legacy single-``size`` codegen path is byte-identical;
+    ``size`` always carries the outermost dimension either way.
     """
 
+    dimensions: list[Node] | None = field(default=None, kw_only=True)
     init: Node | None
     is_extern: bool = field(default=False, kw_only=True)
     name: str
@@ -474,6 +481,7 @@ class Param:
     rather than a pointer write.
     """
 
+    dimensions: list | None = field(default=None, kw_only=True)  # list[Node] outer-to-inner, multidim only
     in_register: str | None = field(default=None, kw_only=True)
     is_array: bool
     name: str
