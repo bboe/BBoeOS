@@ -10,6 +10,37 @@
 
 ---
 
+## Re-scope (2026-06-02) — read before executing
+
+This plan was written before the out-of-band multidimensional-array work landed
+on `main`. Re-scoping against current `main`:
+
+- **Task 1 is DONE on `main`** (commit `ae695950`). The descriptor shipped
+  **renamed `MemoryOperand`** (not `MemOperand` as written below — read every
+  `MemOperand` in this doc as `MemoryOperand`). `resolve_address` (static-base
+  skeleton), `_accumulate_subscript`, `_member_layout_on`, `_variable_base`, and
+  the `_resolve_dereference` stub all exist. `resolve_address` has **zero
+  external callers** — fully inert, exactly Task-1 state. Skip Task 1.
+- **Tasks 2–9 are unchanged in intent.** All five bespoke emitters are still
+  live (`_emit_dereference_place_*`, `_emit_double_index_place_*`,
+  `_emit_member_scalar_*`, `_emit_member_index_*` + `_is_member_index_place`,
+  `_resolve_place`). Line numbers in the tasks below have drifted (the file grew
+  with multidim) — locate by symbol, not line.
+- **A SIXTH shape now exists:** `_emit_multidim_subscript_address`
+  (`generator.py` ~2406), the contiguous row-major subscript path the multidim
+  Stage-4 work added, keyed on the registered `array_types[name]` `ArrayType`.
+  **Decision: fold it in** (matches the original design's axis-6 "SubscriptPlace
+  over SubscriptPlace with no intervening deref accumulates nested stride"). It
+  gets a dedicated task — **Task 4b**, below, between Task 4 and Task 5.
+- **Collision posture:** another session is concurrently extending the multidim
+  path (array *initializers*) on branch `bboe/cc-multidim-init` in the `parser`
+  worktree. This Stage-3a work runs in the `multidim` worktree on
+  `bboe/cc-multidim-work`. Both edit `generator.py`; **Task 4b will conflict** on
+  the multidim address code. Whoever lands second rebases — expect to re-resolve
+  `_emit_multidim_subscript_address` against the other session's final form.
+
+---
+
 ## Oracle & gate (read before any task)
 
 Because register choice may now legitimately differ, the byte-*exact* golden is no longer the efficiency oracle. Use this layered acceptance after **every** migration task:
@@ -238,6 +269,50 @@ Expected: size gate ≤ baseline for the `probe_double_index_*` functions (itera
 ```bash
 git add -A
 git commit -m "refactor(cc): fold double-index into resolve_address; retire the 2-level hack
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Task 4b: Fold the contiguous-multidim subscript path into `resolve_address`
+
+**Added at re-scope.** The multidim Stage-4 work introduced
+`_emit_multidim_subscript_address` (`generator.py` ~2406): for a *contiguous*
+multidimensional array (`int m[2][3]`), it reads the registered
+`array_types[base_name]` `ArrayType` and computes a single row-major byte offset
+`((i*cols)+j)*elem` — the array-of-pointers double-index (Task 4) is the
+*different* shape (a deref between dims). This task absorbs the contiguous case
+into the `SubscriptPlace` recursion so both multi-subscript shapes share one
+resolver. **This is the task that collides with the other session's multidim
+initializer work — rebase against their final `_emit_multidim_subscript_address`
+form before starting if they have landed.**
+
+**Files:** Modify `cc/codegen/x86/generator.py`.
+
+- [ ] **Step 1: Teach the `SubscriptPlace` case to recognize a contiguous-multidim base.** When `resolve_address` descends a `SubscriptPlace` whose base resolves to a `VariablePlace` (or `MemberPlace`) registered in `self.array_types` with `len(dimensions) > 1`, it must accumulate the row-major stride for the current dimension (`stride = product(remaining_dims) * element_size`) into the operand — folding constant indices into `displacement` and summing dynamic indices into the index register via the existing `_accumulate_subscript` scaling — rather than treating each subscript as an independent element step. Track which dimension the current `SubscriptPlace` indexes by counting subscript nesting depth against the `ArrayType.dimensions`. Mirror the exact `imul`/`shl`/`add`/`lea` sequence `_emit_multidim_subscript_address` emits today; register identity is free (gate is bytes).
+
+- [ ] **Step 2: Carry the multidim layout through the recursion.** The `MemOperand`/`MemoryOperand` needs enough state for the terminal to know the final element width and that all dimensions have been consumed (a fully-subscripted `m[i][j]` yields an element load; a partially-subscripted `m[i]` decays to the row address via `lea`). Reuse `ArrayType.element_type` for the terminal width and `ArrayType.sizeof(...)` for the decayed-row size. Add an `array_type: ArrayType | None` (or equivalent dimension-cursor) field to the descriptor if the existing fields can't express "N of M dimensions consumed".
+
+- [ ] **Step 3: Route the shape through the resolver.** Find every caller of `_emit_multidim_subscript_address` and replace it with the `resolve_address` + terminal load/store path (the contiguous `SubscriptPlace` chain now resolves natively). Do **not** touch the *initializer* codegen (`generator.py` ~3868 / ~5966 "multidimensional array initializers" and `emission.py`) — that is the other session's surface and the `ir`-level boundary; only the subscript *address/load/store* moves.
+
+- [ ] **Step 4: Gate.**
+
+```bash
+python3 tests/test_cc_function_sizes.py
+python3 tests/test_cc_place.py
+python3 tests/test_programs.py multidim_storage_test multidim_init_test
+python3 -m pytest tests/unit/test_cc_multidim_storage.py -q
+```
+Expected: size gate ≤ baseline for the multidim functions (iterate stride/register choices to match `_emit_multidim_subscript_address`'s byte count — a contiguous `m[i][j]` must not regress vs the bespoke path); golden regenerated + eyeballed if any multidim probe is in it; multidim storage + init runtime green (row-major values unchanged).
+
+- [ ] **Step 5: Delete `_emit_multidim_subscript_address`** once `rtk proxy grep -n "_emit_multidim_subscript_address" cc/` shows no callers. Re-run the gate.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A
+git commit -m "refactor(cc): fold contiguous-multidim subscript into resolve_address
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
