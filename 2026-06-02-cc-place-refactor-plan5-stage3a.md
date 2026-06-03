@@ -10,6 +10,25 @@
 
 ---
 
+## STATUS: COMPLETE (2026-06-03)
+
+All tasks executed on `bboe/cc-multidim-work` (rebased on origin/main, HEAD
+`9d95b7fd`). `resolve_address` is now the single lvalue-address resolver; all
+five original bespoke emitters and the six multidim load/store wrappers are
+retired (address math kept as helpers it calls). Byte-neutral throughout (size
+gate + `cc_place` golden clean). Full CI matrix green: test_asm 49/0, programs
+103/0, ext2 133/0, bboefs 6/0, cc_compat 63/0, unit 805, bits 16+32 122/0.
+Incidental wins: a latent ESI-clobber miscompile fixed (Task 4), the
+element-size-1/2 member-index gate lifted (Task 6), arbitrary-depth
+array-of-pointers lvalues delivered (Task 8). A Task-9 self-host regression (a
+3-operand `imul` spelling `asm.c` can't parse — byte-identical machine code, so
+the size gate + golden missed it) was caught by `test_asm` and fixed by reverting
+to the 2-operand `imul` spelling. Two depth shapes remain DEFERRED to frontend
+work (NOT codegen): pointer-to-multidim-array declarations (`int (*pm)[2][3]`)
+and subscript-then-member access (`arr[i][j].member`).
+
+---
+
 ## Re-scope (2026-06-02) — read before executing
 
 This plan was written before the out-of-band multidimensional-array work landed
