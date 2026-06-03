@@ -878,6 +878,17 @@ TESTS: list[ProgramTest] = [
         ["multidim_init_test"],
         r"^m\[0\]\[0\]=1 m\[0\]\[2\]=3 m\[1\]\[0\]=4 m\[1\]\[2\]=6\np\[0\]\[0\]=1 p\[0\]\[1\]=2 p\[1\]\[0\]=0 p\[1\]\[1\]=0\ngsum=100$",
     ),
+    # multidim_param_test exercises cc.py's multidimensional array PARAMETERS
+    # (``int m[][3]`` decaying to a pointer-to-array ``int (*)[3]``) and an
+    # explicit pointer-to-array local (``int (*p)[3] = g;``).  The same sum()
+    # routine is called with a LOCAL and a GLOBAL int[2][3] (both must decay to
+    # their base address at the call site), then p[1][2] reads back 5 to pin the
+    # pointer-to-array row-major offset (12*1 + 4*2 = 20 bytes).
+    ProgramTest(
+        "multidim_param_test",
+        ["multidim_param_test"],
+        r"^local_sum=15 global_sum=15\np\[1\]\[2\]=5$",
+    ),
     # multidim_struct_test exercises cc.py's multidimensional array STRUCT
     # FIELDS end-to-end in QEMU.  A ``struct grid { int cells[2][3]; }`` local
     # is filled with g.cells[i][j] = i*3+j (values 0..5) in nested loops, then

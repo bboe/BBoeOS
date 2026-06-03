@@ -77,7 +77,7 @@ from cc.errors import CompileError
 from cc.options import CompilerOptions
 from cc.target import CodegenTarget, X86CodegenTarget16, X86CodegenTarget32
 from cc.tokens import COMPARISON_OPERATIONS
-from cc.types import ArrayType, Type
+from cc.types import ArrayType, PointerType, Type
 from cc.utils import decode_string_escapes, string_byte_length
 
 # Regexes used by the known_local_bytes tracker in _update_known_bytes.
@@ -376,6 +376,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # means "no info available" — fall back to saving everything.
         self._ir_call_pinned_initialized: dict[int, frozenset[str]] = {}
         self._current_call_pinned_initialized: frozenset[str] | None = None
+        # pointer_array_types maps a variable / parameter name → the structured
+        # PointerType(ArrayType(...)) for a pointer-to-array (``int (*p)[3]``)
+        # or a decayed multidim array parameter (``int m[][3]`` ==
+        # ``int (*m)[3]``).  variable_types[name] still carries a flat pointer
+        # string so legacy pointer-ness (width, deref) holds; this structured
+        # dict drives subscript addressing and sizeof.  Consulted BEFORE the
+        # legacy string / array_types paths.
+        self.pointer_array_types: dict[str, PointerType] = {}
         self.register_aliased_globals: dict[str, str] = {}  # name → register (e.g. "si")
         self.store_target_register: str | None = None
         # known_local_bytes and _last_byte_store support the Phase C
@@ -1766,7 +1774,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # owning .c file emits).
             return
         if declaration.init is None:
-            if declaration.type_name.startswith("struct ") and not declaration.type_name.endswith("*"):
+            if declaration.pointer_array_dimensions is not None:
+                # Pointer-to-array global: one pointer-sized cell regardless
+                # of the (array) element type.
+                stride = self.target.int_size
+            elif declaration.type_name.startswith("struct ") and not declaration.type_name.endswith("*"):
                 stride = self.struct_sizes[declaration.type_name[len("struct ") :]]
             elif self._is_byte_scalar_global(name):
                 stride = 1
@@ -2913,7 +2925,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # generic _resolve_place path.
         if (chain := self._uniform_subscript_chain(place)) is not None:
             base_name, indices = chain
-            if self._is_multidim_array(base_name):
+            if base_name in self.pointer_array_types:
+                # ``p[i][j]...`` over a pointer-to-array: load the pointer
+                # value, then Horner over the pointee dims.
+                self._emit_pointer_to_array_load(base_name, indices, line=place.line)
+            elif self._is_multidim_array(base_name):
                 # ``name[i][j]...`` over a contiguous multidim array:
                 # row-major (Horner) addressing on the registered dims.
                 self._emit_multidim_subscript_load(base_name, indices, line=place.line)
@@ -2969,7 +2985,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return
         if (chain := self._uniform_subscript_chain(place)) is not None:
             base_name, indices = chain
-            if self._is_multidim_array(base_name):
+            if base_name in self.pointer_array_types:
+                # ``p[i][j]... = value`` over a pointer-to-array.
+                self._emit_pointer_to_array_store(base_name, indices, value, line=place.line)
+            elif self._is_multidim_array(base_name):
                 # ``name[i][j]... = value`` over a contiguous multidim array.
                 self._emit_multidim_subscript_store(base_name, indices, value, line=place.line)
             else:
@@ -3006,6 +3025,106 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         index = self.target.bx_register if address.indexed else ""
         addr = self._build_address(address.const_base, address.offset, index=index)
         self._emit_field_store(addr=addr, field_size=address.field_size)
+        if protect_bx:
+            self.emit(f"        pop {self.target.bx_register}")
+
+    def _emit_pointer_to_array_address(self, base_name: str, indices: list[Node], /, *, line: int) -> tuple[str, int]:
+        """Emit the row-major address of ``p[i0][i1]...`` for a pointer-to-array ``p``.
+
+        ``p`` has structured type ``PointerType(ArrayType(d1, ... ArrayType(dn, E)))``
+        in :attr:`pointer_array_types`.  Unlike a contiguous multidim array
+        (where the base is the array's frame/label address), the base here is
+        the POINTER VALUE — the address stored in ``p``'s slot.  A full
+        subscript supplies ``n + 1`` indices: the outermost strides by
+        ``sizeof(pointee array)`` and the remaining dims stride row-major over
+        the pointee.  Returns ``(addr, element_size)``.
+
+        Mirrors :meth:`_emit_multidim_subscript_address` (Horner over the
+        strides) but loads the pointer value into a base register and
+        materializes it into SI so ``[si+disp]`` stays legal at 16-bit.
+
+        Raises:
+            CompileError: on a partial subscript (fewer than ``n + 1`` indices).
+
+        """
+        pointer_type = self.pointer_array_types[base_name]
+        pointee_dimension_counts: list[int] = []
+        element_type: Type = pointer_type.pointee
+        while isinstance(element_type, ArrayType):
+            pointee_dimension_counts.append(element_type.count or 0)
+            element_type = element_type.pointee
+        expected = len(pointee_dimension_counts) + 1
+        if len(indices) != expected:
+            message = f"unsupported partial subscript of pointer-to-array '{base_name}'"
+            raise CompileError(message, line=line)
+        element_size = self._type_size(element_type.to_string())
+        # ``n + 1`` strides: the inner ``n`` strides come from the pointee
+        # dimension Horner; the outermost stride is the size of the whole
+        # pointee array (== element_size * product(d1..dn)).
+        strides: list[int] = []
+        running = element_size
+        for count in reversed(pointee_dimension_counts):
+            strides.append(running)
+            running *= count
+        strides.append(running)  # outermost index strides by sizeof(pointee array)
+        strides.reverse()
+        bx = self.target.bx_register
+        si = self.target.si_register
+        displacement = 0
+        dynamic_index_count = 0
+        protect_bx = self._bx_holds_pinned_var()
+        for index_node, stride in zip(indices, strides, strict=True):
+            if isinstance(index_node, Int):
+                displacement += index_node.value * stride
+                continue
+            if protect_bx:
+                self.emit(f"        push {bx}")
+            self.generate_expression(index_node)  # AX = dynamic index
+            self._emit_scale_index(self.target.acc, scale=stride)  # AX = byte offset
+            if protect_bx:
+                self.emit(f"        pop {bx}")
+            self.emit(f"        push {self.target.acc}")
+            dynamic_index_count += 1
+        index_register: str | None = None
+        for _ in range(dynamic_index_count):
+            if index_register is None:
+                self.emit(f"        pop {bx}")
+                index_register = bx
+            else:
+                self.emit(f"        pop {self.target.acc}")
+                self.emit(f"        add {bx}, {self.target.acc}")
+        # Load the POINTER VALUE (the address stored in p's slot) into SI.
+        self._emit_load_var(base_name, register=si)
+        if index_register is not None:
+            self.emit(f"        add {si}, {index_register}")
+            index_register = None
+        addr = self._build_address(si, displacement, index=index_register or "")
+        return addr, element_size
+
+    def _emit_pointer_to_array_load(self, base_name: str, indices: list[Node], /, *, line: int) -> None:
+        """Load ``p[i0][i1]...`` (pointer-to-array, row-major) into the accumulator."""
+        self.ax_clear()
+        protect_bx = self._bx_holds_pinned_var()
+        if protect_bx:
+            self.emit(f"        push {self.target.bx_register}")
+        addr, element_size = self._emit_pointer_to_array_address(base_name, indices, line=line)
+        self._emit_field_load(addr=addr, field_size=element_size)
+        if protect_bx:
+            self.emit(f"        pop {self.target.bx_register}")
+        self.ax_clear()
+
+    def _emit_pointer_to_array_store(self, base_name: str, indices: list[Node], value: Node, /, *, line: int) -> None:
+        """Store *value* into ``p[i0][i1]...`` (pointer-to-array, row-major)."""
+        self.ax_clear()
+        protect_bx = self._bx_holds_pinned_var()
+        if protect_bx:
+            self.emit(f"        push {self.target.bx_register}")
+        self.generate_expression(value)  # AX = value
+        self.emit(f"        push {self.target.acc}")
+        addr, element_size = self._emit_pointer_to_array_address(base_name, indices, line=line)
+        self.emit(f"        pop {self.target.acc}")  # AX = value
+        self.ax_clear()
+        self._emit_field_store(addr=addr, field_size=element_size)
         if protect_bx:
             self.emit(f"        pop {self.target.bx_register}")
 
@@ -3304,6 +3423,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if isinstance(node, Cast):
             return node.target_type
         if isinstance(node, Index):
+            # ``p[i]`` / ``*p`` (parsed as Index(p, 0)) for a pointer-to-array
+            # ``int (*p)[3]`` yields the pointee array type (``int[3]``).
+            if isinstance(node.array, Var) and node.array.name in self.pointer_array_types:
+                return self.pointer_array_types[node.array.name].pointee.to_string()
             array_type = self._expression_type(node.array)
             if array_type.endswith("*"):
                 return array_type[:-1].rstrip()
@@ -3893,6 +4016,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 raise CompileError(message, line=place.line)
             return variable_type
         if isinstance(place, SubscriptPlace):
+            # ``p[i]`` for a pointer-to-array ``int (*p)[3]`` yields the pointee
+            # array type (``int[3]``), not the stripped pointer element.
+            if isinstance(place.base, VariablePlace) and place.base.name in self.pointer_array_types:
+                return self.pointer_array_types[place.base.name].pointee.to_string()
             base_type = self._place_type(place.base)
             if base_type.endswith("*"):
                 return base_type[:-1].rstrip()
@@ -3905,6 +4032,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"sizeof: cannot index non-pointer type '{base_type}'"
             raise CompileError(message, line=place.line)
         if isinstance(place, DereferencePlace):
+            # ``*p`` for a pointer-to-array ``int (*p)[3]`` yields the pointee
+            # array type (``int[3]``).
+            if isinstance(place.pointer, VariablePlace) and place.pointer.name in self.pointer_array_types:
+                return self.pointer_array_types[place.pointer.name].pointee.to_string()
             pointer_type = self._expression_type(place.pointer)
             if not pointer_type.endswith("*"):
                 message = f"sizeof: cannot dereference non-pointer type '{pointer_type}'"
@@ -4035,6 +4166,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.global_scalars.pop(name, None)
                 self.global_arrays.pop(name, None)
             if isinstance(declaration, VarDecl):
+                if declaration.pointer_array_dimensions is not None:
+                    # ``int (*p)[3];`` at file scope — a pointer-sized global
+                    # cell.  Register the structured type, then fall through
+                    # to the scalar-global path with a flat pointer type so
+                    # storage / load width is a plain pointer.
+                    self._register_pointer_to_array(
+                        declaration.name,
+                        element_type_name=declaration.type_name,
+                        line=declaration.line,
+                        pointee_dimensions=declaration.pointer_array_dimensions,
+                    )
+                    if declaration.is_extern:
+                        self.extern_globals.add(name)
+                    self.global_scalars[name] = declaration
+                    continue
                 if declaration.type_name == "unsigned long":
                     message = "unsigned long globals are not supported"
                     raise CompileError(message, line=declaration.line)
@@ -4139,6 +4285,28 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"always_inline function '{function.name}' asm() body must be a string literal"
             raise CompileError(message, line=function.line)
         self.inline_bodies[function.name] = asm_arg.content
+
+    def _register_pointer_to_array(self, name: str, /, *, element_type_name: str, line: int, pointee_dimensions: list) -> None:
+        """Register *name* as a pointer-to-array ``T (*name)[d1]...[dn]``.
+
+        Builds ``PointerType(ArrayType(d1, ... ArrayType(dn, T)))`` from the
+        pointee bracket dimensions (outer-to-inner) and the element type
+        string, stores it in :attr:`pointer_array_types`, and sets
+        :attr:`variable_types` to a flat pointer string so legacy pointer-ness
+        (pointer width, deref) still holds.  Each dimension must be a
+        compile-time constant.
+
+        This is the shared lowering for both an explicit pointer-to-array
+        declaration (``int (*p)[3]``) and a decayed multidim array parameter
+        (``int m[][3]`` == ``int (*m)[3]``, pointee dims ``[3]``).
+        """
+        element: Type = Type.from_string(element_type_name)
+        sizes = [self._eval_constant_dimension(dimension, line=line) for dimension in pointee_dimensions]
+        pointee: Type = element
+        for count in reversed(sizes):
+            pointee = ArrayType(count=count, pointee=pointee)
+        self.pointer_array_types[name] = PointerType(pointee=pointee)
+        self.variable_types[name] = f"{element_type_name}*"
 
     def _register_struct_layout(self, declaration: StructDecl, /) -> None:
         """Compute and record a struct's packed field layout and total byte size.
@@ -6137,6 +6305,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             ):
                 message = f"local '{statement.name}' shadows a file-scope global"
                 raise CompileError(message, line=statement.line)
+            if isinstance(statement, VarDecl) and statement.pointer_array_dimensions is not None:
+                # ``int (*p)[3]`` — pointer-to-array.  A single pointer-sized
+                # slot holds the address; subscript / sizeof go through the
+                # structured pointer_array_types table (Task 2).
+                self._register_pointer_to_array(
+                    statement.name,
+                    element_type_name=statement.type_name,
+                    line=statement.line,
+                    pointee_dimensions=statement.pointer_array_dimensions,
+                )
+                self.allocate_local(statement.name, size=self.target.int_size)
+                continue
             if isinstance(statement, VarDecl):
                 self.variable_types[statement.name] = statement.type_name
                 if statement.function_pointer_params:

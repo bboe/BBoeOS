@@ -623,14 +623,20 @@ class Parser:
         *,
         is_extern: bool,
         line: int,
+        type_string: str,
     ) -> list[Node]:
-        """Parse a file-scope function-pointer or array-of-function-pointer.
+        """Parse a file-scope function-pointer, array-of-function-pointer, or pointer-to-array.
 
         Entered with the cursor on the opening ``LPAREN`` of
-        ``type (*name)(params)`` or ``type (*name[N])(params)``.  Returns
-        a single-element list containing either an :class:`ArrayDecl`
-        (function-pointer array) or a :class:`VarDecl` with
-        ``type_name="function_pointer"``.
+        ``type (*name)(params)``, ``type (*name[N])(params)``, or
+        ``type (*name)[N]...``.  Returns a single-element list containing
+        an :class:`ArrayDecl` (function-pointer array), a :class:`VarDecl`
+        with ``type_name="function_pointer"``, or a :class:`VarDecl` with
+        ``pointer_array_dimensions`` set (pointer-to-array).
+
+        Disambiguation: the ``[N]`` for array-of-function-pointer appears
+        INSIDE the ``(*name[N])`` group (before ``RPAREN``); the ``[N]``
+        for pointer-to-array appears OUTSIDE the group (after ``RPAREN``).
         """
         self.eat("LPAREN")
         self.eat("STAR")
@@ -642,6 +648,32 @@ class Parser:
                 array_size_expression = self.parse_expression()
             self.eat("RBRACKET")
         self.eat("RPAREN")
+        # Pointer-to-array: ``(*name)[N]...`` — the bracket follows the
+        # closing paren of the ``(*name)`` group and there is no ``(params)``
+        # after it.  Array-of-function-pointer has its ``[N]`` BEFORE the
+        # closing paren (already consumed above as array_size_expression) and
+        # always has a ``(params)`` here.
+        if self.peek()[0] == "LBRACKET" and array_size_expression is None:
+            pointee_dimensions: list[Node] = []
+            while self.peek()[0] == "LBRACKET":
+                self.eat("LBRACKET")
+                pointee_dimensions.append(self.parse_expression())
+                self.eat("RBRACKET")
+            init: Node | None = None
+            if self.peek()[0] == "ASSIGN":
+                self.eat("ASSIGN")
+                init = self.parse_expression()
+            self.eat("SEMI")
+            return [
+                VarDecl(
+                    init=init,
+                    is_extern=is_extern,
+                    line=line,
+                    name=name,
+                    pointer_array_dimensions=pointee_dimensions,
+                    type_name=type_string,
+                ),
+            ]
         self.eat("LPAREN")
         function_pointer_params_list, _ = self.parse_parameters()
         self.eat("RPAREN")
@@ -1336,23 +1368,36 @@ class Parser:
         function_pointer_params_list: list[Param] | None = None
         local_type_string = type_string
         local_fptr_array_size: Node | None = None
+        pointer_array_dimensions_value: list[Node] | None = None
         if self.peek()[0] == "LPAREN":
             # Function pointer variable: type (*name)(params)
             # or array-of-function-pointer: type (*name[N])(params)
+            # or pointer-to-array: type (*name)[N]...
             self.eat("LPAREN")
             self.eat("STAR")
             name = self.eat("IDENT")[1]
             # Check for array-of-function-pointer declarator: ``(*name[N])(params)``
+            # The ``[N]`` is INSIDE the ``(*name[N])`` group (before RPAREN).
             if self.peek()[0] == "LBRACKET":
                 self.eat("LBRACKET")
                 if self.peek()[0] != "RBRACKET":
                     local_fptr_array_size = self.parse_expression()
                 self.eat("RBRACKET")
             self.eat("RPAREN")
-            self.eat("LPAREN")
-            function_pointer_params_list, _ = self.parse_parameters()
-            self.eat("RPAREN")
-            local_type_string = "function_pointer"
+            # Pointer-to-array: ``(*name)[N]...`` — the bracket follows the
+            # closing paren and there is no ``(params)`` list after it.
+            if self.peek()[0] == "LBRACKET" and local_fptr_array_size is None:
+                pointee_dims: list[Node] = []
+                while self.peek()[0] == "LBRACKET":
+                    self.eat("LBRACKET")
+                    pointee_dims.append(self.parse_expression())
+                    self.eat("RBRACKET")
+                pointer_array_dimensions_value = pointee_dims
+            else:
+                self.eat("LPAREN")
+                function_pointer_params_list, _ = self.parse_parameters()
+                self.eat("RPAREN")
+                local_type_string = "function_pointer"
         else:
             name = self.eat("IDENT")[1]
         # Optional trailing ``__attribute__((pinned_register("REG")))``
@@ -1420,6 +1465,7 @@ class Parser:
             line=line,
             name=name,
             pinned_register=pinned_register_value,
+            pointer_array_dimensions=pointer_array_dimensions_value,
             type_name=local_type_string,
         )
 
@@ -2259,18 +2305,28 @@ class Parser:
         if self.peek()[0] == "LPAREN":
             # Function-pointer parameter: ``T (*name)(arg-list)``.  Used
             # in standard-library prototypes like ``qsort(void *, size_t,
-            # size_t, int (*cmp)(const void *, const void *))``.  cc.py
-            # treats every function pointer as an opaque pointer-width
-            # value at the ABI level; the inner argument list is parsed
-            # and discarded for now (the type-tracking is in
-            # ``VarDecl.function_pointer_params`` for local
-            # function-pointer variables, but parameter-level callable
-            # support is future work — the prototype just needs to
-            # parse so the surrounding header doesn't tank).
+            # size_t, int (*cmp)(const void *, const void *))``.  Also
+            # handles pointer-to-array: ``T (*name)[N]...``.  cc.py treats
+            # every function pointer as an opaque pointer-width value at the
+            # ABI level; the inner argument list is parsed and discarded for
+            # now.  ``pointer_array_dimensions`` is set for the array form.
             self.eat("LPAREN")
             self.eat("STAR")
             name_token = self.eat("IDENT")
             self.eat("RPAREN")
+            # Pointer-to-array: bracket after ``(*name)`` group, no ``(params)``.
+            if self.peek()[0] == "LBRACKET":
+                pointee_dims: list[Node] = []
+                while self.peek()[0] == "LBRACKET":
+                    self.eat("LBRACKET")
+                    pointee_dims.append(self.parse_expression())
+                    self.eat("RBRACKET")
+                return Param(
+                    is_array=False,
+                    name=name_token[1],
+                    pointer_array_dimensions=pointee_dims,
+                    type=type_string,
+                )
             self.eat("LPAREN")
             self.parse_parameters()
             self.eat("RPAREN")
@@ -2954,7 +3010,7 @@ class Parser:
         # (``type name(params)``).  Globals only — locals are handled
         # in ``parse_variable_declaration``.
         if self.peek()[0] == "LPAREN" and self.peek(offset=1)[0] == "STAR":
-            return self._parse_function_pointer_global(is_extern=is_extern, line=line)
+            return self._parse_function_pointer_global(is_extern=is_extern, line=line, type_string=type_string)
         name_token = self.eat("IDENT")
         name = name_token[1]
         if self.peek()[0] == "LPAREN":
