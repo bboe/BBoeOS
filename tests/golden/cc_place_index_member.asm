@@ -74,7 +74,7 @@ probe_word_member:
         mov ebx, eax
         push ebx
         mov eax, [ebp-8]
-        shl eax, 1
+        add eax, eax
         pop ebx
         add ebx, eax
         pop eax
@@ -84,7 +84,7 @@ probe_word_member:
         mov ebx, eax
         push ebx
         mov eax, [ebp-8]
-        shl eax, 1
+        add eax, eax
         pop ebx
         add ebx, eax
         movzx eax, word [_g_wrecs+4+ebx]
@@ -680,6 +680,46 @@ probe_double_index_int_const:
         mov eax, [_g_ints+4]
         mov esi, eax
         mov eax, [esi+8]
+        pop ebp
+        ret
+
+probe_double_index_int_store_const:
+        push ebp
+        mov ebp, esp
+        sub esp, 8
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov eax, [ebp-8]
+        push eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_ints+esi]
+        mov esi, eax
+        pop eax
+        mov [esi], eax
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_double_index_int_store_var:
+        push ebp
+        mov ebp, esp
+        sub esp, 12
+        mov [ebp-4], eax
+        mov [ebp-8], edx
+        mov [ebp-12], ecx
+        mov eax, [ebp-12]
+        push eax
+        mov esi, [ebp-4]
+        shl esi, 2
+        mov eax, [_g_ints+esi]
+        mov esi, eax
+        mov eax, [ebp-8]
+        shl eax, 2
+        add esi, eax
+        pop eax
+        mov [esi], eax
+        mov esp, ebp
         pop ebp
         ret
 
@@ -1446,6 +1486,31 @@ probe_call_through_ptr:
         mov eax, [ebp-4]
         call eax
         add esp, 4
+        mov esp, ebp
+        pop ebp
+        ret
+
+probe_chained_bitfield_store:
+        push ebp
+        mov ebp, esp
+        sub esp, 13
+        mov [ebp-4], eax
+        lea eax, [ebp-9]
+        mov ebx, eax
+        mov eax, [ebp-4]
+        mov cl, al
+        and cl, 7
+        shl cl, 1
+        mov al, [ebx+4]
+        and al, 241
+        or al, cl
+        mov [ebx+4], al
+        lea eax, [ebp-9]
+        mov ebx, eax
+        mov al, [ebx+4]
+        shr al, 1
+        and al, 7
+        movzx eax, al
         mov esp, ebp
         pop ebp
         ret

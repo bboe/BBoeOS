@@ -127,6 +127,337 @@ def _add_exec_probe(*, image: Path, name: str) -> None:
         )
 
 
+def _compile_and_add_depth_probe(*, image: Path, name: str, source: str) -> None:
+    """Attempt to compile *source* and add the resulting binary to bin/.
+
+    Uses the cc.py ``--object`` pipeline (cc.py → nasm → pack-ccobj → ccld).
+    If cc.py or nasm rejects the source — as is expected for the Stage 3a
+    depth probes before their lvalue patterns are supported — the function
+    returns silently without modifying the image.  The test then fails
+    because the shell prints ``unknown command`` instead of the expected
+    numeric output, giving a clean red baseline.
+
+    When Stage 3a makes the compiler accept the pattern, this function will
+    succeed, the binary will reach the image, and the test will turn green.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_path = Path(tmpdir) / f"{name}.c"
+        source_path.write_text(source)
+        asm_path = Path(tmpdir) / f"{name}.asm"
+        compile_result = subprocess.run(
+            ["./cc.py", "--bits", "32", "--object", str(source_path), str(asm_path)],
+            capture_output=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+        )
+        if compile_result.returncode != 0:
+            return  # expected compile failure; program deliberately not added
+        list_path = Path(tmpdir) / f"{name}.lst"
+        object_binary_path = Path(tmpdir) / f"{name}.obin"
+        nasm_result = subprocess.run(
+            [
+                "nasm",
+                "-f",
+                "bin",
+                "-i",
+                "kernel/include/",
+                "-l",
+                str(list_path),
+                "-o",
+                str(object_binary_path),
+                str(asm_path),
+            ],
+            capture_output=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+        )
+        if nasm_result.returncode != 0:
+            return  # unexpected assemble failure; skip rather than crash
+        ccobj_path = Path(tmpdir) / f"{name}.ccobj"
+        subprocess.run(
+            ["./cc.py", "pack-ccobj", str(object_binary_path), str(list_path), str(ccobj_path)],
+            check=True,
+            cwd=str(REPO_ROOT),
+        )
+        binary_path = Path(tmpdir) / name
+        subprocess.run(
+            ["python3", "tools/ccld.py", "--output", str(binary_path), str(ccobj_path)],
+            check=True,
+            cwd=str(REPO_ROOT),
+        )
+        add_file(
+            executable=True,
+            file_path=str(binary_path),
+            image_path=str(image),
+            subdirectory="bin",
+        )
+
+
+def _chain_bitfield_store_setup(*, image: Path, test: ProgramTest) -> None:
+    """Runtime oracle: store to a bitfield through a chained dot (``outer.inner.field = v``).
+
+    Exercises the new ``_emit_member_scalar_resolved_store`` path where the
+    base is a ``MemberPlace`` (chained dot on a struct-value member), which is
+    an accumulator-clobbering register base: ``resolve_address`` materialises
+    the intermediate struct address into BX first, then the rhs is evaluated
+    into EAX, then ``_emit_resolved_field_store`` dispatches to
+    ``_emit_bitfield_write``.  The legacy ``_emit_member_chained_store`` had no
+    bitfield branch — this is strictly more correct, but was previously
+    untested.  The struct is file-scope (global) to avoid the pre-existing
+    ``_resolve_struct_value_base`` EBP-vs-BSS mismatch for local structs in
+    ``main`` (a separate issue not introduced by this commit).
+    Expected output: 5.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+struct inner_bits { int padding; unsigned char flag : 3; };
+struct outer_bits { struct inner_bits part; };
+struct outer_bits obj;
+int main() {
+    obj.part.padding = 0;
+    obj.part.flag = 5;
+    printf("%d\\n", obj.part.flag);
+    return 0;
+}
+""",
+    )
+
+
+def _depth_arrow_index_setup(*, image: Path, test: ProgramTest) -> None:
+    """Stage 3a probe: ``p->v[1][2]`` where ``v`` is a multidim array field.
+
+    Fails today with a parse error on the ``int v[3][4]`` struct field
+    declaration (multidimensional array struct fields not yet supported in
+    codegen).  Expected value when fixed: 77.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+struct inner { int v[3][4]; };
+struct inner obj;
+struct inner *p;
+int main() {
+    p = &obj;
+    obj.v[1][2] = 77;
+    printf("%d\\n", p->v[1][2]);
+    return 0;
+}
+""",
+    )
+
+
+# Two Stage 3a depth shapes are deferred to FRONTEND/parser work, NOT codegen:
+# pointer-to-multidim-array declarations (``int (*pm)[2][3]``, needed for
+# ``(*pm)[1][2]``) and subscript-then-member access (``arr[i][j].member``, e.g.
+# ``b.grid[1][0].f[1]``) both fail in the PARSER before any address resolution.
+# The recursive resolve_address(place) cannot reach them on its own, so their
+# probes were dropped here; re-add them once the parser accepts the syntax.
+
+
+def _depth_triple_setup(*, image: Path, test: ProgramTest) -> None:
+    """Stage 3a probe: ``grid[0][1][0]`` through an array-of-pointer chain.
+
+    The arbitrary-depth array-of-pointers reconstruct lowers this as a
+    left-nested ``Index`` rvalue feeding a final deref+subscript, so the
+    recursive resolver reaches any depth.  Expected value: 20.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+int r0[2];
+int r1[2];
+int *rows[2];
+int **grid[1];
+int main() {
+    r0[0] = 10;
+    r0[1] = 11;
+    r1[0] = 20;
+    r1[1] = 21;
+    rows[0] = r0;
+    rows[1] = r1;
+    grid[0] = rows;
+    printf("%d\\n", grid[0][1][0]);
+    return 0;
+}
+""",
+    )
+
+
+def _depth_triple_store_setup(*, image: Path, test: ProgramTest) -> None:
+    """Stage 3a probe: STORE + read at depth through an array-of-pointer chain.
+
+    Writes ``grid[0][1][0]`` and ``grid[0][0][1]`` through the arbitrary-depth
+    array-of-pointers lvalue path (``_emit_place_store`` -> reconstruct ->
+    ``_emit_resolved_address_store``), then reads both back.  Expected value:
+    39 (30 + 9).
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+int a0[2];
+int a1[2];
+int *rows[2];
+int **grid[1];
+int main() {
+    a0[0] = 1;
+    a0[1] = 2;
+    a1[0] = 3;
+    a1[1] = 4;
+    rows[0] = a0;
+    rows[1] = a1;
+    grid[0] = rows;
+    grid[0][1][0] = 30;
+    grid[0][0][1] = 9;
+    printf("%d\\n", grid[0][1][0] + grid[0][0][1]);
+    return 0;
+}
+""",
+    )
+
+
+def _double_index_ptr_store_setup(*, image: Path, test: ProgramTest) -> None:
+    """Runtime oracle: store through an array-of-pointers double subscript.
+
+    Verifies that the ``_emit_resolved_address_store`` path (the pure store
+    rewrite that replaced the old bespoke double-index store emitter) writes
+    the correct value at runtime.  Expected output: 77.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+int a[2]; int b[2]; int *rows[2];
+int main() {
+    rows[0] = a;
+    rows[1] = b;
+    rows[1][0] = 33;
+    rows[1][1] = 44;
+    printf("%d\\n", rows[1][0] + rows[1][1]);
+    return 0;
+}
+""",
+    )
+
+
+def _member_store_via_expr_setup(*, image: Path, test: ProgramTest) -> None:
+    """Runtime oracle: store through a pointer field accessed via general expression.
+
+    Exercises the new ``_emit_member_scalar_resolved_store`` path where the
+    base is a ``DereferencePlace`` of a general pointer expression (a
+    ``PlaceLoad`` of a member — not a named ``VariablePlace`` pointer and not
+    the ``Cast(&local)`` fast path).  ``node_a.leaf_ptr->data = 42`` parses as
+    ``MemberPlace(DereferencePlace(PlaceLoad(MemberPlace(VariablePlace("node_a"),
+    "leaf_ptr"))), "data")``: the pointer expression is a ``PlaceLoad``, so
+    ``_member_base_preserves_accumulator`` returns False and the
+    accumulator-clobbering path runs — ``resolve_address`` evaluates the
+    pointer expression into EAX and moves it to BX; then the rhs is evaluated
+    and stored.  Both the struct and its target are file-scope (global) to
+    avoid the pre-existing ``_resolve_struct_value_base`` EBP-vs-BSS mismatch
+    for local struct values in ``main``.  Expected output: 42.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+struct leaf { int data; };
+struct node { struct leaf *leaf_ptr; };
+struct leaf leaf_target;
+struct node node_a;
+int main() {
+    node_a.leaf_ptr = &leaf_target;
+    node_a.leaf_ptr->data = 42;
+    printf("%d\\n", node_a.leaf_ptr->data);
+    return 0;
+}
+""",
+    )
+
+
+def _struct_array_int_member_setup(*, image: Path, test: ProgramTest) -> None:
+    """Runtime oracle: ``arr[i].member[j]`` over an int (4-byte element) member.
+
+    Exercises the shape-B struct-array path now routed through
+    ``resolve_address``.  The legacy ``_resolve_place`` restricted the element
+    index to 1- / 2-byte members and raised for anything larger; the recursive
+    resolver scales the inner subscript through ``_emit_scale_index`` (``shl
+    eax, 2`` for a 4-byte int element), so the larger-element case now compiles.
+    This probe proves it computes the correct address: it fills
+    ``items[i].values[j]`` with ``i*10 + j`` and reads back
+    ``items[1].values[2]`` (== 12).  Both struct and array are file-scope
+    (global) to avoid the pre-existing EBP-vs-BSS mismatch for local struct
+    values in ``main``.  Expected output: 12.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+struct cell { int values[3]; };
+struct cell items[2];
+int main() {
+    int i;
+    int j;
+    i = 0;
+    while (i < 2) {
+        j = 0;
+        while (j < 3) {
+            items[i].values[j] = i * 10 + j;
+            j++;
+        }
+        i++;
+    }
+    printf("%d\\n", items[1].values[2]);
+    return 0;
+}
+""",
+    )
+
+
+def _struct_array_stride_imul_setup(*, image: Path, test: ProgramTest) -> None:
+    """Regression oracle: struct-array stride that lowers to ``imul``.
+
+    Direct guard for the asm.c self-host miscompile fixed in
+    ``fix(cc): correct struct-array stride/decay in resolve_address``.  When
+    the struct size is not 1 / 2 / 4 the dynamic-index scaling in
+    ``resolve_address`` falls through ``_emit_scale_index`` to an ``imul``.
+    f9c82859 emitted the *three*-operand ``imul reg, reg, stride`` form, which
+    the self-hosted assembler in ``user/programs/asm.c`` cannot parse (its
+    ``handle_imul`` only accepts ``imul reg, imm``); it silently encoded the
+    immediate as 0, so every ``symbol_table[index]`` access read the wrong
+    entry.  The struct here mirrors asm.c's ``struct Symbol`` exactly — a
+    38-byte (= 0x26) layout, the very stride whose immediate was zeroed.
+
+    The probe fills ``entries[i].value`` with ``i * 7 + 1`` over a dynamic
+    index loop (forcing the imul-scaled address rather than a constant fold)
+    and reads back ``entries[3].value`` (== 22).  A wrong stride would read a
+    neighbouring entry and print something else.  File-scope to dodge the
+    pre-existing EBP-vs-BSS mismatch for local struct values in ``main``.
+    Expected output: 22.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+struct symbol_entry { char name[32]; int value; char type; char scope; };
+struct symbol_entry entries[5];
+int main() {
+    int i;
+    i = 0;
+    while (i < 5) {
+        entries[i].value = i * 7 + 1;
+        i++;
+    }
+    printf("%d\\n", entries[3].value);
+    return 0;
+}
+""",
+    )
+
+
 # ---------------------------------------------------------------------------
 # bbfs helpers (exec_first_middle_last setup)
 # ---------------------------------------------------------------------------
@@ -690,6 +1021,16 @@ TESTS: list[ProgramTest] = [
     ),
     ProgramTest("cat_stdin", ["echo piped | cat"], r"^piped$"),
     ProgramTest("cftest", ["convention_test carry"], r"tick\(\) fired 3 times, remaining = 0"),
+    # chain_bitfield_store: runtime oracle for the new
+    # _emit_member_scalar_resolved_store path that correctly dispatches to
+    # _emit_bitfield_write when the base is a chained MemberPlace (outer.inner.bf
+    # = v).  The legacy _emit_member_chained_store had no bitfield branch.
+    ProgramTest(
+        "chain_bitfield_store",
+        ["chain_bitfield_store"],
+        r"^5$",
+        setup=_chain_bitfield_store_setup,
+    ),
     ProgramTest("chmod", ["chmod +x arp"], r"\$"),
     ProgramTest("cp", ["cp src/parse_ip.asm tmpb", "ls"], r"tmpb"),
     ProgramTest(
@@ -724,7 +1065,38 @@ TESTS: list[ProgramTest] = [
         ["date", "date", "date"],
         r"(\d{4}-\d{2}-\d{2}) \d{2}:\d{2}:\d{2}[\s\S]*?\1 \d{2}:\d{2}:\d{2}[\s\S]*?\1 \d{2}:\d{2}:\d{2}",
     ),
+    # Stage 3a depth probes — arbitrary-depth lvalue patterns that the recursive
+    # resolve_address(place) unification will support.  Each program is compiled
+    # on the fly by its setup function; if cc.py rejects the source (as expected
+    # before Stage 3a lands) the binary is not added to the image and the shell
+    # prints "unknown command", causing a clean FAIL.  Once Stage 3a makes the
+    # compiler accept the pattern the setup will succeed, the binary will be in
+    # the image, and the test will turn green.
+    ProgramTest(
+        "depth_arrow_index",
+        ["depth_arrow_index"],
+        r"^77$",
+        setup=_depth_arrow_index_setup,
+    ),
+    ProgramTest(
+        "depth_triple",
+        ["depth_triple"],
+        r"^20$",
+        setup=_depth_triple_setup,
+    ),
+    ProgramTest(
+        "depth_triple_store",
+        ["depth_triple_store"],
+        r"^39$",
+        setup=_depth_triple_store_setup,
+    ),
     ProgramTest("dns", ["dns example.com"], r"example\.com is at \d+\.\d+\.\d+\.\d+", with_net=True, timeout=30.0),
+    ProgramTest(
+        "double_index_ptr_store",
+        ["double_index_ptr_store"],
+        r"^77$",
+        setup=_double_index_ptr_store_setup,
+    ),
     ProgramTest(
         "doubly_indirect_cat",
         ["cat src/large.bin"],
@@ -831,6 +1203,18 @@ TESTS: list[ProgramTest] = [
     ProgramTest("loop", ["loop_test basic"], r"aaaaa"),
     ProgramTest("loop_array", ["loop_test array"], r"abc"),
     ProgramTest("ls", ["ls bin"], r"^arp$"),
+    # member_store_via_expr: runtime oracle for the new
+    # _emit_member_scalar_resolved_store path where the base is a general
+    # via-expression DereferencePlace (pointer from a member PlaceLoad —
+    # not a named VariablePlace pointer).  Confirms the base-first ordering
+    # (resolve_address emits the pointer expression into BX; then rhs into
+    # EAX; then store) produces the correct value.
+    ProgramTest(
+        "member_store_via_expr",
+        ["member_store_via_expr"],
+        r"^42$",
+        setup=_member_store_via_expr_setup,
+    ),
     ProgramTest("mkdir", ["mkdir tmpd", "ls"], r"tmpd/"),
     ProgramTest(
         "mkdir_ls_root",
@@ -1069,6 +1453,28 @@ TESTS: list[ProgramTest] = [
         expect="",
         filesystems=_EXT2_ONLY,
         setup=_ext2_add_straddle_dir_filler,
+    ),
+    # struct_array_int_member: runtime oracle for the shape-B struct-array
+    # path (arr[i].member[j]) now folded into resolve_address.  The member is
+    # an int (4-byte) array, which the legacy _resolve_place rejected (element
+    # index restricted to 1- / 2-byte members); the recursive resolver scales
+    # the inner subscript generally (shl eax, 2), so this larger-element case
+    # compiles.  Confirms the address arithmetic is correct.
+    ProgramTest(
+        "struct_array_int_member",
+        ["struct_array_int_member"],
+        r"^12$",
+        setup=_struct_array_int_member_setup,
+    ),
+    # struct_array_stride_imul: direct regression guard for the asm.c
+    # self-host miscompile (f9c82859).  A non-power-of-2 struct stride (38,
+    # mirroring asm.c's struct Symbol) lowers the dynamic index scale to an
+    # imul; the buggy three-operand spelling broke the self-hosted assembler.
+    ProgramTest(
+        "struct_array_stride_imul",
+        ["struct_array_stride_imul"],
+        r"^22$",
+        setup=_struct_array_stride_imul_setup,
     ),
     ProgramTest(
         "tail_file",

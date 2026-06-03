@@ -154,6 +154,8 @@ int probe_double_index_byte_const(void) { return names[1][2]; }
 int probe_double_index_byte_var(int i, int j) { return names[i][j]; }
 int probe_double_index_byte_expr(int i, int j) { return names[i][j + 1]; }
 int probe_double_index_int_const(void) { return ints[1][2]; }
+void probe_double_index_int_store_const(int i, int v) { ints[i][0] = v; }
+void probe_double_index_int_store_var(int i, int j, int v) { ints[i][j] = v; }
 int probe_double_index_int_var(int i, int j) { return ints[i][j]; }
 int probe_double_index_word_var(int i, int j) { return words[i][j]; }
 
@@ -215,6 +217,16 @@ int probe_double_index_preinc(int i, int j) { return ++g_rows[i][j]; }
 void probe_named_array_predec_stmt(int i) { --g_arr[i]; }
 void probe_double_index_preinc_stmt(int i, int j) { ++g_rows[i][j]; }
 int probe_call_through_ptr(int (*fp)(int), int x) { return (*fp)(x); }
+
+/* --- Plan 6 resolver-store probes (no legacy oracle; eyeballed + runtime-verified) --- */
+/* probe_chained_bitfield_store: outer.inner_flags.b = v via the
+   _emit_member_scalar_resolved_store accumulator-clobbering path
+   (MemberPlace base → PlaceLoad of inner struct address into BX) with a
+   bitfield terminal (_emit_resolved_field_store → _emit_bitfield_write).
+   The legacy _emit_member_chained_store had no bitfield branch; this path
+   is strictly more correct and was previously untested. */
+struct flags_wrapper { struct flags inner_flags; };
+int probe_chained_bitfield_store(int v) { struct flags_wrapper w; w.inner_flags.b = v; return w.inner_flags.b; }
 """
 
 
