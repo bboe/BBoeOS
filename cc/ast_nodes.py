@@ -479,6 +479,11 @@ class Param:
     push is emitted; after the call the named register is captured into the
     local.  In the callee body, ``*param = expr`` emits ``mov REG, expr``
     rather than a pointer write.
+
+    ``pointer_array_dimensions`` is set for ``(*name)[N]...`` pointer-to-array
+    declarators.  It holds the pointee array's dimension expressions
+    outer-to-inner (e.g. ``[Int(3)]`` for ``int (*p)[3]``).  ``None`` for
+    ordinary, array-decayed, or function-pointer parameters.
     """
 
     dimensions: list | None = field(default=None, kw_only=True)  # list[Node] outer-to-inner, multidim only
@@ -486,6 +491,7 @@ class Param:
     is_array: bool
     name: str
     out_register: str | None = field(default=None, kw_only=True)
+    pointer_array_dimensions: list | None = field(default=None, kw_only=True)  # list[Node], pointer-to-array only
     type: str
 
 
@@ -737,6 +743,11 @@ class VarDecl(Node):
     register instead of EAX.  Useful when EAX/AL holds an actual
     syscall argument (e.g. fd_ioctl's cmd byte) that the dispatcher
     must preserve through to the handler.
+
+    ``pointer_array_dimensions`` is set for ``(*name)[N]...`` pointer-to-array
+    declarators.  It holds the pointee array's dimension expressions
+    outer-to-inner (e.g. ``[Int(3)]`` for ``int (*p)[3]``).  ``None`` for
+    ordinary scalars, function-pointer variables, and array declarations.
     """
 
     asm_register: str | None = field(default=None, kw_only=True)
@@ -746,6 +757,7 @@ class VarDecl(Node):
     is_extern: bool = field(default=False, kw_only=True)
     name: str
     pinned_register: str | None = field(default=None, kw_only=True)
+    pointer_array_dimensions: list[Node] | None = field(default=None, kw_only=True)
     type_name: str
 
 

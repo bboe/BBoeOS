@@ -298,6 +298,23 @@ class EmissionMixin:
         caller_push_index = 0
         for i, param in enumerate(parameters):
             self.variable_types[param.name] = param.type
+            # A multidimensional array parameter (``int m[][3]`` →
+            # dimensions ``[None, Int(3)]``) decays to a pointer-to-array
+            # ``int (*)[3]`` (drop the leading outer dim).  An explicit
+            # ``int (*m)[3]`` parameter carries its pointee dims directly.
+            # Both become a pointer-sized slot driven by pointer_array_types.
+            pointee_dimensions: list | None = None
+            if param.pointer_array_dimensions is not None:
+                pointee_dimensions = param.pointer_array_dimensions
+            elif param.dimensions is not None and len(param.dimensions) > 1:
+                pointee_dimensions = param.dimensions[1:]
+            if pointee_dimensions is not None:
+                self._register_pointer_to_array(
+                    param.name,
+                    element_type_name=param.type,
+                    line=function_line,
+                    pointee_dimensions=pointee_dimensions,
+                )
             if param.is_array:
                 self.variable_arrays.add(param.name)
             if param.out_register is not None:
@@ -1173,6 +1190,13 @@ class EmissionMixin:
         # its reload via :meth:`generate_expression`'s
         # ``Var(name=ax_local)`` fast path.
         vname = expression.array.name
+        if vname in self.pointer_array_types:
+            # A single subscript of a pointer-to-array ``int (*p)[3]`` is a
+            # partial subscript (it would yield a row pointer, not an element).
+            # Only a FULL subscript ``p[i][j]...`` is supported — that shape
+            # arrives as a uniform SubscriptPlace chain, not a bare Index.
+            message = f"unsupported partial subscript of pointer-to-array '{vname}'"
+            raise CompileError(message, line=expression.line)
         index_expression = expression.index
         self._check_defined(vname, line=expression.line)
         # Pointee / element width selects the load encoding.  For
@@ -3092,10 +3116,6 @@ class EmissionMixin:
             # ``inline_bodies`` and will be spliced at each call site.
             return
         parameters = function.params
-        for parameter in parameters:
-            if parameter.dimensions is not None:
-                message = f"multidimensional array parameter '{parameter.name}' is not yet supported in codegen"
-                raise CompileError(message, line=function.line)
         body = function.body
         self.array_labels = {}
         self.array_sizes = {}
@@ -4152,6 +4172,15 @@ class EmissionMixin:
             self.ax_clear()
         elif isinstance(statement, VarDecl):
             self.visible_vars.add(statement.name)
+            if statement.pointer_array_dimensions is not None:
+                # Pointer-to-array: keep the flat pointer string set in
+                # scan_locals (the element type would lose the pointer-ness).
+                # The init (``int (*p)[3] = g;``) decays the array rvalue to its
+                # base address via the normal store path.
+                self.variable_types.setdefault(statement.name, f"{statement.type_name}*")
+                if statement.init is not None:
+                    self.emit_store_local(expression=statement.init, name=statement.name)
+                return
             self.variable_types[statement.name] = statement.type_name
             if statement.name in self.constant_aliases:
                 return

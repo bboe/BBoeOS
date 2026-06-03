@@ -49,12 +49,15 @@ def test_multidim_local_now_compiles(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_multidim_param_rejected_cleanly(tmp_path: Path) -> None:
-    """A function with an ``int m[2][3]`` parameter fails to compile cleanly."""
+def test_multidim_param_now_compiles(tmp_path: Path) -> None:
+    """A function with an ``int m[2][3]`` parameter now compiles — final guard lifted.
+
+    The parameter decays to a pointer-to-array ``int (*)[3]`` and ``m[i][j]``
+    addresses through the loaded pointer value (row-major on the pointee dims).
+    """
     source = "int sum(int m[2][3]) { return m[0][0]; }\nint main(void) { return 0; }\n"
     result = _compile(source, tmp_path)
-    assert result.returncode != 0
-    assert "multidimensional" in result.stderr.lower()
+    assert result.returncode == 0, result.stderr
 
 
 def test_multidim_struct_field_now_compiles(tmp_path: Path) -> None:
