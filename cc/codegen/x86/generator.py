@@ -76,6 +76,7 @@ from cc.errors import CompileError
 from cc.options import CompilerOptions
 from cc.target import CodegenTarget, X86CodegenTarget16, X86CodegenTarget32
 from cc.tokens import COMPARISON_OPERATIONS
+from cc.types import ArrayType, Type
 from cc.utils import decode_string_escapes, string_byte_length
 
 # Regexes used by the known_local_bytes tracker in _update_known_bytes.
@@ -326,6 +327,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self._builtin_clobbers: dict[str, frozenset[str]] = dict(self.BUILTIN_CLOBBERS)
         for name, extra in target_extra.items():
             self._builtin_clobbers[name] |= extra
+        self.array_types: dict[str, ArrayType] = {}  # name → structured ArrayType for multidim arrays
         self.asm_symbol_globals: dict[str, str] = {}  # name → asm symbol (no _g_ prefix)
         self.extern_globals: set[str] = set()  # names declared with `extern` (storage lives in another translation unit)
         self.extern_functions: set[str] = set()  # functions declared but not defined in this translation unit
@@ -1646,6 +1648,15 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self._emit_global_export(name)
             self.emit(f"{self._global_label(name)}: {directive} {', '.join(rendered)}")
             return
+        # Multidimensional arrays use the registered ArrayType for the total
+        # byte count so all dimensions contribute (row-major contiguous storage).
+        # Single-dimension arrays use the legacy size-expression * stride path
+        # so their output is byte-identical.
+        if name in self.array_types:
+            array_type = self.array_types[name]
+            total_bytes = array_type.sizeof(pointer_width=self.target.int_size, scalar_width=self._type_size)
+            self.bss_vars.append((name, str(total_bytes)))
+            return
         size_expression = self._constant_expression(declaration.size)
         # Fold ``size * stride`` at compile time when the size is a
         # plain integer — the self-hosted assembler in user/programs/asm.c
@@ -2392,6 +2403,115 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
         self.emit(f"        mov {register}, {source}")
 
+    def _emit_multidim_subscript_address(self, base_name: str, indices: list[Node], /, *, line: int) -> tuple[str, int]:
+        """Emit the row-major address of ``base_name[i0][i1]...`` and return ``(addr, element_size)``.
+
+        Computes the linear byte offset by Horner expansion over the
+        registered dimensions: byte offset ``= sum(i_p * stride_bytes_p)``
+        where ``stride_bytes_p`` is the product of the inner dimensions
+        after position *p* times the element size.  Constant indices fold
+        into a static displacement; dynamic indices are evaluated into the
+        accumulator, scaled, and summed into the BX index register (the
+        same convention used by :meth:`_accumulate_subscript`).  The
+        returned ``addr`` is a ready-to-use NASM memory operand; callers
+        size the terminal load/store with the returned element size.
+
+        Raises:
+            CompileError: if the subscript count does not match the array's
+            dimension count.
+
+        """
+        array_type = self.array_types[base_name]
+        dimension_counts: list[int] = []
+        element_type: Type = array_type
+        while isinstance(element_type, ArrayType):
+            dimension_counts.append(element_type.count or 0)
+            element_type = element_type.pointee
+        if len(indices) != len(dimension_counts):
+            message = f"wrong number of subscripts for '{base_name}'"
+            raise CompileError(message, line=line)
+        element_size = self._type_size(element_type.to_string())
+        # Per-position byte stride: product of the inner dimension counts
+        # after this position, times the element size.
+        strides: list[int] = []
+        running = element_size
+        for count in reversed(dimension_counts):
+            strides.append(running)
+            running *= count
+        strides.reverse()
+        base_kind, base = self._variable_base(base_name, line=line)
+        displacement = 0
+        bx = self.target.bx_register
+        # Pre-evaluate every dynamic index: compute its scaled byte offset into AX
+        # and push it to the stack, protecting BX across each expression via
+        # push/pop when BX holds a pinned variable.  Evaluating all expressions
+        # before any BX accumulation ensures that an index variable pinned to BX
+        # (e.g. the innermost loop counter k in a triple-nested loop) is read from
+        # the correct register before BX is first overwritten by the accumulator.
+        dynamic_index_count = 0
+        protect_bx = self._bx_holds_pinned_var()
+        for index_node, stride in zip(indices, strides, strict=True):
+            if isinstance(index_node, Int):
+                displacement += index_node.value * stride
+                continue
+            if protect_bx:
+                self.emit(f"        push {bx}")
+            self.generate_expression(index_node)  # AX = dynamic index
+            self._emit_scale_index(self.target.acc, scale=stride)  # AX = byte offset
+            if protect_bx:
+                self.emit(f"        pop {bx}")
+            self.emit(f"        push {self.target.acc}")  # stash scaled offset
+            dynamic_index_count += 1
+        # Accumulate all stashed offsets into BX (sum; addition is commutative so
+        # pop order does not affect the result).
+        index_register: str | None = None
+        for _ in range(dynamic_index_count):
+            if index_register is None:
+                self.emit(f"        pop {bx}")
+                index_register = bx
+            else:
+                self.emit(f"        pop {self.target.acc}")
+                self.emit(f"        add {bx}, {self.target.acc}")
+        if index_register is not None and base_kind == "frame":
+            # A frame base (BP-relative) cannot be combined with a BX index in a
+            # 16-bit effective address ([BP+BX] is illegal — a 16-bit index must
+            # be SI/DI).  Materialize the full address into SI (as the
+            # double-index emitter does) so ``[si+disp]`` is valid at both widths.
+            si = self.target.si_register
+            self.emit(f"        lea {si}, [{base}]")
+            self.emit(f"        add {si}, {index_register}")
+            base = si
+            index_register = None
+        addr = self._build_address(base, displacement, index=index_register or "")
+        return addr, element_size
+
+    def _emit_multidim_subscript_load(self, base_name: str, indices: list[Node], /, *, line: int) -> None:
+        """Load ``base_name[i0][i1]...`` (contiguous multidim, row-major) into the accumulator."""
+        self.ax_clear()
+        protect_bx = self._bx_holds_pinned_var()
+        if protect_bx:
+            self.emit(f"        push {self.target.bx_register}")
+        addr, element_size = self._emit_multidim_subscript_address(base_name, indices, line=line)
+        self._emit_field_load(addr=addr, field_size=element_size)
+        if protect_bx:
+            self.emit(f"        pop {self.target.bx_register}")
+        self.ax_clear()
+
+    def _emit_multidim_subscript_store(self, base_name: str, indices: list[Node], value: Node, /, *, line: int) -> None:
+        """Store *value* into ``base_name[i0][i1]...`` (contiguous multidim, row-major)."""
+        self.ax_clear()
+        protect_bx = self._bx_holds_pinned_var()
+        if protect_bx:
+            self.emit(f"        push {self.target.bx_register}")
+        self.generate_expression(value)  # AX = value
+        self.emit(f"        push {self.target.acc}")
+        addr, element_size = self._emit_multidim_subscript_address(base_name, indices, line=line)
+        self.emit(f"        pop {self.target.acc}")  # AX = value
+        self.ax_clear()
+        self._emit_field_store(addr=addr, field_size=element_size)
+        if protect_bx:
+            self.emit(f"        pop {self.target.bx_register}")
+
     def _emit_place_address_of(self, place: Place, /) -> None:
         """Emit the address of *place* into the accumulator (``&place``).
 
@@ -2643,6 +2763,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # fast path, self-load through the accumulator) that do not fit the
         # PlaceAddress model; route them to dedicated emitters before the
         # generic _resolve_place path.
+        if (chain := self._uniform_subscript_chain(place)) is not None:
+            base_name, indices = chain
+            if self._is_multidim_array(base_name):
+                # ``name[i][j]...`` over a contiguous multidim array:
+                # row-major (Horner) addressing on the registered dims.
+                self._emit_multidim_subscript_load(base_name, indices, line=place.line)
+            else:
+                # Array of pointers (or pointer base): reconstruct the exact
+                # legacy deref-rooted node and feed the unchanged emitter so
+                # the byte output is identical to the pre-refactor compiler.
+                self._emit_double_index_place_load(self._reconstruct_double_index_place(base_name, indices, line=place.line))
+            return
         if (
             isinstance(place, SubscriptPlace)
             and isinstance(place.base, DereferencePlace)
@@ -2682,6 +2814,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return
         if isinstance(place, MemberPlace) and self._match_struct_array_member(place) is None:
             self._emit_member_scalar_store(place, value)
+            return
+        if (chain := self._uniform_subscript_chain(place)) is not None:
+            base_name, indices = chain
+            if self._is_multidim_array(base_name):
+                # ``name[i][j]... = value`` over a contiguous multidim array.
+                self._emit_multidim_subscript_store(base_name, indices, value, line=place.line)
+            else:
+                # Array of pointers: reconstruct the legacy node and feed the
+                # unchanged store emitter for byte-identical output.
+                self._emit_double_index_place_store(self._reconstruct_double_index_place(base_name, indices, line=place.line), value)
             return
         if (
             isinstance(place, SubscriptPlace)
@@ -2983,6 +3125,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return self.NAMED_CONSTANT_VALUES[size.name] * stride
         return None
 
+    def _eval_constant_dimension(self, dimension: Node, /, *, line: int) -> int:
+        """Return the integer value of a compile-time-constant array dimension.
+
+        Delegates to :meth:`_eval_local_array_size` with ``stride=1`` so that
+        only :class:`Int` literals and :attr:`NAMED_CONSTANT_VALUES` entries
+        resolve.  Raises :class:`CompileError` for any other expression (e.g.
+        a runtime variable) since multidimensional array sizes must be known
+        at compile time.
+        """
+        result = self._eval_local_array_size(dimension, stride=1)
+        if result is None:
+            message = "multidimensional array dimension must be a compile-time constant"
+            raise CompileError(message, line=line)
+        return result
+
     def _expression_type(self, node: Node, /) -> str:
         """Infer the compile-time type of *node* for ``sizeof(expression)``.
 
@@ -3165,6 +3322,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             and isinstance(place.base, MemberPlace)
             and self._match_struct_array_member(place.base) is None
         )
+
+    def _is_multidim_array(self, name: str, /) -> bool:
+        """Return True if *name* is a registered contiguous multidimensional array.
+
+        A name appears in :attr:`array_types` only for genuine multidim
+        declarations (``int m[2][3]``), whose registered type is a nested
+        :class:`ArrayType`.  Single-dimension arrays and arrays of pointers
+        are not registered here, so this is the type-driven discriminator
+        that routes ``name[i][j]`` to the row-major path versus the legacy
+        array-of-pointers deref path.
+        """
+        return isinstance(self.array_types.get(name), ArrayType)
 
     def _load_member_base(self, object_name: str, /) -> str:
         """Return a base register holding the struct address for ``object_name``.
@@ -3575,6 +3744,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """
         return sorted(items, key=lambda item: (-counts.get(item[0], 0), item[1]))
 
+    def _register_array_type(self, name: str, /, *, dimensions: list | None, line: int, type_name: str) -> None:
+        """Record the structured ArrayType for array variable *name* (row-major).
+
+        Builds a nested :class:`ArrayType` chain from *dimensions* (outer-to-inner
+        bracket size expressions) wrapping the element type parsed from
+        *type_name*.  Each dimension expression must be a compile-time constant;
+        non-constant expressions raise :class:`CompileError`.
+
+        Only called for multidimensional declarations (``dimensions is not None``).
+        Single-dimension arrays continue using the legacy ``size``-field path and
+        are not registered here (YAGNI — Task 3 will extend if needed).
+        """
+        element = Type.from_string(type_name)
+        sizes = [self._eval_constant_dimension(dimension, line=line) for dimension in (dimensions or [])]
+        array_type: Type = element
+        for count in reversed(sizes):
+            array_type = ArrayType(count=count, pointee=array_type)
+        self.array_types[name] = array_type
+
     def _register_globals(self, declarations: list[Node], /) -> None:
         """Record file-scope declarations and validate their shapes.
 
@@ -3676,8 +3864,19 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
                 if declaration.dimensions is not None:
-                    message = f"multidimensional array '{declaration.name}' is not yet supported in codegen"
-                    raise CompileError(message, line=declaration.line)
+                    if declaration.init is not None:
+                        message = "multidimensional array initializers are not yet supported"
+                        raise CompileError(message, line=declaration.line)
+                    self._register_array_type(
+                        declaration.name,
+                        dimensions=declaration.dimensions,
+                        line=declaration.line,
+                        type_name=declaration.type_name,
+                    )
+                    if declaration.is_extern:
+                        self.extern_globals.add(name)
+                    self.global_arrays[name] = declaration
+                    continue
                 if (
                     declaration.type_name not in self.GLOBAL_ARRAY_PRIMITIVE_TYPES
                     and not declaration.type_name.startswith("struct ")
@@ -3966,6 +4165,33 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return self.target.bx_register, True, info
         message = "unsupported member Place base in _resolve_member_place_info"
         raise CompileError(message, line=line)
+
+    @staticmethod
+    def _reconstruct_double_index_place(base_name: str, indices: list[Node], /, *, line: int) -> SubscriptPlace:
+        """Rebuild the legacy array-of-pointers ``name[i0][i1]`` node from a uniform chain.
+
+        The parser now emits one uniform shape
+        (``SubscriptPlace(SubscriptPlace(VariablePlace, i0), i1)``) for
+        every 2+-subscript access.  For a NON-multidim base (an array of
+        pointers or a pointer), reconstruct the exact pre-refactor node
+        — ``SubscriptPlace(DereferencePlace(Index(Var, i0)), i1)`` — so
+        the unchanged :meth:`_emit_double_index_place_load` /
+        :meth:`_emit_double_index_place_store` emitters produce
+        byte-identical output.  Three-plus subscripts on a non-multidim
+        base were never supported and stay rejected.
+        """
+        if len(indices) != 2:
+            message = "triple subscript requires a multidimensional array"
+            raise CompileError(message, line=line)
+        outer_index, inner_index = indices
+        return SubscriptPlace(
+            base=DereferencePlace(
+                line=line,
+                pointer=Index(array=Var(line=line, name=base_name), index=outer_index, line=line),
+            ),
+            index=inner_index,
+            line=line,
+        )
 
     def _resolve_place(self, place: Place, /) -> PlaceAddress:
         """Emit dynamic-offset code (into BX when needed); return a PlaceAddress.
@@ -4840,6 +5066,30 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.known_local_bytes.clear()
             return
 
+    @staticmethod
+    def _uniform_subscript_chain(place: Place, /) -> tuple[str, list[Node]] | None:
+        """Flatten a uniform multi-subscript ``name[i0][i1]...`` place.
+
+        Returns ``(base_name, [i0, i1, ...])`` when *place* is a
+        left-nested :class:`SubscriptPlace` chain (2+ levels) bottoming out
+        in a :class:`VariablePlace`, with NO :class:`DereferencePlace` in
+        the chain — the single uniform shape the parser now emits for every
+        ``name[i][j]`` access.  Returns ``None`` for any other shape
+        (single subscript, member-rooted, deref-rooted) so existing
+        dispatch arms keep ownership.
+        """
+        if not (isinstance(place, SubscriptPlace) and isinstance(place.base, SubscriptPlace)):
+            return None
+        indices: list[Node] = []
+        current: Place = place
+        while isinstance(current, SubscriptPlace):
+            indices.append(current.index)
+            current = current.base
+        if not isinstance(current, VariablePlace):
+            return None
+        indices.reverse()
+        return current.name, indices
+
     def _validate_array_init(self, elements: list[Node]) -> None:
         """Validate global array initializer elements are all constant expressions."""
         for element in elements:
@@ -5712,8 +5962,22 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.zero_init_skippable.add(statement.name)
             elif isinstance(statement, ArrayDecl):
                 if statement.dimensions is not None:
-                    message = f"multidimensional array '{statement.name}' is not yet supported in codegen"
-                    raise CompileError(message, line=statement.line)
+                    if statement.init is not None:
+                        message = "multidimensional array initializers are not yet supported"
+                        raise CompileError(message, line=statement.line)
+                    self._register_array_type(
+                        statement.name,
+                        dimensions=statement.dimensions,
+                        line=statement.line,
+                        type_name=statement.type_name,
+                    )
+                    array_type = self.array_types[statement.name]
+                    byte_count = array_type.sizeof(pointer_width=self.target.int_size, scalar_width=self._type_size)
+                    self.variable_types[statement.name] = statement.type_name
+                    self.variable_arrays.add(statement.name)
+                    self.allocate_local(statement.name, size=byte_count)
+                    self.local_stack_arrays[statement.name] = byte_count
+                    continue
                 self.variable_types[statement.name] = statement.type_name
                 self.variable_arrays.add(statement.name)
                 stride = self._type_size(statement.type_name)

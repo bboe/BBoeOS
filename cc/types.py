@@ -25,6 +25,10 @@ only need ``to_string`` to round-trip the cases the side-channels still key on.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -65,6 +69,16 @@ class Type:
             return StructType(tag=text[len("struct ") :].strip())
         return ScalarType(name=text)
 
+    def sizeof(self, *, pointer_width: int = 0, scalar_width: Callable[[str], int]) -> int:
+        """Return the byte size of this type given target-width callables.
+
+        Callers inject the target's ``scalar_width`` callable (maps a scalar or
+        ``struct <tag>`` name to its byte count) and ``pointer_width`` integer
+        so this module stays target-agnostic.
+        """
+        message = f"sizeof not implemented for {self!r}"
+        raise NotImplementedError(message)
+
     def to_string(self) -> str:
         """Serialize this type back to its legacy flat string form."""
         message = f"cannot serialize type {self!r}"
@@ -84,6 +98,13 @@ class ArrayType(Type):
     count: int | None
     pointee: Type
 
+    def sizeof(self, *, pointer_width: int = 0, scalar_width: Callable[[str], int]) -> int:
+        """Return count * element size; raises ValueError for unsized arrays."""
+        if self.count is None:
+            message = "sizeof of an unsized array is ill-formed"
+            raise ValueError(message)
+        return self.count * self.pointee.sizeof(pointer_width=pointer_width, scalar_width=scalar_width)
+
     def to_string(self) -> str:
         """Serialize outer-to-inner so the element type prints once: ``int[2][3]``."""
         # Peel the array chain so the element type prints once and the
@@ -102,6 +123,10 @@ class PointerType(Type):
 
     pointee: Type
 
+    def sizeof(self, *, pointer_width: int = 0, scalar_width: Callable[[str], int]) -> int:  # noqa: PLR6301
+        """Return pointer_width regardless of pointee type."""
+        return pointer_width
+
     def to_string(self) -> str:
         """Serialize to the ``pointee*`` flat form."""
         return f"{self.pointee.to_string()}*"
@@ -113,6 +138,10 @@ class ScalarType(Type):
 
     name: str
 
+    def sizeof(self, *, pointer_width: int = 0, scalar_width: Callable[[str], int]) -> int:
+        """Return scalar_width(self.name)."""
+        return scalar_width(self.name)
+
     def to_string(self) -> str:
         """Serialize to the bare scalar name."""
         return self.name
@@ -123,6 +152,10 @@ class StructType(Type):
     """A ``struct <tag>`` aggregate."""
 
     tag: str
+
+    def sizeof(self, *, pointer_width: int = 0, scalar_width: Callable[[str], int]) -> int:
+        """Return scalar_width("struct <tag>")."""
+        return scalar_width(f"struct {self.tag}")
 
     def to_string(self) -> str:
         """Serialize to the ``struct <tag>`` flat form."""

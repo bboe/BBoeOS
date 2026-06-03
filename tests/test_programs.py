@@ -868,6 +868,18 @@ TESTS: list[ProgramTest] = [
     # translation-unit boundaries: a mis-paired convention would land
     # at non-42 / non-6 / non-123 sums here.
     ProgramTest("multitu_demo", ["multitu_demo"], r"^multitu_demo: 42 6 123$"),
+    # multidim_test exercises cc.py's contiguous row-major multidimensional
+    # array addressing end-to-end in QEMU.  A 2-D int m[2][3] is filled with
+    # m[i][j] = i*3+j (values 0..5) and a 3-D int c[2][2][2] with
+    # c[i][j][k] = i*4+j*2+k (values 0..7).  Spot-checks read back four
+    # individual cells whose addresses differ only if row-major is correct,
+    # then two sums (15 and 28) verify every cell was stored and loaded right.
+    # Any column-major or wrong-stride addressing would produce different values.
+    ProgramTest(
+        "multidim_test",
+        ["multidim_test"],
+        r"^m\[0\]\[0\]=0 m\[0\]\[2\]=2 m\[1\]\[0\]=3 m\[1\]\[2\]=5\nsum2d=15\nsum3d=28$",
+    ),
     ProgramTest("mv", ["mkdir tmpe", "mv tmpe tmpf", "ls"], r"tmpf/"),
     # Writing to virt 0 raises #PF (PTE[0] is not-present in every
     # per-program PD, so page 0 is always unmapped).  The user-fault

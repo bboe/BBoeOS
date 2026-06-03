@@ -37,18 +37,16 @@ def test_empty_bracket_param_still_compiles(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_multidim_global_rejected_cleanly(tmp_path: Path) -> None:
-    """A file-scope ``int m[2][3];`` fails to compile with a multidimensional error."""
+def test_multidim_global_now_compiles(tmp_path: Path) -> None:
+    """A file-scope ``int m[2][3];`` now compiles — storage guard removed in Task 3."""
     result = _compile("int m[2][3];\nint main(void) { return 0; }\n", tmp_path)
-    assert result.returncode != 0
-    assert "multidimensional" in result.stderr.lower()
+    assert result.returncode == 0, result.stderr
 
 
-def test_multidim_local_rejected_cleanly(tmp_path: Path) -> None:
-    """A function-local ``int m[2][3];`` fails to compile with a multidimensional error."""
+def test_multidim_local_now_compiles(tmp_path: Path) -> None:
+    """A function-local ``int m[2][3];`` now compiles — storage guard removed in Task 3."""
     result = _compile("int main(void) { int m[2][3]; return 0; }\n", tmp_path)
-    assert result.returncode != 0
-    assert "multidimensional" in result.stderr.lower()
+    assert result.returncode == 0, result.stderr
 
 
 def test_multidim_param_rejected_cleanly(tmp_path: Path) -> None:

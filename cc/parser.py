@@ -186,6 +186,24 @@ class Parser:
         message = "expected compile-time integer constant expression"
         raise CompileError(message, line=node.line)
 
+    def _extend_subscript_chain(self, place: Node, /, *, line: int) -> Node:
+        """Left-nest every remaining ``[expr]`` bracket onto *place*.
+
+        Used by the multidimensional subscript path: after the first
+        ``name[index]`` has been parsed into a
+        ``SubscriptPlace(VariablePlace, index)``, each further ``[j]``
+        wraps the running place in another :class:`SubscriptPlace`, with
+        NO intervening :class:`DereferencePlace`.  This single uniform
+        shape covers both contiguous multidimensional arrays and arrays
+        of pointers; codegen disambiguates on the declared type.
+        """
+        while self.peek()[0] == "LBRACKET":
+            self.eat("LBRACKET")
+            next_index = self.parse_expression()
+            self.eat("RBRACKET")
+            place = SubscriptPlace(base=place, index=next_index, line=line)
+        return place
+
     def _is_type_start(self, *, offset: int = 0) -> bool:
         """Return True if the token at ``offset`` begins a type specifier.
 
@@ -854,29 +872,22 @@ class Parser:
                     ),
                 )
             if self.peek()[0] == "LBRACKET":
-                # Chained subscript: ``name[outer][inner]`` for an
-                # array of pointers.  No third ``[`` (triple subscript)
-                # — codegen only handles one level of pointer chase.
-                self.eat("LBRACKET")
-                inner_index = self.parse_expression()
-                self.eat("RBRACKET")
-                double_index_place = SubscriptPlace(
+                # Chained subscript: ``name[i][j]...`` (2+ subscripts).
+                # Build ONE uniform left-nested SubscriptPlace chain over a
+                # VariablePlace base — no DereferencePlace.  Codegen
+                # disambiguates contiguous multidim arrays (row-major) from
+                # arrays of pointers (legacy deref) on the declared type.
+                multi_index_place = self._extend_subscript_chain(
+                    SubscriptPlace(base=VariablePlace(line=line, name=name), index=index, line=line),
                     line=line,
-                    base=DereferencePlace(
-                        line=line,
-                        pointer=Index(array=Var(line=line, name=name), index=index, line=line),
-                    ),
-                    index=inner_index,
                 )
                 if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
-                    # Postfix ``a[i][j]++`` / ``a[i][j]--`` on an array of
-                    # pointers — a deref-rooted subscript, so it flows
-                    # through the generic _emit_place_store arm rather than
-                    # the named-array IndexAssign lowering.
+                    # Postfix ``a[i][j]++`` / ``a[i][j]--`` — flows through
+                    # the generic _emit_place_store arm.
                     operator_token = self.eat()
                     delta = self._delta_from_operator(operator_token[0])
-                    return PlaceIncrementDecrement(delta=delta, is_postfix=True, line=line, place=double_index_place)
-                return PlaceLoad(line=line, place=double_index_place)
+                    return PlaceIncrementDecrement(delta=delta, is_postfix=True, line=line, place=multi_index_place)
+                return PlaceLoad(line=line, place=multi_index_place)
             if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
                 # Postfix ``a[i]++`` / ``a[i]--`` on a named array as an
                 # expression — evaluates to the pre-update element value.
@@ -1013,13 +1024,16 @@ class Parser:
             index_expression = self.parse_expression()
             self.eat("RBRACKET")
             if self.peek()[0] == "LBRACKET":
-                # ``a[i][j]++;`` on an array of pointers — a deref-rooted
-                # subscript that flows through the generic _emit_place_store
-                # arm.  Only the postfix-increment statement is handled here;
-                # any other follow-on rewinds to the index-assignment parser.
-                self.eat("LBRACKET")
-                inner_index_expression = self.parse_expression()
-                self.eat("RBRACKET")
+                # ``a[i][j]...`` (2+ subscripts) as a statement target.
+                # Build the uniform left-nested SubscriptPlace chain over a
+                # VariablePlace base (no DereferencePlace) and lower the
+                # trailing operator: assignment, compound assignment, or
+                # ``++``/``--``.  Codegen disambiguates contiguous multidim
+                # arrays (row-major) from arrays of pointers on the type.
+                multi_index_place = self._extend_subscript_chain(
+                    SubscriptPlace(base=VariablePlace(line=token[2], name=token[1]), index=index_expression, line=token[2]),
+                    line=token[2],
+                )
                 if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
                     operator_token = self.eat()
                     self.eat("SEMI")
@@ -1028,17 +1042,24 @@ class Parser:
                         delta=delta,
                         is_postfix=True,
                         line=token[2],
-                        place=SubscriptPlace(
-                            line=token[2],
-                            base=DereferencePlace(
-                                line=token[2],
-                                pointer=Index(array=Var(line=token[2], name=token[1]), index=index_expression, line=token[2]),
-                            ),
-                            index=inner_index_expression,
-                        ),
+                        place=multi_index_place,
                     )
-                self.position = saved_position
-                return self.parse_index_assignment()
+                if self.peek()[0] in COMPOUND_ASSIGN_OPERATORS:
+                    operator_token = self.eat()
+                    operator = COMPOUND_ASSIGN_OPERATORS[operator_token[0]]
+                    right_expression = self.parse_expression()
+                    self.eat("SEMI")
+                    combined_expression = BinaryOperation(
+                        left=PlaceLoad(line=token[2], place=multi_index_place),
+                        line=token[2],
+                        operation=operator,
+                        right=right_expression,
+                    )
+                    return PlaceStore(line=token[2], place=multi_index_place, value=combined_expression)
+                self.eat("ASSIGN")
+                value_expression = self.parse_expression()
+                self.eat("SEMI")
+                return PlaceStore(line=token[2], place=multi_index_place, value=value_expression)
             if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
                 # ``a[i]++;`` / ``a[i]--;`` on a named array.
                 operator_token = self.eat()
@@ -2309,22 +2330,16 @@ class Parser:
                 index = self.parse_expression()
                 self.eat("RBRACKET")
                 if self.peek()[0] == "LBRACKET":
-                    # ``++a[i][j]`` on an array of pointers — deref-rooted
-                    # subscript through the generic _emit_place_store arm.
-                    self.eat("LBRACKET")
-                    inner_index = self.parse_expression()
-                    self.eat("RBRACKET")
+                    # ``++a[i][j]...`` (2+ subscripts) — uniform left-nested
+                    # SubscriptPlace chain through the generic _emit_place_store
+                    # arm.  Codegen disambiguates multidim vs array-of-pointers.
                     return PlaceIncrementDecrement(
                         delta=delta,
                         is_postfix=False,
                         line=line,
-                        place=SubscriptPlace(
+                        place=self._extend_subscript_chain(
+                            SubscriptPlace(base=VariablePlace(line=line, name=name_token[1]), index=index, line=line),
                             line=line,
-                            base=DereferencePlace(
-                                line=line,
-                                pointer=Index(array=Var(line=line, name=name_token[1]), index=index, line=line),
-                            ),
-                            index=inner_index,
                         ),
                     )
                 return PlaceIncrementDecrement(
