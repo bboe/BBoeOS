@@ -201,7 +201,7 @@
     "handle_cmpsw": 21,
     "handle_dec": 11,
     "handle_div": 11,
-    "handle_imul": 163,
+    "handle_imul": 218,
     "handle_in": 139,
     "handle_inc": 11,
     "handle_int": 26,

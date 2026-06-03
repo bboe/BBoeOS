@@ -1529,25 +1529,43 @@ void handle_in() {
     }
 }
 
-/* ``imul dst, imm`` — signed multiply register by constant.  Uses
-   the three-operand form with dst=src (``6B /r ib`` for imm8,
-   ``69 /r iw`` for imm16). */
+/* ``imul dst, imm`` and ``imul dst, src, imm`` — signed multiply by a
+   constant.  Both compile to the three-operand machine encoding
+   (``6B /r ib`` for imm8, ``69 /r iw`` for imm16) with the modrm reg
+   field holding the destination and the rm field holding the source.
+   In the two-operand form the source defaults to the destination
+   (dst=src).  After the first comma we peek the next operand with
+   ``parse_operand``: a register (type 0) selects the three-operand
+   form (that register is the source, then a second comma and the
+   immediate follow); anything else (type != 0) is the immediate of
+   the two-operand form, already stashed in ``parse_operand_value``. */
 void handle_imul() {
     skip_ws();
     int packed_register = parse_register();
-    skip_comma();
-    int imm = resolve_value();
-    int register_id = packed_register & 0xFF;
+    int destination_register = packed_register & 0xFF;
     int size = (packed_register >> 8) & 0xFF;
-    int modrm = 0xC0 | (register_id << 3) | register_id;
+    skip_comma();
+    int packed_operand = parse_operand();
+    int operand_type = (packed_operand >> 8) & 0xFF;
+    int source_register = destination_register;
+    int imm = parse_operand_value;
+    if (operand_type == 0) {
+        source_register = packed_operand & 0xFF;
+        skip_comma();
+        imm = resolve_value();
+    }
+    int modrm = 0xC0 | (destination_register << 3) | source_register;
     if (imm >= -128 && imm <= 127) {
         emit_sized(0x6A, size);
         emit_byte(modrm);
         emit_byte(imm & 0xFF);
     } else {
+        /* ``69 /r iz`` — the wide immediate matches the operand size
+           (imm16 in 16-bit mode, imm32 in 32-bit mode), so route it
+           through ``emit_sized_imm`` rather than a bare ``emit_word``. */
         emit_sized(0x68, size);
         emit_byte(modrm);
-        emit_word(imm);
+        emit_sized_imm(imm, size);
     }
 }
 
