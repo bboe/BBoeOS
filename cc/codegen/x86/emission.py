@@ -3074,6 +3074,10 @@ class EmissionMixin:
             # ``inline_bodies`` and will be spliced at each call site.
             return
         parameters = function.params
+        for parameter in parameters:
+            if parameter.dimensions is not None:
+                message = f"multidimensional array parameter '{parameter.name}' is not yet supported in codegen"
+                raise CompileError(message, line=function.line)
         body = function.body
         self.array_labels = {}
         self.array_sizes = {}

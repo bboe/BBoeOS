@@ -3675,6 +3675,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.variable_types[name] = "function_pointer"
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
+                if declaration.dimensions is not None:
+                    message = f"multidimensional array '{declaration.name}' is not yet supported in codegen"
+                    raise CompileError(message, line=declaration.line)
                 if (
                     declaration.type_name not in self.GLOBAL_ARRAY_PRIMITIVE_TYPES
                     and not declaration.type_name.startswith("struct ")
@@ -3766,6 +3769,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 cursor += 1
                 run_bits = 0
             ftype = declaration_field.type_name
+            if ftype.count("[") > 1:
+                message = f"multidimensional array field '{declaration_field.field_name}' is not yet supported in codegen"
+                raise CompileError(message, line=declaration_field.line)
             if "[" in ftype:
                 # "char[15]" → element_type="char", count=15
                 bracket = ftype.index("[")
@@ -5705,6 +5711,9 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 if top_level and self.elide_frame and isinstance(statement.init, Int) and statement.init.value == 0 and size in (1, 2):
                     self.zero_init_skippable.add(statement.name)
             elif isinstance(statement, ArrayDecl):
+                if statement.dimensions is not None:
+                    message = f"multidimensional array '{statement.name}' is not yet supported in codegen"
+                    raise CompileError(message, line=statement.line)
                 self.variable_types[statement.name] = statement.type_name
                 self.variable_arrays.add(statement.name)
                 stride = self._type_size(statement.type_name)
