@@ -96,6 +96,7 @@ from cc.errors import CompileError
 from cc.ir_optimize import Optimizer
 from cc.target import CodegenTarget, X86CodegenTarget16
 from cc.tokens import COMPARISON_OPERATIONS
+from cc.types import ArrayType
 from cc.utils import decode_string_escapes, string_byte_length
 
 _ATT_REGISTERS = "eax|ebx|ecx|edx|esi|edi|esp|ebp|ax|bx|cx|dx|si|di|sp|bp|ah|al|bh|bl|ch|cl|dh|dl"
@@ -3995,7 +3996,41 @@ class EmissionMixin:
         if isinstance(statement, ArrayDecl):
             self.visible_vars.add(statement.name)
             self.variable_types[statement.name] = statement.type_name
-            if statement.init is not None:
+            if statement.init is not None and statement.name in self.array_types:
+                # Multidimensional scalar array: inline contiguous stack
+                # storage (allocated in scan_locals).  Flatten the row-major
+                # initializer and store each constant element directly at a
+                # constant displacement off the frame slot, then zero-fill
+                # the remaining slots (the local stack is NOT pre-zeroed).
+                array_type = self.array_types[statement.name]
+                total_elements = 1
+                dimension = array_type
+                while isinstance(dimension, ArrayType):
+                    total_elements *= dimension.count
+                    dimension = dimension.pointee
+                element_size = self._type_size(statement.type_name)
+                if element_size == 1:
+                    directive = "byte"
+                elif element_size == 2:
+                    directive = "word"
+                else:
+                    directive = self.target.word_size
+                base = self._local_address(statement.name)
+                flat = self._flatten_array_init(statement.init, name=statement.name, total=total_elements, line=statement.line)
+                for index in range(total_elements):
+                    offset = index * element_size
+                    address = f"{base}+{offset}" if offset else base
+                    if index < len(flat):
+                        element = flat[index]
+                        if not isinstance(element, Int):
+                            message = "array initializer elements must be constants"
+                            raise CompileError(message, line=element.line)
+                        value = element.value
+                    else:
+                        value = 0
+                    self.emit(f"        mov {directive} [{address}], {value}")
+                self.ax_clear()
+            elif statement.init is not None:
                 elem_labels = []
                 for elem in statement.init.elements:
                     if isinstance(elem, String):

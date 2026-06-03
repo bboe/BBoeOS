@@ -868,6 +868,16 @@ TESTS: list[ProgramTest] = [
     # translation-unit boundaries: a mis-paired convention would land
     # at non-42 / non-6 / non-123 sums here.
     ProgramTest("multitu_demo", ["multitu_demo"], r"^multitu_demo: 42 6 123$"),
+    # multidim_init_test exercises cc.py's multidimensional array INITIALIZERS:
+    # a local nested int m[2][3]={{1,2,3},{4,5,6}}, a partial int p[2][2]={1,2}
+    # (so p[1][0]/p[1][1] must be zero-filled), and a global int g[2][2]
+    # init'd to {{10,20},{30,40}}.  The printed cells pin row-major layout AND
+    # the partial zero-fill; gsum=100 confirms the global init run.
+    ProgramTest(
+        "multidim_init_test",
+        ["multidim_init_test"],
+        r"^m\[0\]\[0\]=1 m\[0\]\[2\]=3 m\[1\]\[0\]=4 m\[1\]\[2\]=6\np\[0\]\[0\]=1 p\[0\]\[1\]=2 p\[1\]\[0\]=0 p\[1\]\[1\]=0\ngsum=100$",
+    ),
     # multidim_test exercises cc.py's contiguous row-major multidimensional
     # array addressing end-to-end in QEMU.  A 2-D int m[2][3] is filled with
     # m[i][j] = i*3+j (values 0..5) and a 3-D int c[2][2][2] with

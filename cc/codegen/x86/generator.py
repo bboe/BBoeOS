@@ -19,6 +19,7 @@ from typing import ClassVar, NamedTuple
 from cc import ir
 from cc.ast_nodes import (
     ArrayDecl,
+    ArrayInit,
     Assign,
     BinaryOperation,
     Call,
@@ -1629,6 +1630,35 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             for line in lines[1:]:
                 self.emit(f"        {line}")
             return
+        if name in self.array_types and declaration.init is not None:
+            # Multidimensional scalar array: flatten the (possibly nested)
+            # row-major initializer into one contiguous run of cells, then
+            # zero-fill any remaining element slots so partial / ``{0}``
+            # initializers leave a fully-defined image.
+            array_type = self.array_types[name]
+            total_elements = 1
+            dimension: Type = array_type
+            while isinstance(dimension, ArrayType):
+                total_elements *= dimension.count
+                dimension = dimension.pointee
+            flat = self._flatten_array_init(declaration.init, name=name, total=total_elements, line=declaration.line)
+            int_directive = "dd" if self.target.int_size == 4 else "dw"
+            if is_byte:
+                directive = "db"
+            elif stride == 2 and stride < self.target.int_size:
+                directive = "dw"
+            else:
+                directive = int_directive
+            rendered = [
+                self.new_string_label(element.content) if isinstance(element, String) else self._constant_expression(element)
+                for element in flat
+            ]
+            self._maybe_emit_data_header()
+            self._emit_global_export(name)
+            self.emit(f"{self._global_label(name)}: {directive} {', '.join(rendered)}")
+            if len(flat) < total_elements:
+                self.emit(f"        times ({total_elements}-{len(flat)})*{stride} db 0")
+            return
         if declaration.init is not None:
             # Match the data-cell width to the element width:
             # ``db`` for byte, ``dw`` for halfword (``unsigned short``),
@@ -3192,6 +3222,29 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         message = f"sizeof: cannot determine type of {type(node).__name__}"
         raise CompileError(message, line=node.line)
 
+    def _flatten_array_init(self, init: ArrayInit, /, *, name: str, total: int, line: int) -> list[Node]:  # noqa: PLR6301
+        """Flatten a (possibly nested) ArrayInit into a row-major element list.
+
+        Walks the nested ``ArrayInit`` tree depth-first, collecting leaf
+        (non-``ArrayInit``) element nodes in row-major order; raises a
+        :class:`CompileError` if the initializer has more than *total*
+        elements for array *name*.
+        """
+        flat: list[Node] = []
+
+        def walk(node: ArrayInit) -> None:
+            for element in node.elements:
+                if isinstance(element, ArrayInit):
+                    walk(element)
+                else:
+                    flat.append(element)
+
+        walk(init)
+        if len(flat) > total:
+            message = f"too many initializers for '{name}'"
+            raise CompileError(message, line=line)
+        return flat
+
     def _has_remainder(self, left: Node, right: Node, /) -> bool:
         """Check if DX already holds left % right.
 
@@ -3864,9 +3917,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 self.global_scalars[name] = declaration
             elif isinstance(declaration, ArrayDecl):
                 if declaration.dimensions is not None:
-                    if declaration.init is not None:
-                        message = "multidimensional array initializers are not yet supported"
-                        raise CompileError(message, line=declaration.line)
                     self._register_array_type(
                         declaration.name,
                         dimensions=declaration.dimensions,
@@ -5962,9 +6012,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     self.zero_init_skippable.add(statement.name)
             elif isinstance(statement, ArrayDecl):
                 if statement.dimensions is not None:
-                    if statement.init is not None:
-                        message = "multidimensional array initializers are not yet supported"
-                        raise CompileError(message, line=statement.line)
                     self._register_array_type(
                         statement.name,
                         dimensions=statement.dimensions,

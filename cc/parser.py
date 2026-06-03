@@ -742,7 +742,10 @@ class Parser:
             if self.peek()[0] == "ASSIGN":
                 self.eat("ASSIGN")
                 if is_array:
-                    init = self.parse_array_init()
+                    if len(dimension_expressions) > 1 and not current_type.startswith("struct "):
+                        init = self._parse_multidim_array_init()
+                    else:
+                        init = self.parse_array_init()
                 elif self.peek()[0] == "LBRACE":
                     init = self._parse_designated_struct_initializer()
                 else:
@@ -1270,6 +1273,41 @@ class Parser:
         self.eat("SEMI")
         return PlaceStore(line=token[2], place=member_place, value=expression)
 
+    def _parse_multidim_array_init(self) -> ArrayInit:
+        """Parse a brace-enclosed initializer for a multidimensional array.
+
+        Handles both nested braces ``{{1,2},{3,4}}`` and flat lists
+        ``{1,2,3,4}``.  When the next token after an opening ``{`` is
+        itself a ``{``, this method recurses to build a nested
+        ``ArrayInit``; otherwise it falls through to expression parsing
+        for a leaf value.  Trailing commas are accepted at every level.
+
+        This is distinct from :meth:`parse_array_init`, which routes
+        inner ``{`` tokens to ``_parse_positional_struct_initializer``
+        and is only correct for single-dimension arrays and arrays of
+        structs.
+
+        Returns:
+            An ``ArrayInit`` node whose ``elements`` are either
+            ``ArrayInit`` sub-nodes (nested braces) or expression leaves
+            (flat list or innermost level).
+
+        """
+        line = self.peek()[2]
+        self.eat("LBRACE")
+        elements: list[Node] = []
+        while self.peek()[0] != "RBRACE":
+            if self.peek()[0] == "LBRACE":
+                elements.append(self._parse_multidim_array_init())
+            else:
+                elements.append(self.parse_expression())
+            if self.peek()[0] == "COMMA":
+                self.eat("COMMA")
+            else:
+                break
+        self.eat("RBRACE")
+        return ArrayInit(elements=elements, line=line)
+
     def _parse_one_declarator(self, *, line: int, type_string: str) -> Node:
         """Parse one declarator after the base type has been consumed.
 
@@ -1347,7 +1385,10 @@ class Parser:
         if self.peek()[0] == "ASSIGN":
             self.eat("ASSIGN")
             if is_array:
-                init = self.parse_array_init()
+                if len(dimension_expressions) > 1 and not local_type_string.startswith("struct "):
+                    init = self._parse_multidim_array_init()
+                else:
+                    init = self.parse_array_init()
             elif self.peek()[0] == "LBRACE":
                 init = self._parse_designated_struct_initializer()
             else:
