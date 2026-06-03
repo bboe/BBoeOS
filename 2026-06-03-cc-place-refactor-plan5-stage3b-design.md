@@ -1,6 +1,26 @@
 # cc.py Place Refactor — Plan 5 / Stage 3b Design: operand lowering + fold `Index` + rep-string matcher rewrite
 
-**Status:** Designed (2026-06-03). Ready for implementation planning.
+**Status:** Designed (2026-06-03). **BLOCKED on a prerequisite stage — a register
+allocator (see below).** Not yet implementable as written.
+
+> **Prerequisite added 2026-06-03 (empirical finding).** Writing the 3b.1 plan
+> established that **cc.py's x86 backend has no register allocator**: every IR
+> temp `_ir_N` is pre-allocated a frame slot (`generate_function` →
+> `_collect_ir_temps` → `allocate_local`) and lives in memory; the peephole only
+> removes *same-register* store/reload. So a compound access leaf like `arr[i+1]`
+> emits `... ; mov [ebp-8],eax ; mov esi,[ebp-8] ; ...` — a spill/reload pair.
+> Consequently, this design's core move — lifting an access's dynamic leaves to
+> optimizer-visible IR `Value` operands — **adds a spill/reload per compound leaf
+> versus `resolve_address`'s inline evaluation, failing the per-function
+> byte-efficiency gate by construction.** (cc.py's own Stage-2 design already
+> warned of this: "operand lowering alone … is pure byte cost that fails the
+> gate.") **Decision (Bryce, 2026-06-03):** rather than retreat to a
+> substitute-over-AST form, **build a register allocator first** so single-use
+> temps become register-resident (near-free), making the SSA-value-leaf substrate
+> below byte-viable and unlocking real CSE/LICM/strength-reduction across the
+> whole compiler. The allocator gets its own design + plan(s); 3b/3c resume on
+> top of it. The op shape and lowering below are otherwise unchanged — they
+> simply assume register-resident temps.
 
 **Goal:** Introduce the optimizer-visible uniform access ops
 (`Address`/`Load`/`Store`/`AddressOf`), lower the **entire** access-family of
