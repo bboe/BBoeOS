@@ -49,11 +49,10 @@ def test_multidim_global_storage_compiles(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_multidim_initializer_rejected(tmp_path: Path) -> None:
-    """A multidim array with a brace initializer is rejected with a clear error."""
+def test_multidim_initializer_compiles(tmp_path: Path) -> None:
+    """A multidim array with a brace initializer now compiles (Tasks 2 & 3)."""
     result = _compile("int main(void){ int m[2][3] = {0}; return 0; }\n", tmp_path)
-    assert result.returncode != 0
-    assert "initializer" in result.stderr.lower()
+    assert result.returncode == 0, result.stderr
 
 
 def test_multidim_local_storage_compiles(tmp_path: Path) -> None:
