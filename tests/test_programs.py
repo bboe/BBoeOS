@@ -878,6 +878,18 @@ TESTS: list[ProgramTest] = [
         ["multidim_init_test"],
         r"^m\[0\]\[0\]=1 m\[0\]\[2\]=3 m\[1\]\[0\]=4 m\[1\]\[2\]=6\np\[0\]\[0\]=1 p\[0\]\[1\]=2 p\[1\]\[0\]=0 p\[1\]\[1\]=0\ngsum=100$",
     ),
+    # multidim_struct_test exercises cc.py's multidimensional array STRUCT
+    # FIELDS end-to-end in QEMU.  A ``struct grid { int cells[2][3]; }`` local
+    # is filled with g.cells[i][j] = i*3+j (values 0..5) in nested loops, then
+    # spot-checked via the dot (struct-value) form and via a ``struct grid* p =
+    # &g`` pointer (arrow form), proving row-major field addressing for both
+    # access shapes.  sum=15 confirms every cell was stored and loaded right;
+    # any column-major or wrong-stride layout would print different numbers.
+    ProgramTest(
+        "multidim_struct_test",
+        ["multidim_struct_test"],
+        r"^dot g\[0\]\[0\]=0 g\[0\]\[2\]=2 g\[1\]\[0\]=3 g\[1\]\[2\]=5\narrow p\[1\]\[2\]=5 p\[0\]\[1\]=1\nsum=15$",
+    ),
     # multidim_test exercises cc.py's contiguous row-major multidimensional
     # array addressing end-to-end in QEMU.  A 2-D int m[2][3] is filled with
     # m[i][j] = i*3+j (values 0..5) and a 3-D int c[2][2][2] with

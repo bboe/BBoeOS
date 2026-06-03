@@ -57,12 +57,11 @@ def test_multidim_param_rejected_cleanly(tmp_path: Path) -> None:
     assert "multidimensional" in result.stderr.lower()
 
 
-def test_multidim_struct_field_rejected_cleanly(tmp_path: Path) -> None:
-    """A struct with an ``int m[2][3];`` field fails to compile with a clean error."""
+def test_multidim_struct_field_now_compiles(tmp_path: Path) -> None:
+    """A struct with an ``int m[2][3];`` field now compiles — layout guard lifted."""
     source = "struct s { int m[2][3]; };\nstruct s value;\nint main(void) { return 0; }\n"
     result = _compile(source, tmp_path)
-    assert result.returncode != 0
-    assert "multidimensional" in result.stderr.lower()
+    assert result.returncode == 0, result.stderr
 
 
 def test_single_dimension_still_compiles(tmp_path: Path) -> None:
