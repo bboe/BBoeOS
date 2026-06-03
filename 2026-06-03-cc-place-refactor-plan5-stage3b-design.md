@@ -37,23 +37,40 @@ gate (per-function **byte-efficiency**, not byte-identity) governs.
    `Block`/`Access` escape hatch onto the uniform ops. Only the non-access
    `Block` residents (VarDecl, struct-init, bitfield *assign*, the long-type /
    const-chain / self-modify `Assign` special-cases) stay on `Block` for Stage 4.
+4. **Structured-reference op (GCC GIMPLE model), layout derived at emission;
+   defer the layout-to-`cc/types.py` migration.** The `Address` op carries the
+   structured place **shape** (the `Member`/`Subscript` tree, for static
+   layout) with its **dynamic leaves pre-lowered to IR temps** (the index summed
+   to one temp; each dereference's pointer is a preceding `ir.Load` result);
+   emission reuses 3a's `resolve_address` layout logic (the documented
+   `get_inner_reference` / `EmitLValue` analog) almost verbatim, fed the
+   pre-lowered `Value` leaves instead of re-walking AST sub-expressions. This is
+   GCC's "structured ref + SSA leaves" model; cc.py already committed to it in
+   3a. (The pure precomputed-`(base, disp, index, scale)` tuple — closer to an
+   LLVM GEP — was rejected: LLVM only avoids the resulting code bloat via a full
+   instruction-selection addressing-mode matcher that cc.py has deliberately
+   chosen not to build, so the flat form gains nothing here while discarding the
+   structured semantic info and adding offset/size byte-regression risk.) The
+   layout logic stays in the x86 generator for 3b; relocating it into the
+   existing `cc/types.py` so IR passes and emission share one target-organized
+   layout source is a **separate future refactor** (orthogonal to the op shape,
+   which is durable either way).
 
 ## Architecture
 
 ### New IR ops (`cc/ir.py`)
 
 ```
-Address   (pure descriptor value — emits NO code on its own)
-  destination:  str            # SSA temp naming this address
-  base_kind:    "label" | "frame" | "value"
-  base_symbol:  str  | None    # "_g_points" / "ebp-12"   (kind in {label, frame})
-  base_value:   Value | None   # pointer temp             (kind == "value")
-  displacement: int = 0        # member offsets + constant subscripts
-  index:        Value | None   # dynamic ELEMENT index (literal or temp)
-  scale:        int = 1        # element size in bytes
-  bitfield:     FieldInfo | None
-  raw_width:    bool = False   # mirror MemoryOperand's movzx-suppression
-  VALUE_FIELDS = ("base_value", "index")   # both optimizer-visible operands
+Address   (structured-reference value — emits NO code on its own; GCC GIMPLE model)
+  destination: str                  # SSA temp naming this resolved address
+  shape:       ast_nodes.<Place>    # the deref-free place segment, for STATIC layout
+                                    #   (member offsets, element size, bitfield, decay);
+                                    #   its dynamic leaves are pre-lowered to IR temps
+  base_value:  Value | None         # pointer Value from the preceding ir.Load
+                                    #   (the segment's deref-broken base); None for a
+                                    #   symbol-rooted segment (global / local)
+  index:       Value | None         # the segment's summed dynamic ELEMENT index temp
+  VALUE_FIELDS = ("base_value", "index")   # the two optimizer-visible dynamic leaves
 
 Load      (memory read)   destination, address: Value, width, signed
                           VALUE_FIELDS = ("address",)
@@ -63,36 +80,43 @@ AddressOf (pure -> lea)   destination, address: Value
                           VALUE_FIELDS = ("address",)
 ```
 
-`Address` is the IR twin of 3a's `MemoryOperand` (`cc/codegen/x86/generator.py`),
-with one deliberate difference: `index` is an **optimizer-visible `Value`** (a
-temp) rather than a pre-allocated register, so the index arithmetic becomes
-ordinary `BinaryOperation`/`Copy` the optimizer already understands. The
-`base_symbol` / `base_value` split keeps `VALUE_FIELDS` static (the
-`_NoValueFields`-style mixin pattern requires it); exactly one is populated.
+`Address` is the IR-level twin of the *input* to 3a's `resolve_address`: it
+carries the structured place **shape** (so emission derives `displacement` /
+`element_size` / `bitfield` / `decay` from the existing layout helpers, exactly
+as today — the `get_inner_reference` decomposition) while the **dynamic** parts
+— the summed element `index` and, for a deref-broken segment, the pointer
+`base_value` — are first-class optimizer-visible `Value` operands rather than
+sub-expressions evaluated inline at codegen. Because deref-breaks-the-chain and
+multiple dynamic indices sum into one temp at lowering, each `Address` segment
+has at most these two dynamic leaves, so `VALUE_FIELDS` stays flat and static
+(the `_NoValueFields`-style mixin pattern requires it). A static-only segment
+carries `base_value = None`, `index = None`.
 
-### Lowering (`cc/ir.py` builder) — the recursion moves to lowering time
+### Lowering (`cc/ir.py` builder) — segment the chain, pre-lower the dynamic leaves
 
-Stage 3a's *codegen-time* recursion becomes a *lowering-time* linearization (the
-GCC GEP-chain / LLVM `EmitLValue` model — the address chain is emitted into the
-optimizable IR, not reconstructed at codegen):
+Stage 3a's *codegen-time* recursion becomes a *lowering-time* segmentation that
+emits the address chain into the optimizable IR. Lowering does **not** compute
+layout (that stays at emission); it splits the place at each dereference and
+pre-lowers the dynamic leaves to IR `Value`s:
 
-- `VariablePlace(name)` → seed `Address(base_kind = label|frame,
-  base_symbol = "_g_<name>" | "ebp-off", displacement = 0)`.
-- `MemberPlace(base, m)` → resolve base to a running `Address`; add `m`'s static
-  offset to `displacement`; carry `bitfield` / `raw_width` when `m` is the
-  terminal member.
-- `SubscriptPlace(base, idx)` → resolve base; a constant `idx` folds into
-  `displacement`; a dynamic `idx` becomes the `index` `Value` with `scale` = the
-  element size. A second dynamic index in the same segment sums into the existing
-  index via an ordinary `BinaryOperation` temp (now optimizer-visible) — today's
-  shape-B `add bx, ax`.
-- `DereferencePlace(ptr)` → **chain-break**: emit `Load(address = <current
-  Address>)` → pointer temp; start a fresh `Address(base_kind = "value",
-  base_value = that temp, displacement = 0)`. Arbitrary depth falls out as a flat
-  `Address` / `Load` sequence — `Member`/`Subscript` accumulate onto the current
-  segment; each `Dereference` ends a segment and starts the next.
+- Walk the place; accumulate `Member` / `Subscript` nodes into the **current
+  deref-free segment shape** (a `Place` subtree). For each **dynamic** subscript
+  index, `_build_expr` the index to a `Value`; sum multiple dynamic indices in a
+  segment into one temp via an ordinary `BinaryOperation` (now
+  optimizer-visible); store that temp as the segment's `index`. Constant
+  subscripts and all member selections stay in the shape (their offsets/strides
+  are static, derived at emission).
+- `DereferencePlace(ptr)` → **chain-break**: close the current segment as
+  `Address(shape, base_value, index)`, emit `Load(address = that Address) -> p`
+  (the pointer load 3a already emits anyway), and open a fresh segment with
+  `base_value = p`. Arbitrary depth falls out as a flat `Address` / `Load`
+  sequence — `Member` / `Subscript` accumulate onto the current segment; each
+  `Dereference` ends a segment and starts the next.
+- The dynamic leaves the optimizer sees are exactly per-segment `index` and
+  `base_value`; the static structure (which member, which array, constant
+  subscripts) rides the immutable `shape`.
 
-Terminals:
+Terminals (applied to the final segment's `Address`):
 
 - `PlaceLoad` → `Load`.
 - `PlaceStore` → `Store`.
@@ -110,23 +134,39 @@ Terminals:
 
 ### Emission (`cc/codegen/x86/`) — folds back to identical bytes
 
-`Address` emits nothing. A new `_materialize_address(address_op) ->
-MemoryOperand` mirrors the **tail** of 3a's `resolve_address`: it materializes
-and scales the `index` `Value` into a register and sets up the base, producing
-the same `MemoryOperand` the Place-driven resolver produces today. `Load` /
-`Store` / `AddressOf` / indirect-call then reuse the **existing** terminal
-emitters (width `mov` / `movzx`, bitfield mask-shift store/load, `lea`).
+`Address` emits nothing on its own. `Load` / `Store` / `AddressOf` /
+indirect-call resolve their `Address` operand to a `MemoryOperand` via a
+**lightly refactored `resolve_address`**: instead of evaluating index
+sub-expressions inline and calling `generate_expression(pointer)` at each deref,
+it consumes the `Address`'s pre-lowered `index` and `base_value` `Value`s
+(materializing/scaling the `index` into a register and seeding a register base
+from `base_value` exactly where 3a's `_accumulate_subscript` /
+`_resolve_dereference` do). The static layout (`displacement` from member
+offsets + constant subscripts, `element_size`, `bitfield`, `decay_to_address`)
+is still derived from the `shape` by the **existing** layout helpers
+(`_member_layout_on`, `_resolve_member_place_info`, the multidim/pointer-array
+address helpers). The terminal then reuses the **existing** width `mov` /
+`movzx`, bitfield mask-shift, and `lea` emitters.
 
-Because the `Address` descriptor maps 1:1 onto `MemoryOperand`, the folded
-output is the **same x86 that `resolve_address` produces today** — that is the
-byte-neutrality claim for 3b.1, with the per-function size gate as the backstop.
+Because layout derivation and terminal emission are the same code 3a runs, and
+the only change is *where the dynamic leaves come from* (a pre-lowered `Value`
+vs. an inline AST walk), the folded output is the **same x86 `resolve_address`
+produces today** — the byte-neutrality claim for 3b.1, with the per-function
+size gate as the backstop.
 
-**Central 3b.1 risk:** 3a's `resolve_address` makes specific register choices
-and fast-paths (frame-direct deref, accumulator-favored short encodings such as
-`A1` `mov eax,[disp32]`). The IR-linearized lowering + `_materialize_address`
-must reproduce them exactly; this is where the size-gate iteration lives. The
-deref-chain `Load` is the unavoidable pointer load 3a already emits, so it costs
-nothing extra.
+**Central 3b.1 risk — operand materialization parity.** Making the dynamic
+leaves IR `Value`s means materializing them as temps, whereas today
+`resolve_address` evaluates complex-place index / pointer sub-expressions
+*inline*. For a leaf that was already a simple value (literal, variable, or a
+temp) this is a no-op; for a compound leaf (`a[i + 1]`, `a[f(x)]`) it hoists the
+computation ahead of the address — a sequence cc.py already produces for
+`ir.Index` (whose index is pre-lowered to a `Value` under the same gate), so it
+is demonstrably byte-manageable, but it must be re-proven **per access shape**.
+The migration therefore moves one place-shape at a time behind the size gate
+(mirroring 3a), fixing each register/fold/ordering delta as it appears.
+`resolve_address` must also keep reproducing its existing fast-paths
+(frame-direct deref, accumulator-favored short encodings such as `A1`
+`mov eax,[disp32]`).
 
 ### Optimizer treatment
 
@@ -165,8 +205,9 @@ The deeper CSE / LICM / strength-reduction *over* `Address` values is **Stage
 
 - **3b.1:** the per-shape `Access`-driven lowering and the access-family `_emit_*`
   wrappers that the uniform `Load`/`Store`/`AddressOf` emission replaces. (The
-  recursive `resolve_address` core survives, refactored so its materialization
-  tail is reachable as `_materialize_address` from the IR ops.)
+  `resolve_address` core survives, lightly refactored so it consumes the
+  `Address` op's pre-lowered `index` / `base_value` `Value`s instead of walking
+  AST sub-expressions inline.)
 - **3b.2:** `ir.Index`, `ir.IndexAssign`, and their dedicated emit paths
   (`_generate_index_expression`, `generate_index_assign`,
   `_generate_nested_index_expression`).
@@ -179,7 +220,8 @@ producers — confirm and delete it in 3b.1 if so, else document why it survives
 
 - **Primary efficiency oracle:** `tests/test_cc_function_sizes.py` (per-function
   ELF `.text.<name>` sizes vs `tests/golden/cc_function_sizes_baseline.json`;
-  `BBOE_UPDATE_SIZES=1` regenerates). **3b.1 expects zero deltas**; 3b.2
+  `BBOE_UPDATE_SIZES=1` regenerates). **3b.1 targets zero deltas** (any residual
+  must be an explained, justified benign reshape, not a regression); 3b.2
   regenerates only where a delta is justified (and each is explained in the PR).
 - **Tripwire:** `tests/test_cc_place.py` golden (`tests/golden/cc_place_index_member.asm`;
   `BBOE_UPDATE_GOLDEN=1`) — re-bless once in 3b.1 to absorb any benign sequence
@@ -199,10 +241,13 @@ producers — confirm and delete it in 3b.1 if so, else document why it survives
 
 ## Risk register
 
-1. **Byte-neutrality of the IR-linearized lowering (3b.1)** — reproducing 3a's
-   exact register choices / short encodings through `_materialize_address`. The
-   size gate + re-blessed `cc_place` golden are the backstop; each regression is a
-   register/fold tweak.
+1. **Operand-materialization parity (3b.1)** — pre-lowering a compound dynamic
+   leaf (`a[i + 1]`, `a[f(x)]`) to a temp can reorder/insert vs. 3a's inline
+   evaluation, and `resolve_address` must keep reproducing its register choices /
+   short encodings / fast-paths when fed a pre-lowered `Value`. Mitigated by
+   migrating one place-shape at a time behind the size gate (the same discipline
+   `ir.Index`'s pre-lowered index already passes); the size gate + re-blessed
+   `cc_place` golden are the backstop, each delta a register/fold/ordering tweak.
 2. **Rep-string matcher rewrite (3b.2)** — highest risk in the whole program. A
    missed shape silently stops `rep`-ifying a loop (size regression, caught by the
    gate); a mis-identified induction step miscompiles (caught by the rep-string
