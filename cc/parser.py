@@ -925,9 +925,13 @@ class Parser:
                 self.eat("LBRACKET")
                 index = self.parse_expression()
                 self.eat("RBRACKET")
+                member_subscript_place = self._extend_subscript_chain(
+                    SubscriptPlace(base=member_place, index=index, line=line),
+                    line=line,
+                )
                 return PlaceLoad(
                     line=line,
-                    place=SubscriptPlace(base=member_place, index=index, line=line),
+                    place=member_subscript_place,
                 )
             if self.peek()[0] in ("PLUS_PLUS", "MINUS_MINUS"):
                 # Postfix ``ptr->member++`` / ``s.member--`` as an
@@ -1189,11 +1193,15 @@ class Parser:
             self.eat("LBRACKET")
             index_expression = self.parse_expression()
             self.eat("RBRACKET")
+            member_subscript_place = self._extend_subscript_chain(
+                SubscriptPlace(base=member_place, index=index_expression, line=token[2]),
+                line=token[2],
+            )
             self.eat("ASSIGN")
             value_expression = self.parse_expression()
             return PlaceStore(
                 line=token[2],
-                place=SubscriptPlace(base=member_place, index=index_expression, line=token[2]),
+                place=member_subscript_place,
                 value=value_expression,
             )
         self.eat("ASSIGN")
@@ -1248,12 +1256,16 @@ class Parser:
             self.eat("LBRACKET")
             index_expression = self.parse_expression()
             self.eat("RBRACKET")
+            member_subscript_place = self._extend_subscript_chain(
+                SubscriptPlace(base=member_place, index=index_expression, line=token[2]),
+                line=token[2],
+            )
             self.eat("ASSIGN")
             value_expression = self.parse_expression()
             self.eat("SEMI")
             return PlaceStore(
                 line=token[2],
-                place=SubscriptPlace(base=member_place, index=index_expression, line=token[2]),
+                place=member_subscript_place,
                 value=value_expression,
             )
         if self.peek()[0] in COMPOUND_ASSIGN_OPERATORS:

@@ -2433,6 +2433,120 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         source = self.target.low_word(self.target.acc) if len(register) < len(self.target.acc) else self.target.acc
         self.emit(f"        mov {register}, {source}")
 
+    def _emit_multidim_member_address(
+        self, object_name: str, *, arrow: bool, field_name: str, indices: list[Node], line: int
+    ) -> tuple[str, int]:
+        """Emit the row-major address of ``g.field[i][j]...`` / ``p->field[i][j]...``.
+
+        Returns ``(addr, element_size)``.  Mirrors
+        :meth:`_emit_multidim_subscript_address` but roots the linear byte
+        offset at ``(struct base address + field byte offset)`` and walks
+        the FIELD's dimensions (parsed from its declared multidim type).
+        Constant indices and the field offset fold into a static
+        displacement; dynamic indices are scaled and summed into BX, then
+        the full field base is materialized into SI (so ``[si+disp]`` stays
+        legal at 16-bit, where ``[bp+bx]`` is not).  The terminal load/store
+        uses the field's innermost element size (handles int / 4-byte
+        elements, bypassing the bespoke member-index 1/2-byte gate).
+
+        Raises:
+            CompileError: if the subscript count does not match the field's
+            dimension count.
+
+        """
+        info = self._resolve_member_index_layout(arrow=arrow, line=line, member_name=field_name, object_name=object_name)
+        field_offset = info.byte_offset
+        array_type = Type.from_string(info.type_name)
+        assert isinstance(array_type, ArrayType)
+        dimension_counts: list[int] = []
+        element_type: Type = array_type
+        while isinstance(element_type, ArrayType):
+            dimension_counts.append(element_type.count or 0)
+            element_type = element_type.pointee
+        if len(indices) != len(dimension_counts):
+            message = f"wrong number of subscripts for '{field_name}'"
+            raise CompileError(message, line=line)
+        element_size = self._type_size(element_type.to_string())
+        # Per-position byte stride: product of inner dimension counts after
+        # this position, times the element size (row-major Horner).
+        strides: list[int] = []
+        running = element_size
+        for count in reversed(dimension_counts):
+            strides.append(running)
+            running *= count
+        strides.reverse()
+        bx = self.target.bx_register
+        si = self.target.si_register
+        displacement = field_offset
+        # Pre-evaluate every dynamic index into a scaled byte offset, stashing
+        # each on the stack before any BX accumulation (so an index pinned to
+        # BX is read before BX is first clobbered) — same ordering as the
+        # contiguous-array emitter.
+        dynamic_index_count = 0
+        protect_bx = self._bx_holds_pinned_var()
+        for index_node, stride in zip(indices, strides, strict=True):
+            if isinstance(index_node, Int):
+                displacement += index_node.value * stride
+                continue
+            if protect_bx:
+                self.emit(f"        push {bx}")
+            self.generate_expression(index_node)  # AX = dynamic index
+            self._emit_scale_index(self.target.acc, scale=stride)  # AX = byte offset
+            if protect_bx:
+                self.emit(f"        pop {bx}")
+            self.emit(f"        push {self.target.acc}")
+            dynamic_index_count += 1
+        index_register: str | None = None
+        for _ in range(dynamic_index_count):
+            if index_register is None:
+                self.emit(f"        pop {bx}")
+                index_register = bx
+            else:
+                self.emit(f"        pop {self.target.acc}")
+                self.emit(f"        add {bx}, {self.target.acc}")
+        # Materialize the struct base into SI.  Arrow: load the pointer value;
+        # dot: lea the struct's frame/label address.  The field offset stays in
+        # the displacement so ``[si+disp]`` carries it.
+        if arrow:
+            self._emit_load_var(object_name, register=si)
+        else:
+            _base_kind, base = self._variable_base(object_name, line=line)
+            self.emit(f"        lea {si}, [{base}]")
+        if index_register is not None:
+            self.emit(f"        add {si}, {index_register}")
+            index_register = None
+        addr = self._build_address(si, displacement, index=index_register or "")
+        return addr, element_size
+
+    def _emit_multidim_member_load(self, object_name: str, *, arrow: bool, field_name: str, indices: list[Node], line: int) -> None:
+        """Load ``g.field[i][j]...`` / ``p->field[i][j]...`` into the accumulator."""
+        self.ax_clear()
+        protect_bx = self._bx_holds_pinned_var()
+        if protect_bx:
+            self.emit(f"        push {self.target.bx_register}")
+        addr, element_size = self._emit_multidim_member_address(object_name, arrow=arrow, field_name=field_name, indices=indices, line=line)
+        self._emit_field_load(addr=addr, field_size=element_size)
+        if protect_bx:
+            self.emit(f"        pop {self.target.bx_register}")
+        self.ax_clear()
+
+    def _emit_multidim_member_store(
+        self, object_name: str, value: Node, *, arrow: bool, field_name: str, indices: list[Node], line: int
+    ) -> None:
+        """Store *value* into ``g.field[i][j]...`` / ``p->field[i][j]...``."""
+        self.ax_clear()
+        protect_bx = self._bx_holds_pinned_var()
+        if protect_bx:
+            self.emit(f"        push {self.target.bx_register}")
+        self.generate_expression(value)  # AX = value
+        self.emit(f"        push {self.target.acc}")
+        addr, element_size = self._emit_multidim_member_address(object_name, arrow=arrow, field_name=field_name, indices=indices, line=line)
+        self.emit(f"        pop {self.target.acc}")  # AX = value
+        self.ax_clear()
+        self._emit_field_store(addr=addr, field_size=element_size)
+        if protect_bx:
+            self.emit(f"        pop {self.target.bx_register}")
+
     def _emit_multidim_subscript_address(self, base_name: str, indices: list[Node], /, *, line: int) -> tuple[str, int]:
         """Emit the row-major address of ``base_name[i0][i1]...`` and return ``(addr, element_size)``.
 
@@ -2783,6 +2897,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # subscript) own their own base register and never push/pop BX
         # around it; route them through their dedicated emitters so the
         # byte output matches the legacy generate_member_* lowerers.
+        if (multidim := self._match_multidim_member_chain(place)) is not None:
+            object_name, arrow, field_name, indices = multidim
+            self._emit_multidim_member_load(object_name, arrow=arrow, field_name=field_name, indices=indices, line=place.line)
+            return
         if self._is_member_index_place(place):
             self._emit_member_index_load(place)
             return
@@ -2839,6 +2957,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
     def _emit_place_store(self, place: Place, value: Node, /) -> None:
         """Store the result of *value* into *place*."""
+        if (multidim := self._match_multidim_member_chain(place)) is not None:
+            object_name, arrow, field_name, indices = multidim
+            self._emit_multidim_member_store(object_name, value, arrow=arrow, field_name=field_name, indices=indices, line=place.line)
+            return
         if self._is_member_index_place(place):
             self._emit_member_index_store(place, value)
             return
@@ -3486,6 +3608,51 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return place.base.base.name, place.base.index, place.member_name
         return None
 
+    def _match_multidim_member_chain(self, place: Place, /) -> tuple[str, bool, str, list[Node]] | None:
+        """Recognize ``g.field[i][j]...`` / ``p->field[i][j]...`` over a multidim field.
+
+        Returns ``(object_name, arrow, field_name, [index nodes outer→inner])``
+        when *place* is a uniform left-nested :class:`SubscriptPlace` chain
+        whose innermost base is a :class:`MemberPlace` over a
+        :class:`VariablePlace` (dot) or :class:`DereferencePlace` of a
+        :class:`VariablePlace` (arrow), AND the named field's
+        :class:`FieldInfo` type carries two or more ``[`` (a genuine
+        multidimensional array field).  Returns ``None`` for any other
+        shape — single-subscript member access, non-multidim fields, and
+        deref/var-rooted chains all fall through to their existing
+        dispatch arms unchanged.
+        """
+        indices: list[Node] = []
+        current: Place = place
+        while isinstance(current, SubscriptPlace):
+            indices.append(current.index)
+            current = current.base
+        if not isinstance(current, MemberPlace):
+            return None
+        resolved = self._member_index_arrow_object(current)
+        if resolved is None:
+            return None
+        arrow, object_name = resolved
+        struct_type = self.variable_types.get(object_name)
+        if struct_type is None:
+            return None
+        if arrow:
+            if not struct_type.startswith("struct ") or not struct_type.endswith("*"):
+                return None
+            tag = struct_type[len("struct ") : -1].rstrip()
+        else:
+            if not struct_type.startswith("struct ") or struct_type.endswith("*"):
+                return None
+            tag = struct_type[len("struct ") :]
+        layout = self.struct_layouts.get(tag)
+        if layout is None:
+            return None
+        info = layout.get(current.member_name)
+        if info is None or info.type_name.count("[") < 2:
+            return None
+        indices.reverse()
+        return object_name, arrow, current.member_name, indices
+
     def _maybe_emit_data_header(self) -> None:
         """Emit the ``section .data`` (or flat-mode comment) header at most once per call to :meth:`_emit_global_storage`."""
         if self._data_header_emitted:
@@ -4018,15 +4185,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 cursor += 1
                 run_bits = 0
             ftype = declaration_field.type_name
-            if ftype.count("[") > 1:
-                message = f"multidimensional array field '{declaration_field.field_name}' is not yet supported in codegen"
-                raise CompileError(message, line=declaration_field.line)
-            if "[" in ftype:
+            if ftype.count("[") >= 2:
+                # Multidimensional array field, e.g. "int[2][3]".  Parse the
+                # structured type so the total byte size (24) and innermost
+                # element size (int → 4) come from the same row-major model the
+                # addressing path uses; the element type is the innermost
+                # pointee after peeling every ArrayType level.
+                array_type = Type.from_string(ftype)
+                assert isinstance(array_type, ArrayType)
+                field_size = array_type.sizeof(pointer_width=self.target.int_size, scalar_width=self._type_size)
+                element_type: Type = array_type
+                while isinstance(element_type, ArrayType):
+                    element_type = element_type.pointee
+                element_size = self._type_size(element_type.to_string())
+            elif "[" in ftype:
                 # "char[15]" → element_type="char", count=15
                 bracket = ftype.index("[")
-                element_type = ftype[:bracket]
+                single_element_type = ftype[:bracket]
                 count = int(ftype[bracket + 1 : -1])
-                element_size = self._type_size(element_type)
+                element_size = self._type_size(single_element_type)
                 field_size = element_size * count
             else:
                 field_size = self._type_size(ftype)
