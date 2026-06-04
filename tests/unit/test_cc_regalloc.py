@@ -127,6 +127,16 @@ def test_color_triangle_three_registers() -> None:
     assert set(homes.values()) <= {"ebx", "ecx", "edx"}
 
 
+def test_contradictory_precolor_raises() -> None:
+    """Two interfering values precolored to the same register is rejected loudly."""
+    import pytest  # noqa: PLC0415
+
+    graph = {"c": {"f"}, "f": {"c"}}
+    constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={"c": "ebx", "f": "ebx"})
+    with pytest.raises(RegallocError):
+        color(constraints=constraints, costs=_no_costs(), interference=graph, moves=set())
+
+
 def test_defs_and_uses_cover_value_fields_and_base_names() -> None:
     """Defs = destination; uses = value-field reads + Index/IndexAssign base names."""
     from cc.regalloc import _instruction_defs, _instruction_uses  # noqa: PLC0415, PLC2701
@@ -231,6 +241,20 @@ def test_select_prefers_cheapest_save_cost() -> None:
     costs = CostModel(register_save_cost={"x": {"ebx": 5, "ecx": 0}}, spill_benefit={"x": 100})
     alloc = color(constraints=constraints, costs=costs, interference=graph, moves=set())
     assert alloc.homes["x"] == "ecx"
+
+
+def test_self_copy_does_not_crash() -> None:
+    """A self-copy Copy(x, x) is not a coalesce candidate and must not crash."""
+    body = [ir.Copy(destination="a", source="a"), ir.Return(value="a")]
+    result = build_interference(allocatable=frozenset({"a"}), function=_function(body=body))
+    assert all(len(pair) == 2 for pair in result.moves)  # no degenerate size-1 move
+    alloc = allocate(
+        allocatable=frozenset({"a"}),
+        constraints=RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={}),
+        costs=CostModel(register_save_cost={}, spill_benefit={}),
+        function=_function(body=body),
+    )
+    assert "a" in alloc.homes  # no crash; a still gets a register
 
 
 def test_spill_lowest_benefit_under_pressure() -> None:

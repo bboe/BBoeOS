@@ -91,14 +91,9 @@ def _conservative_coalesce(
     graph: dict[str, set[str]] = {name: set(neighbors) for name, neighbors in interference.items()}
     alias: dict[str, str] = {}
 
-    def find(name: str) -> str:
-        while name in alias:
-            name = alias[name]
-        return name
-
     for pair in sorted(moves, key=lambda members: tuple(sorted(members))):
         first, second = sorted(pair)
-        rep_a, rep_b = find(first), find(second)
+        rep_a, rep_b = _resolve_alias(alias=alias, name=first), _resolve_alias(alias=alias, name=second)
         if rep_a == rep_b or rep_b in graph[rep_a]:
             continue
         if rep_a in constraints.precolored or rep_b in constraints.precolored:
@@ -193,6 +188,13 @@ def _iter_ast_var_names(*, node: object) -> Iterator[str]:
     if isinstance(node, (list, tuple)):
         for item in node:
             yield from _iter_ast_var_names(node=item)
+
+
+def _resolve_alias(*, alias: dict[str, str], name: str) -> str:
+    """Follow *alias* chains to the representative of *name*."""
+    while name in alias:
+        name = alias[name]
+    return name
 
 
 def _spill_metric(*, costs: CostModel, degree: dict[str, set[str]], name: str, remaining: set[str]) -> tuple[float, str]:
@@ -358,6 +360,7 @@ def build_interference(*, allocatable: frozenset[str], function: ir.Function) ->
                 and isinstance(instruction.source, str)
                 and instruction.destination in allocatable
                 and instruction.source in allocatable
+                and instruction.destination != instruction.source
             ):
                 moves.add(frozenset({instruction.destination, instruction.source}))
             live.difference_update(defs)
@@ -383,10 +386,16 @@ def color(
     no register is legal or the benefit gate fails).  Aliases from coalescing
     are expanded so every original value inherits its representative's outcome.
     """
+    precolored = dict(constraints.precolored)
+    for name, register in precolored.items():
+        for neighbor in interference.get(name, ()):
+            if neighbor != name and precolored.get(neighbor) == register:
+                message = f"regalloc: interfering values {name!r} and {neighbor!r} both precolored to {register!r}"
+                raise RegallocError(message)
+
     merged_graph, alias = _conservative_coalesce(constraints=constraints, interference=interference, moves=moves)
 
     pool_size = len(constraints.pool)
-    precolored = dict(constraints.precolored)
     nodes = [name for name in merged_graph if name not in precolored]
     degree: dict[str, set[str]] = {name: set(merged_graph[name]) for name in nodes}
 
@@ -423,15 +432,10 @@ def color(
             continue
         homes[name] = choice
 
-    def _resolve(name: str) -> str:
-        while name in alias:
-            name = alias[name]
-        return name
-
     final_homes: dict[str, str] = {}
     final_spilled: set[str] = set()
     for name in interference:
-        representative = _resolve(name)
+        representative = _resolve_alias(alias=alias, name=name)
         if representative in homes:
             final_homes[name] = homes[representative]
         else:
