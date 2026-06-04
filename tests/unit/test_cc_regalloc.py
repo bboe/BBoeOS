@@ -14,6 +14,7 @@ from cc.regalloc import (
     InterferenceResult,
     RegallocError,
     RegisterConstraints,
+    allocate,
     build_interference,
     color,
 )
@@ -27,6 +28,36 @@ def _function(*, body: list[ir.Instruction]) -> ir.Function:
 
 def _no_costs() -> CostModel:
     return CostModel(register_save_cost={}, spill_benefit={})
+
+
+def test_allocate_end_to_end() -> None:
+    """allocate() wires liveness->coloring: a,b interfere and get distinct registers."""
+    body = [
+        ir.Copy(destination="a", source=1),
+        ir.Copy(destination="b", source=2),
+        ir.BinaryOperation(destination="c", left="a", operation="+", right="b"),
+        ir.Return(value="c"),
+    ]
+    allocatable = frozenset({"a", "b", "c"})
+    constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx", "edx"), precolored={})
+    costs = CostModel(register_save_cost={}, spill_benefit={"a": 5, "b": 5, "c": 5})
+    alloc = allocate(allocatable=allocatable, constraints=constraints, costs=costs, function=_function(body=body))
+    assert alloc.homes["a"] != alloc.homes["b"]
+    assert alloc.spilled == frozenset()
+
+
+def test_allocate_propagates_regalloc_error() -> None:
+    """An unmodeled instruction surfaces an error, not a silent miss."""
+    import pytest  # noqa: PLC0415
+
+    body = [object()]  # not a valid ir.Instruction
+    with pytest.raises(Exception):  # noqa: B017, PT011
+        allocate(
+            allocatable=frozenset(),
+            constraints=RegisterConstraints(allowed={}, pool=(), precolored={}),
+            costs=CostModel(register_save_cost={}, spill_benefit={}),
+            function=_function(body=body),  # type: ignore[arg-type]
+        )
 
 
 def test_benefit_gate_spills_when_save_cost_too_high() -> None:

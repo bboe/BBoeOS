@@ -272,6 +272,27 @@ class RegisterConstraints:
     precolored: dict[str, str]
 
 
+def allocate(
+    *,
+    allocatable: frozenset[str],
+    constraints: RegisterConstraints,
+    costs: CostModel,
+    function: ir.Function,
+) -> Allocation:
+    """Compute interference for *function* and color it — the end-to-end entry.
+
+    PR 2/3 will call this with target-derived *constraints* / *costs* and then
+    wire ``Allocation.homes`` into emission; PR 1 leaves it unconsumed.
+    """
+    interference = build_interference(allocatable=allocatable, function=function)
+    return color(
+        constraints=constraints,
+        costs=costs,
+        interference=interference.graph,
+        moves=interference.moves,
+    )
+
+
 def build_interference(*, allocatable: frozenset[str], function: ir.Function) -> InterferenceResult:
     """Compute the interference graph, move pairs, and live-across-call counts.
 
