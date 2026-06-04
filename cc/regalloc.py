@@ -22,12 +22,16 @@ left in memory.
 from __future__ import annotations
 
 import dataclasses
+from collections import Counter
 from typing import TYPE_CHECKING
 
-from cc import ast_nodes, ir
+from cc import ast_nodes, cfg, ir
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+
+_CALL_TYPES = (ir.Call, ir.TailCall, ir.CarryBranch)
 
 
 #: Instruction classes that define a destination name.
@@ -52,6 +56,13 @@ _MODELED_VALUE_TYPES = (
 
 #: Opaque AST-wrapping instructions whose reads are found by walking the AST.
 _OPAQUE_TYPES = (ir.Access, ir.Block, ir.CarryBranch, ir.Switch)
+
+
+def _block_instructions(*, block: cfg.BasicBlock) -> list[ir.Instruction]:
+    """Return a block's instructions followed by its terminator (if any)."""
+    if block.terminator is None:
+        return list(block.instructions)
+    return [*block.instructions, block.terminator]
 
 
 def _instruction_defs(*, instruction: ir.Instruction) -> tuple[str, ...]:
@@ -194,3 +205,78 @@ class RegisterConstraints:
     allowed: dict[str, frozenset[str]]
     pool: tuple[str, ...]
     precolored: dict[str, str]
+
+
+def build_interference(*, allocatable: frozenset[str], function: ir.Function) -> InterferenceResult:
+    """Compute the interference graph, move pairs, and live-across-call counts.
+
+    Block-level backward dataflow to a fixed point, then a backward walk of each
+    block adding Chaitin interference edges (each def vs. the live set) and
+    recording Copy move pairs.  Only names in *allocatable* become graph nodes.
+    """
+    graph = cfg.build_cfg(function.body)
+    blocks = graph.blocks
+
+    block_use: dict[cfg.BasicBlock, set[str]] = {}
+    block_def: dict[cfg.BasicBlock, set[str]] = {}
+    for block in blocks:
+        uses: set[str] = set()
+        defs: set[str] = set()
+        for instruction in _block_instructions(block=block):
+            for name in _instruction_uses(instruction=instruction):
+                if name in allocatable and name not in defs:
+                    uses.add(name)
+            for name in _instruction_defs(instruction=instruction):
+                if name in allocatable:
+                    defs.add(name)
+        block_use[block] = uses
+        block_def[block] = defs
+
+    live_in: dict[cfg.BasicBlock, set[str]] = {block: set() for block in blocks}
+    live_out: dict[cfg.BasicBlock, set[str]] = {block: set() for block in blocks}
+    changed = True
+    while changed:
+        changed = False
+        for block in blocks:
+            new_out: set[str] = set()
+            for successor in block.successors:
+                new_out |= live_in[successor]
+            new_in = block_use[block] | (new_out - block_def[block])
+            if new_in != live_in[block] or new_out != live_out[block]:
+                live_in[block] = new_in
+                live_out[block] = new_out
+                changed = True
+
+    adjacency: dict[str, set[str]] = {name: set() for name in allocatable}
+    moves: set[frozenset[str]] = set()
+    live_across_call: Counter[str] = Counter()
+
+    def add_edge(*, name_a: str, name_b: str) -> None:
+        if name_a == name_b:
+            return
+        adjacency[name_a].add(name_b)
+        adjacency[name_b].add(name_a)
+
+    for block in blocks:
+        live = set(live_out[block])
+        for instruction in reversed(_block_instructions(block=block)):
+            if isinstance(instruction, _CALL_TYPES):
+                for name in live:
+                    live_across_call[name] += 1
+            defs = [name for name in _instruction_defs(instruction=instruction) if name in allocatable]
+            for defined in defs:
+                for other in live:
+                    add_edge(name_a=defined, name_b=other)
+            if (
+                isinstance(instruction, ir.Copy)
+                and isinstance(instruction.source, str)
+                and instruction.destination in allocatable
+                and instruction.source in allocatable
+            ):
+                moves.add(frozenset({instruction.destination, instruction.source}))
+            live.difference_update(defs)
+            for name in _instruction_uses(instruction=instruction):
+                if name in allocatable:
+                    live.add(name)
+
+    return InterferenceResult(graph=adjacency, live_across_call=dict(live_across_call), moves=moves)

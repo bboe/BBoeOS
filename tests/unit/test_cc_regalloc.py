@@ -8,7 +8,20 @@ the test source.  The engine is pure: no codegen, no target import.
 from __future__ import annotations
 
 from cc import ast_nodes, ir
-from cc.regalloc import Allocation, CostModel, InterferenceResult, RegallocError, RegisterConstraints
+from cc.regalloc import (
+    Allocation,
+    CostModel,
+    InterferenceResult,
+    RegallocError,
+    RegisterConstraints,
+    build_interference,
+)
+
+
+def _function(*, body: list[ir.Instruction]) -> ir.Function:
+    """Wrap *body* in a minimal ir.Function for analysis."""
+    ast = ast_nodes.Function(body=[], line=1, name="f", params=[])
+    return ir.Function(ast_node=ast, body=body, strings=[])
 
 
 def test_defs_and_uses_cover_value_fields_and_base_names() -> None:
@@ -30,6 +43,52 @@ def test_defs_and_uses_cover_value_fields_and_base_names() -> None:
     call = ir.Call(args=("x", 3), destination="_ir_2", name="f")
     assert _instruction_defs(instruction=call) == ("_ir_2",)
     assert set(_instruction_uses(instruction=call)) == {"x"}
+
+
+def test_interference_move_pair_recorded() -> None:
+    """A Copy between two allocatable values is a coalesce candidate."""
+    body = [
+        ir.Copy(destination="a", source=1),
+        ir.Copy(destination="b", source="a"),
+        ir.Return(value="b"),
+    ]
+    result = build_interference(allocatable=frozenset({"a", "b"}), function=_function(body=body))
+    assert frozenset({"a", "b"}) in result.moves
+
+
+def test_interference_two_simultaneously_live_values() -> None:
+    """Two values both live at a point interfere; a dead-then-reused value does not."""
+    body = [
+        ir.Copy(destination="a", source=1),
+        ir.Copy(destination="b", source=2),
+        ir.BinaryOperation(destination="c", left="a", operation="+", right="b"),
+        ir.Return(value="c"),
+    ]
+    allocatable = frozenset({"a", "b", "c"})
+    result = build_interference(allocatable=allocatable, function=_function(body=body))
+    assert "b" in result.graph["a"] and "a" in result.graph["b"]
+    assert result.graph.get("c", set()) == set()
+
+
+def test_live_across_call_counted() -> None:
+    """A value live across a Call is counted for save-cost."""
+    body = [
+        ir.Copy(destination="keep", source=1),
+        ir.Call(args=(), destination="_ir_0", name="f"),
+        ir.Return(value="keep"),
+    ]
+    result = build_interference(allocatable=frozenset({"keep", "_ir_0"}), function=_function(body=body))
+    assert result.live_across_call.get("keep", 0) == 1
+
+
+def test_non_allocatable_names_absent_from_graph() -> None:
+    """Globals / labels are not allocatable and never become graph nodes."""
+    body = [
+        ir.Index(base="g_global", destination="_ir_0", index="i"),
+        ir.Return(value="_ir_0"),
+    ]
+    result = build_interference(allocatable=frozenset({"_ir_0", "i"}), function=_function(body=body))
+    assert "g_global" not in result.graph
 
 
 def test_public_types_construct() -> None:
