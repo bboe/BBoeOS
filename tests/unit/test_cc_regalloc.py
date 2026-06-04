@@ -29,6 +29,15 @@ def _no_costs() -> CostModel:
     return CostModel(register_save_cost={}, spill_benefit={})
 
 
+def test_benefit_gate_spills_when_save_cost_too_high() -> None:
+    """A value whose benefit does not exceed its cheapest save cost is spilled."""
+    graph = {"x": set()}
+    constraints = RegisterConstraints(allowed={}, pool=("ebx",), precolored={})
+    costs = CostModel(register_save_cost={"x": {"ebx": 2}}, spill_benefit={"x": 2})
+    alloc = color(constraints=constraints, costs=costs, interference=graph)
+    assert "x" in alloc.spilled
+
+
 def test_color_respects_allowed_set() -> None:
     """A value restricted to one register lands there."""
     graph = {"x": set(), "y": set()}
@@ -144,6 +153,15 @@ def test_public_types_construct() -> None:
     inter = InterferenceResult(graph={"x": set()}, live_across_call={"x": 1}, moves=set())
     assert inter.graph == {"x": set()}
     assert inter.live_across_call["x"] == 1
+
+
+def test_select_prefers_cheapest_save_cost() -> None:
+    """Among free registers, pick the one with the lowest save cost."""
+    graph = {"x": set()}
+    constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={})
+    costs = CostModel(register_save_cost={"x": {"ebx": 5, "ecx": 0}}, spill_benefit={"x": 100})
+    alloc = color(constraints=constraints, costs=costs, interference=graph)
+    assert alloc.homes["x"] == "ecx"
 
 
 def test_spill_lowest_benefit_under_pressure() -> None:

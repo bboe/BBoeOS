@@ -305,8 +305,9 @@ def color(*, constraints: RegisterConstraints, costs: CostModel, interference: d
 
     Chaitin-Briggs simplify (remove ``< K`` degree non-precolored nodes), then
     optimistic-spill push of the lowest-benefit node (Chaitin cost metric), then
-    select (assign each popped node a legal color, or spill when no register is
-    legal).  Soft-cost register choice and coalescing land in later commits.
+    select (assign each popped node the lowest-save-cost legal register, or spill
+    when no register is legal or the benefit gate fails).  Coalescing lands in a
+    later commit.
     """
     pool_size = len(constraints.pool)
     precolored = dict(constraints.precolored)
@@ -334,11 +335,17 @@ def color(*, constraints: RegisterConstraints, costs: CostModel, interference: d
     while stack:
         name = stack.pop()
         used = {homes[neighbor] for neighbor in interference[name] if neighbor in homes}
-        choice = next((reg for reg in _allowed_registers(constraints=constraints, value=name) if reg not in used), None)
-        if choice is None:
+        legal = [reg for reg in _allowed_registers(constraints=constraints, value=name) if reg not in used]
+        if not legal:
             spilled.add(name)
-        else:
-            homes[name] = choice
+            continue
+        save_costs = costs.register_save_cost.get(name, {})
+        choice = min(legal, key=lambda reg, save_costs=save_costs: (save_costs.get(reg, 0), constraints.pool.index(reg)))
+        benefit = costs.spill_benefit.get(name, 0)
+        if name in costs.spill_benefit and benefit <= save_costs.get(choice, 0):
+            spilled.add(name)
+            continue
+        homes[name] = choice
 
     for name, register in precolored.items():
         homes.setdefault(name, register)
