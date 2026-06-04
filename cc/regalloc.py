@@ -22,6 +22,111 @@ left in memory.
 from __future__ import annotations
 
 import dataclasses
+from typing import TYPE_CHECKING
+
+from cc import ast_nodes, ir
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+#: Instruction classes that define a destination name.
+_DESTINATION_TYPES = (ir.BinaryOperation, ir.Copy, ir.Index, ir.Call)
+
+#: Instruction classes that carry no reads and no allocatable defs.
+_INERT_TYPES = (ir.Jump, ir.Label, ir.LoopBoundary, ir.InlineAsm)
+
+#: Instruction classes whose reads are fully covered by VALUE_FIELDS + the
+#: explicit name-string fields handled in ``_instruction_uses``.
+_MODELED_VALUE_TYPES = (
+    ir.BinaryOperation,
+    ir.BranchFalse,
+    ir.Call,
+    ir.Copy,
+    ir.Index,
+    ir.IndexAssign,
+    ir.RepString,
+    ir.Return,
+    ir.TailCall,
+)
+
+#: Opaque AST-wrapping instructions whose reads are found by walking the AST.
+_OPAQUE_TYPES = (ir.Access, ir.Block, ir.CarryBranch, ir.Switch)
+
+
+def _instruction_defs(*, instruction: ir.Instruction) -> tuple[str, ...]:
+    """Return the destination name(s) written by *instruction* (empty if none)."""
+    if isinstance(instruction, _DESTINATION_TYPES):
+        destination = instruction.destination
+        return () if destination is None else (destination,)
+    return ()
+
+
+def _instruction_uses(*, instruction: ir.Instruction) -> tuple[str, ...]:
+    """Return every name read by *instruction*, exhaustively.
+
+    Combines VALUE_FIELDS reads (filtered to ``str`` operands), the name-string
+    operands the VALUE_FIELDS walk skips (``Index.base`` / ``IndexAssign.base`` /
+    ``RepString.dest`` / ``RepString.source``), and opaque-AST reads.  Raises
+    ``RegallocError`` for an unmodeled instruction so coverage stays exhaustive.
+    """
+    if isinstance(instruction, _INERT_TYPES):
+        return ()
+    if isinstance(instruction, _OPAQUE_TYPES):
+        if isinstance(instruction, ir.Switch):
+            names = list(_iter_ast_var_names(node=instruction.discriminant))
+            for case in instruction.cases:
+                for inner in case.body:
+                    names.extend(_instruction_uses(instruction=inner))
+            return tuple(names)
+        ast_node = instruction.call_ast if isinstance(instruction, ir.CarryBranch) else instruction.node
+        return tuple(_iter_ast_var_names(node=ast_node))
+    if not isinstance(instruction, _MODELED_VALUE_TYPES):
+        message = f"regalloc: unhandled instruction {type(instruction).__name__}"
+        raise RegallocError(message)
+    names: list[str] = []
+    for field_name in instruction.VALUE_FIELDS:
+        value = getattr(instruction, field_name)
+        if value is None:
+            continue
+        operands = value if isinstance(value, tuple) else (value,)
+        names.extend(operand for operand in operands if isinstance(operand, str))
+    if isinstance(instruction, (ir.Index, ir.IndexAssign)):
+        names.append(instruction.base)
+    if isinstance(instruction, ir.RepString):
+        names.append(instruction.dest)
+        if instruction.source is not None:
+            names.append(instruction.source)
+    return tuple(names)
+
+
+def _iter_ast_var_names(*, node: object) -> Iterator[str]:
+    """Yield every ``Var`` / ``VariablePlace`` name in the AST subtree at *node*.
+
+    Local copy of ``cc.ir_optimize._iter_ast_var_names`` (cc/ssa.py keeps its
+    own copy too) so regalloc.py does not import the optimizer's private API.
+
+    Yields:
+        Each variable name string found in the subtree.
+
+    """
+    if isinstance(node, ast_nodes.Var):
+        yield node.name
+        return
+    if isinstance(node, ast_nodes.VariablePlace):
+        yield node.name
+        return
+    for bare_name_field in ("target_name", "object_name"):
+        bare_name = getattr(node, bare_name_field, None)
+        if isinstance(bare_name, str):
+            yield bare_name
+    if dataclasses.is_dataclass(node):
+        for declared_field in dataclasses.fields(node):
+            yield from _iter_ast_var_names(node=getattr(node, declared_field.name))
+        return
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            yield from _iter_ast_var_names(node=item)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
