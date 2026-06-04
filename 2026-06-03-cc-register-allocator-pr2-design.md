@@ -40,12 +40,41 @@ increase, so coloring must match-or-beat the tuned heuristic on every function.
   logic they contained is retained (extracted into reusable helpers) because it
   feeds the engine's cost model.
 
+## Allocation is orthogonal to the emission path
+
+A finding during planning: the IR path is **not universal**. `main` is emitted on
+the AST path (the IR *emission* path doesn't yet reproduce the AST emitter's
+`ax_local` reuse tracking and `_try_emit_guarded_update` MIN/MAX fast path, and
+routing `main` through IR emission regressed bytes); `naked` and `always_inline`
+functions are likewise off the IR emission path. So `build_interference` — which
+needs an `ir.Function` — cannot serve those functions, and `main` is exactly where
+auto-pin's `BP` win matters.
+
+But **register allocation is orthogonal to the emission path**. The allocator's
+only output is the `pinned_register` home map; both emission paths (AST and IR)
+already consult it identically. Allocation does not require `main` to be emitted
+from IR, and PR 2 must **not** try to close the IR-emission parity gap (that is a
+separate, larger future cleanup — make IR emission match the AST emitter, then
+retire the AST emission path).
+
+The lever that makes this clean: `cc.regalloc.color()` takes a plain interference
+dict + moves set directly — it does **not** require an `ir.Function`
+(`allocate()` is merely `build_interference()` + `color()`). So PR 2 calls
+`color()` directly, fed by the **AST `LivenessAnalyzer.interference()`**, which
+produces precise interference for *every* function including `main`. This is the
+same interference source auto-pin's sharing pass already uses; `color()` with
+real interference cleanly **generalizes** auto-pin's two behaviors (primary
+"distinct register per pin" + the liveness-driven sharing pass) into one
+mechanism. For the Block-heavy AST-path functions, AST liveness is *more* precise
+than `build_interference` walking opaque `Block` nodes — so this is both uniform
+and lower parity risk. The IR-CFG `build_interference` stays reserved for **PR 3**,
+where `_ir_*` temps live only in the IR body.
+
 ## The cost-input seam (AST economics -> engine inputs)
 
-The engine colors over `ir.Function` (IR instructions + CFG, via
-`build_interference`), but the economics live in the AST today. PR 2 keeps the
-AST-derived economics as the *cost inputs* and uses the engine's IR-CFG
-interference graph for *coloring*. For each user function we construct:
+PR 2 keeps the AST-derived economics as the *cost inputs* and uses the **AST
+`LivenessAnalyzer` interference** graph for *coloring* (via `color()` directly,
+with `moves=set()`). For each user function we construct:
 
 - **`allocatable: frozenset[str]`** = user locals + params, **minus** the
   heuristic's exclusions (address-taken vars, array params, complex-init
@@ -89,14 +118,19 @@ cost dicts key correctly against the engine's IR-keyed interference graph.
    drives homes.
 2. **Capture + freeze the golden.** Env-gated dump of the heuristic's per-function
    homes; generate and commit `cc_register_homes_baseline.json`.
-3. **Build the input adapter.** A function that turns a function's AST/IR + the
-   counting helpers into `allocatable` / `CostModel` / `RegisterConstraints`,
-   unit-tested in `tests/unit/` against synthetic functions. Not yet wired into
-   emission.
+3. **Build the input adapter.** A function that turns a function's AST body +
+   parameters + the counting helpers into `allocatable` / `CostModel` /
+   `RegisterConstraints` and the `interference` dict (from
+   `LivenessAnalyzer.interference()`, restricted to `allocatable`), unit-tested
+   in `tests/unit/` against synthetic functions. Not yet wired into emission.
 4. **Wire the allocator behind a flag.** `generate_function` calls
-   `regalloc.allocate(...)` and maps `homes` -> `pinned_register`, spilled ->
-   frame slots, selected by an env/attribute flag (default stays heuristic). Add
-   the parity test; run the byte gate in allocator mode.
+   `regalloc.color(constraints=..., costs=..., interference=..., moves=set())`
+   and maps `homes` -> `pinned_register`, spilled -> frame slots, selected by an
+   env/attribute flag (default stays heuristic). When `LivenessAnalyzer` raises
+   `LivenessAnalysisError` for a function, fall back conservatively (treat all
+   allocatable values as mutually interfering, so none illegally share a
+   register) — safe, with any byte cost caught by the gate. Add the parity test;
+   run the byte gate in allocator mode.
 5. **Converge.** Tune `allowed` / pool ordering / cost inputs and the `color()`
    register preference until byte gate `≤ baseline` AND golden matches (or each
    diff is byte-neutral and listed). Justify + re-bless any small straggler.
