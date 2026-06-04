@@ -25,11 +25,15 @@ def _function(*, body: list[ir.Instruction]) -> ir.Function:
     return ir.Function(ast_node=ast, body=body, strings=[])
 
 
+def _no_costs() -> CostModel:
+    return CostModel(register_save_cost={}, spill_benefit={})
+
+
 def test_color_respects_allowed_set() -> None:
     """A value restricted to one register lands there."""
     graph = {"x": set(), "y": set()}
     constraints = RegisterConstraints(allowed={"x": frozenset({"ecx"})}, pool=("ebx", "ecx"), precolored={})
-    alloc = color(constraints=constraints, interference=graph)
+    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph)
     assert alloc.homes["x"] == "ecx"
 
 
@@ -37,7 +41,7 @@ def test_color_respects_precolored_neighbor() -> None:
     """A node adjacent to a precolored register avoids that register."""
     graph = {"p": {"q"}, "q": {"p"}}
     constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={"p": "ebx"})
-    alloc = color(constraints=constraints, interference=graph)
+    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph)
     assert alloc.homes["p"] == "ebx"
     assert alloc.homes["q"] == "ecx"
 
@@ -46,7 +50,7 @@ def test_color_triangle_three_registers() -> None:
     """A 3-clique colors with 3 registers, all distinct."""
     graph = {"a": {"b", "c"}, "b": {"a", "c"}, "c": {"a", "b"}}
     constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx", "edx"), precolored={})
-    alloc = color(constraints=constraints, interference=graph)
+    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph)
     assert alloc.spilled == frozenset()
     homes = alloc.homes
     assert homes["a"] != homes["b"] != homes["c"] != homes["a"]
@@ -110,6 +114,14 @@ def test_live_across_call_counted() -> None:
     assert result.live_across_call.get("keep", 0) == 1
 
 
+def test_no_spill_when_pressure_fits() -> None:
+    """A 2-clique with 2 registers spills nothing even at equal benefit."""
+    graph = {"a": {"b"}, "b": {"a"}}
+    constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={})
+    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph)
+    assert alloc.spilled == frozenset()
+
+
 def test_non_allocatable_names_absent_from_graph() -> None:
     """Globals / labels are not allocatable and never become graph nodes."""
     body = [
@@ -132,6 +144,16 @@ def test_public_types_construct() -> None:
     inter = InterferenceResult(graph={"x": set()}, live_across_call={"x": 1}, moves=set())
     assert inter.graph == {"x": set()}
     assert inter.live_across_call["x"] == 1
+
+
+def test_spill_lowest_benefit_under_pressure() -> None:
+    """A 3-clique with only 2 registers spills the lowest-benefit node."""
+    graph = {"a": {"b", "c"}, "b": {"a", "c"}, "c": {"a", "b"}}
+    constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={})
+    costs = CostModel(register_save_cost={}, spill_benefit={"a": 10, "b": 10, "c": 1})
+    alloc = color(constraints=constraints, costs=costs, interference=graph)
+    assert alloc.spilled == frozenset({"c"})
+    assert alloc.homes["a"] != alloc.homes["b"]
 
 
 def test_unmodeled_instruction_raises() -> None:

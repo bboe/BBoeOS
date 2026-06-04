@@ -148,6 +148,16 @@ def _iter_ast_var_names(*, node: object) -> Iterator[str]:
             yield from _iter_ast_var_names(node=item)
 
 
+def _spill_metric(*, costs: CostModel, degree: dict[str, set[str]], name: str, remaining: set[str]) -> tuple[float, str]:
+    """Return the Chaitin spill metric for *name*: (benefit/degree, name).
+
+    Lower values spill first — lowest benefit relative to current degree.
+    The tiebreaking name component ensures a deterministic total order.
+    """
+    current_degree = len(degree[name] & remaining) or 1
+    return (costs.spill_benefit.get(name, 0) / current_degree, name)
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True, slots=True)
 class Allocation:
     """The colorer's result: register homes + the spilled set."""
@@ -290,13 +300,13 @@ def build_interference(*, allocatable: frozenset[str], function: ir.Function) ->
     return InterferenceResult(graph=adjacency, live_across_call=dict(live_across_call), moves=moves)
 
 
-def color(*, constraints: RegisterConstraints, interference: dict[str, set[str]]) -> Allocation:
+def color(*, constraints: RegisterConstraints, costs: CostModel, interference: dict[str, set[str]]) -> Allocation:
     """Color *interference* with the pool in *constraints*.
 
-    Chaitin-Briggs simplify (remove ``< K`` degree non-precolored nodes),
-    optimistic-spill push, then select (assign each popped node a legal color,
-    or spill when no register is legal).  Cost-driven spill and coalescing land
-    in later commits.
+    Chaitin-Briggs simplify (remove ``< K`` degree non-precolored nodes), then
+    optimistic-spill push of the lowest-benefit node (Chaitin cost metric), then
+    select (assign each popped node a legal color, or spill when no register is
+    legal).  Soft-cost register choice and coalescing land in later commits.
     """
     pool_size = len(constraints.pool)
     precolored = dict(constraints.precolored)
@@ -307,14 +317,17 @@ def color(*, constraints: RegisterConstraints, interference: dict[str, set[str]]
     remaining = set(nodes)
     while remaining:
         simplifiable = sorted(name for name in remaining if len(degree[name] & remaining) < pool_size)
-        if not simplifiable:
-            # Optimistic spill (cost-driven choice lands in a later commit); for the
-            # colorable graphs in this commit there is always a simplifiable node.
-            simplifiable = [min(remaining)]
-        for name in simplifiable:
-            if name in remaining:
+        if simplifiable:
+            for name in simplifiable:
                 stack.append(name)
                 remaining.discard(name)
+            continue
+        victim = min(
+            remaining,
+            key=lambda candidate: _spill_metric(costs=costs, degree=degree, name=candidate, remaining=remaining),
+        )
+        stack.append(victim)
+        remaining.discard(victim)
 
     homes: dict[str, str] = dict(precolored)
     spilled: set[str] = set()
