@@ -34,15 +34,45 @@ def test_benefit_gate_spills_when_save_cost_too_high() -> None:
     graph = {"x": set()}
     constraints = RegisterConstraints(allowed={}, pool=("ebx",), precolored={})
     costs = CostModel(register_save_cost={"x": {"ebx": 2}}, spill_benefit={"x": 2})
-    alloc = color(constraints=constraints, costs=costs, interference=graph)
+    alloc = color(constraints=constraints, costs=costs, interference=graph, moves=set())
     assert "x" in alloc.spilled
+
+
+def test_coalesce_move_shares_register() -> None:
+    """Coalescing forces move-related values onto the SAME register under pressure.
+
+    p is precolored to ebx; a interferes with p so a must take ecx; b is free
+    and (without coalescing) would take the first register ebx, differing from a.
+    The {a,b} move must coalesce them onto ecx.
+    """
+    graph = {"a": {"p"}, "b": set(), "p": {"a"}}
+    constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={"p": "ebx"})
+    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph, moves={frozenset({"a", "b"})})
+    assert alloc.homes["a"] == alloc.homes["b"] == "ecx"
+
+
+def test_coalesce_not_done_when_unsafe() -> None:
+    """Briggs blocks an unsafe merge that would otherwise force a spill.
+
+    a-b is a move (non-interfering). Merging them forms an ab-c-d triangle that
+    needs 3 colors and would spill at K=2.  Left un-merged the graph is a 2-color
+    path, so a correct (Briggs-blocking) allocator spills nothing.  An allocator
+    that always coalesced would spill here.
+    """
+    graph = {"a": {"c"}, "b": {"d"}, "c": {"a", "d"}, "d": {"b", "c"}}
+    constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={})
+    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph, moves={frozenset({"a", "b"})})
+    assert alloc.spilled == frozenset()
+    for node, neighbors in graph.items():
+        for neighbor in neighbors:
+            assert alloc.homes[node] != alloc.homes[neighbor]
 
 
 def test_color_respects_allowed_set() -> None:
     """A value restricted to one register lands there."""
     graph = {"x": set(), "y": set()}
     constraints = RegisterConstraints(allowed={"x": frozenset({"ecx"})}, pool=("ebx", "ecx"), precolored={})
-    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph)
+    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph, moves=set())
     assert alloc.homes["x"] == "ecx"
 
 
@@ -50,7 +80,7 @@ def test_color_respects_precolored_neighbor() -> None:
     """A node adjacent to a precolored register avoids that register."""
     graph = {"p": {"q"}, "q": {"p"}}
     constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={"p": "ebx"})
-    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph)
+    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph, moves=set())
     assert alloc.homes["p"] == "ebx"
     assert alloc.homes["q"] == "ecx"
 
@@ -59,7 +89,7 @@ def test_color_triangle_three_registers() -> None:
     """A 3-clique colors with 3 registers, all distinct."""
     graph = {"a": {"b", "c"}, "b": {"a", "c"}, "c": {"a", "b"}}
     constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx", "edx"), precolored={})
-    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph)
+    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph, moves=set())
     assert alloc.spilled == frozenset()
     homes = alloc.homes
     assert homes["a"] != homes["b"] != homes["c"] != homes["a"]
@@ -112,6 +142,14 @@ def test_interference_two_simultaneously_live_values() -> None:
     assert result.graph.get("c", set()) == set()
 
 
+def test_interfering_move_not_coalesced() -> None:
+    """Move-related values that interfere must NOT share a register."""
+    graph = {"a": {"b"}, "b": {"a"}}
+    constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={})
+    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph, moves={frozenset({"a", "b"})})
+    assert alloc.homes["a"] != alloc.homes["b"]
+
+
 def test_live_across_call_counted() -> None:
     """A value live across a Call is counted for save-cost."""
     body = [
@@ -127,7 +165,7 @@ def test_no_spill_when_pressure_fits() -> None:
     """A 2-clique with 2 registers spills nothing even at equal benefit."""
     graph = {"a": {"b"}, "b": {"a"}}
     constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={})
-    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph)
+    alloc = color(constraints=constraints, costs=_no_costs(), interference=graph, moves=set())
     assert alloc.spilled == frozenset()
 
 
@@ -160,7 +198,7 @@ def test_select_prefers_cheapest_save_cost() -> None:
     graph = {"x": set()}
     constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={})
     costs = CostModel(register_save_cost={"x": {"ebx": 5, "ecx": 0}}, spill_benefit={"x": 100})
-    alloc = color(constraints=constraints, costs=costs, interference=graph)
+    alloc = color(constraints=constraints, costs=costs, interference=graph, moves=set())
     assert alloc.homes["x"] == "ecx"
 
 
@@ -169,7 +207,7 @@ def test_spill_lowest_benefit_under_pressure() -> None:
     graph = {"a": {"b", "c"}, "b": {"a", "c"}, "c": {"a", "b"}}
     constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={})
     costs = CostModel(register_save_cost={}, spill_benefit={"a": 10, "b": 10, "c": 1})
-    alloc = color(constraints=constraints, costs=costs, interference=graph)
+    alloc = color(constraints=constraints, costs=costs, interference=graph, moves=set())
     assert alloc.spilled == frozenset({"c"})
     assert alloc.homes["a"] != alloc.homes["b"]
 

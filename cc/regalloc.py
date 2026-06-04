@@ -73,6 +73,53 @@ def _block_instructions(*, block: cfg.BasicBlock) -> list[ir.Instruction]:
     return [*block.instructions, block.terminator]
 
 
+def _conservative_coalesce(
+    *,
+    constraints: RegisterConstraints,
+    interference: dict[str, set[str]],
+    moves: set[frozenset[str]],
+) -> tuple[dict[str, set[str]], dict[str, str]]:
+    """Merge safe move-related pairs; return (merged graph, alias->representative).
+
+    Briggs: merge ``{a, b}`` only when they do not interfere and the union of
+    their neighbors has fewer than ``K`` members of significant degree
+    (``>= K``).  Precolored endpoints and endpoints with incompatible ``allowed``
+    sets are left un-coalesced (PR 1 keeps coalescing to the common
+    same-constraint case; richer constrained coalescing is deferred).
+    """
+    pool_size = len(constraints.pool)
+    graph: dict[str, set[str]] = {name: set(neighbors) for name, neighbors in interference.items()}
+    alias: dict[str, str] = {}
+
+    def find(name: str) -> str:
+        while name in alias:
+            name = alias[name]
+        return name
+
+    for pair in sorted(moves, key=lambda members: tuple(sorted(members))):
+        first, second = sorted(pair)
+        rep_a, rep_b = find(first), find(second)
+        if rep_a == rep_b or rep_b in graph[rep_a]:
+            continue
+        if rep_a in constraints.precolored or rep_b in constraints.precolored:
+            continue
+        if constraints.allowed.get(rep_a) != constraints.allowed.get(rep_b):
+            continue
+        merged_neighbors = graph[rep_a] | graph[rep_b]
+        significant = sum(1 for neighbor in merged_neighbors if len(graph[neighbor]) >= pool_size)
+        if significant >= pool_size:
+            continue
+        for neighbor in graph[rep_b]:
+            graph[neighbor].discard(rep_b)
+            graph[neighbor].add(rep_a)
+            graph[rep_a].add(neighbor)
+        graph[rep_a].discard(rep_a)
+        del graph[rep_b]
+        alias[rep_b] = rep_a
+
+    return graph, alias
+
+
 def _instruction_defs(*, instruction: ir.Instruction) -> tuple[str, ...]:
     """Return the destination name(s) written by *instruction* (empty if none)."""
     if isinstance(instruction, _DESTINATION_TYPES):
@@ -300,19 +347,27 @@ def build_interference(*, allocatable: frozenset[str], function: ir.Function) ->
     return InterferenceResult(graph=adjacency, live_across_call=dict(live_across_call), moves=moves)
 
 
-def color(*, constraints: RegisterConstraints, costs: CostModel, interference: dict[str, set[str]]) -> Allocation:
-    """Color *interference* with the pool in *constraints*.
+def color(
+    *,
+    constraints: RegisterConstraints,
+    costs: CostModel,
+    interference: dict[str, set[str]],
+    moves: set[frozenset[str]],
+) -> Allocation:
+    """Color *interference* with the pool in *constraints*, spilling by cost.
 
-    Chaitin-Briggs simplify (remove ``< K`` degree non-precolored nodes), then
-    optimistic-spill push of the lowest-benefit node (Chaitin cost metric), then
-    select (assign each popped node the lowest-save-cost legal register, or spill
-    when no register is legal or the benefit gate fails).  Coalescing lands in a
-    later commit.
+    Chaitin-Briggs: conservative coalescing of move pairs, simplify (remove
+    ``< K`` degree non-precolored nodes), optimistic-spill push, then select
+    (assign each popped node a legal color by lowest save cost, or spill when
+    no register is legal or the benefit gate fails).  Aliases from coalescing
+    are expanded so every original value inherits its representative's outcome.
     """
+    merged_graph, alias = _conservative_coalesce(constraints=constraints, interference=interference, moves=moves)
+
     pool_size = len(constraints.pool)
     precolored = dict(constraints.precolored)
-    nodes = [name for name in interference if name not in precolored]
-    degree: dict[str, set[str]] = {name: set(interference[name]) for name in nodes}
+    nodes = [name for name in merged_graph if name not in precolored]
+    degree: dict[str, set[str]] = {name: set(merged_graph[name]) for name in nodes}
 
     stack: list[str] = []
     remaining = set(nodes)
@@ -334,7 +389,7 @@ def color(*, constraints: RegisterConstraints, costs: CostModel, interference: d
     spilled: set[str] = set()
     while stack:
         name = stack.pop()
-        used = {homes[neighbor] for neighbor in interference[name] if neighbor in homes}
+        used = {homes[neighbor] for neighbor in merged_graph[name] if neighbor in homes}
         legal = [reg for reg in _allowed_registers(constraints=constraints, value=name) if reg not in used]
         if not legal:
             spilled.add(name)
@@ -347,6 +402,17 @@ def color(*, constraints: RegisterConstraints, costs: CostModel, interference: d
             continue
         homes[name] = choice
 
-    for name, register in precolored.items():
-        homes.setdefault(name, register)
-    return Allocation(homes={k: v for k, v in homes.items() if k not in spilled}, spilled=frozenset(spilled))
+    def _resolve(name: str) -> str:
+        while name in alias:
+            name = alias[name]
+        return name
+
+    final_homes: dict[str, str] = {}
+    final_spilled: set[str] = set()
+    for name in interference:
+        representative = _resolve(name)
+        if representative in homes:
+            final_homes[name] = homes[representative]
+        else:
+            final_spilled.add(name)
+    return Allocation(homes=final_homes, spilled=frozenset(final_spilled))
