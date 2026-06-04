@@ -58,6 +58,14 @@ _MODELED_VALUE_TYPES = (
 _OPAQUE_TYPES = (ir.Access, ir.Block, ir.CarryBranch, ir.Switch)
 
 
+def _allowed_registers(*, constraints: RegisterConstraints, value: str) -> tuple[str, ...]:
+    """Return the pool registers *value* may occupy (full pool if unconstrained)."""
+    permitted = constraints.allowed.get(value)
+    if permitted is None:
+        return constraints.pool
+    return tuple(register for register in constraints.pool if register in permitted)
+
+
 def _block_instructions(*, block: cfg.BasicBlock) -> list[ir.Instruction]:
     """Return a block's instructions followed by its terminator (if any)."""
     if block.terminator is None:
@@ -280,3 +288,45 @@ def build_interference(*, allocatable: frozenset[str], function: ir.Function) ->
                     live.add(name)
 
     return InterferenceResult(graph=adjacency, live_across_call=dict(live_across_call), moves=moves)
+
+
+def color(*, constraints: RegisterConstraints, interference: dict[str, set[str]]) -> Allocation:
+    """Color *interference* with the pool in *constraints*.
+
+    Chaitin-Briggs simplify (remove ``< K`` degree non-precolored nodes),
+    optimistic-spill push, then select (assign each popped node a legal color,
+    or spill when no register is legal).  Cost-driven spill and coalescing land
+    in later commits.
+    """
+    pool_size = len(constraints.pool)
+    precolored = dict(constraints.precolored)
+    nodes = [name for name in interference if name not in precolored]
+    degree: dict[str, set[str]] = {name: set(interference[name]) for name in nodes}
+
+    stack: list[str] = []
+    remaining = set(nodes)
+    while remaining:
+        simplifiable = sorted(name for name in remaining if len(degree[name] & remaining) < pool_size)
+        if not simplifiable:
+            # Optimistic spill (cost-driven choice lands in a later commit); for the
+            # colorable graphs in this commit there is always a simplifiable node.
+            simplifiable = [min(remaining)]
+        for name in simplifiable:
+            if name in remaining:
+                stack.append(name)
+                remaining.discard(name)
+
+    homes: dict[str, str] = dict(precolored)
+    spilled: set[str] = set()
+    while stack:
+        name = stack.pop()
+        used = {homes[neighbor] for neighbor in interference[name] if neighbor in homes}
+        choice = next((reg for reg in _allowed_registers(constraints=constraints, value=name) if reg not in used), None)
+        if choice is None:
+            spilled.add(name)
+        else:
+            homes[name] = choice
+
+    for name, register in precolored.items():
+        homes.setdefault(name, register)
+    return Allocation(homes={k: v for k, v in homes.items() if k not in spilled}, spilled=frozenset(spilled))

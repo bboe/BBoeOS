@@ -15,6 +15,7 @@ from cc.regalloc import (
     RegallocError,
     RegisterConstraints,
     build_interference,
+    color,
 )
 
 
@@ -22,6 +23,34 @@ def _function(*, body: list[ir.Instruction]) -> ir.Function:
     """Wrap *body* in a minimal ir.Function for analysis."""
     ast = ast_nodes.Function(body=[], line=1, name="f", params=[])
     return ir.Function(ast_node=ast, body=body, strings=[])
+
+
+def test_color_respects_allowed_set() -> None:
+    """A value restricted to one register lands there."""
+    graph = {"x": set(), "y": set()}
+    constraints = RegisterConstraints(allowed={"x": frozenset({"ecx"})}, pool=("ebx", "ecx"), precolored={})
+    alloc = color(constraints=constraints, interference=graph)
+    assert alloc.homes["x"] == "ecx"
+
+
+def test_color_respects_precolored_neighbor() -> None:
+    """A node adjacent to a precolored register avoids that register."""
+    graph = {"p": {"q"}, "q": {"p"}}
+    constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={"p": "ebx"})
+    alloc = color(constraints=constraints, interference=graph)
+    assert alloc.homes["p"] == "ebx"
+    assert alloc.homes["q"] == "ecx"
+
+
+def test_color_triangle_three_registers() -> None:
+    """A 3-clique colors with 3 registers, all distinct."""
+    graph = {"a": {"b", "c"}, "b": {"a", "c"}, "c": {"a", "b"}}
+    constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx", "edx"), precolored={})
+    alloc = color(constraints=constraints, interference=graph)
+    assert alloc.spilled == frozenset()
+    homes = alloc.homes
+    assert homes["a"] != homes["b"] != homes["c"] != homes["a"]
+    assert set(homes.values()) <= {"ebx", "ecx", "edx"}
 
 
 def test_defs_and_uses_cover_value_fields_and_base_names() -> None:
