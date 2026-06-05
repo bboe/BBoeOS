@@ -172,6 +172,31 @@ def _is_static_member_store(node: ast_nodes.Node, /) -> bool:
     )
 
 
+def _is_struct_array_member_load(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``array[index].member`` reads — the first DYNAMIC-index ir.Access load.
+
+    ``PlaceLoad(MemberPlace(SubscriptPlace(VariablePlace)))`` is a member read
+    of a struct-array element: one dynamic subscript ``index`` selects the
+    element, then a static member offset selects the field.  This is the
+    simplest access shape with exactly ONE dynamic index leaf and otherwise
+    static structure — the SubscriptPlace base is a bare array variable (no
+    dereference, no nested subscript), so the chain never breaks
+    (``base_value`` stays ``None``) and the single subscript index is the
+    segment's only dynamic leaf.  Stage 3b.1 slice 4 lowers exactly this shape
+    onto :class:`Address` (carrying the element index in its ``index`` leaf) +
+    :class:`Load`, proving the design's central mechanic: pre-lowering a
+    dynamic subscript index to an optimizer-visible :data:`Value` that emission
+    then materializes / scales exactly where ``_accumulate_subscript`` does.
+    Every other subscript / member shape stays on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceLoad)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.SubscriptPlace)
+        and isinstance(node.place.base.base, ast_nodes.VariablePlace)
+    )
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class Access(_NoValueFields):
     """Complex-lvalue access (PlaceLoad / PlaceStore / PlaceCall).
@@ -776,6 +801,32 @@ class Builder:
                 result_temp = self._tmp()
                 out.extend([
                     Address(base_value=None, destination=address_temp, index=None, shape=place),
+                    Load(address=address_temp, destination=result_temp, signed=False, width=0),
+                ])
+                return result_temp
+            case ast_nodes.PlaceLoad(place=place) if _is_struct_array_member_load(expr):
+                # ``array[index].member`` read — the first DYNAMIC-index shape
+                # to ride the uniform ops (Stage 3b.1 slice 4).  The single
+                # subscript ``index`` is the segment's only dynamic leaf: it is
+                # pre-lowered to a :data:`Value` here and carried on
+                # ``Address.index``, proving the design's central mechanic.  For
+                # a simple-var / constant index ``_build_expr`` emits NO
+                # preceding instruction, so emission's ``_ir_value_to_ast``
+                # round-trip reconstructs the exact AST index node
+                # ``resolve_address`` walked inline today — byte-neutral.  A
+                # compound index (``a[i + 1].f``) pre-lowers to a temp that
+                # PR #587's register allocator keeps register-resident; the byte
+                # gate is the backstop.  The member ``shape`` (rooted at the
+                # SubscriptPlace) still drives the static field offset / element
+                # stride / width at emission via the same helpers the
+                # ``ir.Access`` struct-array load used; ``width`` / ``signed``
+                # carry emission-ignored placeholders (the IR builder has no
+                # struct layout).
+                index_value = self._build_expr(expr=place.base.index, out=out, strings=strings)
+                address_temp = self._tmp()
+                result_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, index=index_value, shape=place),
                     Load(address=address_temp, destination=result_temp, signed=False, width=0),
                 ])
                 return result_temp

@@ -22,7 +22,7 @@ emitted.
 from __future__ import annotations
 
 import re
-from dataclasses import fields
+from dataclasses import fields, replace
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
@@ -1827,6 +1827,34 @@ class EmissionMixin:
             and self._is_tail_call_eligible(if_stmt.else_body[-1])
         )
 
+    def _ir_address_with_index(self, address: ir.Address, /) -> Node:
+        """Return the :class:`ir.Address` ``shape``, re-seating its pre-lowered dynamic index.
+
+        When ``address.index`` is ``None`` the segment is static (a dot member /
+        symbol-rooted base) and the immutable ``shape`` already carries the full
+        place — returned as-is, exactly as slices 1-3 drove it.
+
+        When ``address.index`` is a :data:`Value` (Stage 3b.1 slice 4's
+        struct-array ``array[index].member`` shape) the dynamic subscript index
+        was pre-lowered to that ``Value`` at IR-build time.  Re-seat it into the
+        ``shape``'s :class:`SubscriptPlace` via :meth:`_ir_value_to_ast` so the
+        existing ``resolve_address`` / ``_accumulate_subscript`` path
+        materializes and scales the index from the IR ``Value`` instead of
+        re-walking the original AST sub-expression.  For a simple-var / constant
+        index the round-trip reconstructs the exact node ``resolve_address``
+        walked inline today, so the materialize / scale / index-register choice
+        is byte-identical; a compound index arrives as a register-resident temp
+        ``Var`` (the byte gate is the backstop).  The static member offset /
+        element stride / width are still derived from the rebuilt ``shape`` by
+        the unchanged layout helpers.
+        """
+        shape = address.shape
+        if address.index is None:
+            return shape
+        subscript = shape.base
+        reindexed = replace(subscript, index=self._ir_value_to_ast(address.index))
+        return replace(shape, base=reindexed)
+
     def _ir_value_to_ast(self, value: ir.Value) -> Node:
         """Convert an :data:`ir.Value` to the equivalent simple AST leaf node."""
         if isinstance(value, int):
@@ -2031,7 +2059,8 @@ class EmissionMixin:
                 # The value lands in the accumulator; the store-to-local tail
                 # is the same one ``emit_store_local`` runs after evaluating a
                 # ``PlaceLoad`` expression.
-                shape = self._ir_address_ops[address].shape
+                address_op = self._ir_address_ops[address]
+                shape = self._ir_address_with_index(address_op)
                 self.emit_store_local(expression=PlaceLoad(line=shape.line, place=shape), name=destination)
             case ir.Store(address=address, value=value):
                 # ``*(shape) = value`` — drive the EXISTING member-store path
