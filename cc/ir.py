@@ -64,6 +64,49 @@ def _is_arrow_member_load(node: ast_nodes.Node, /) -> bool:
     )
 
 
+def _is_arrow_member_store(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``pointer->member = leaf`` writes on a plain pointer variable.
+
+    ``PlaceStore(MemberPlace(DereferencePlace(VariablePlace(p)), field), value)``
+    is the store twin of :func:`_is_arrow_member_load`: the chain breaks at the
+    dereference, so the segment's ``base_value`` is the pointer ``Value`` (the
+    name ``"p"``), which emission re-materializes IDENTICALLY to the inline
+    ``generate_expression`` the legacy arrow-store path runs.  Gated on a
+    byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`): without a register
+    allocator a compound RHS pre-lowered to a temp would spill/reload and
+    reorder versus the legacy store's RHS-vs-base evaluation ordering, breaking
+    byte-neutrality.  Stage 3b.1 slice 3 lowers exactly this shape onto
+    :class:`Address` + :class:`Store`; every other arrow / deref store shape
+    stays on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceStore)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.DereferencePlace)
+        and isinstance(node.place.base.pointer, ast_nodes.VariablePlace)
+        and _is_byte_safe_store_rhs(node.value)
+    )
+
+
+def _is_byte_safe_store_rhs(node: ast_nodes.Node, /) -> bool:
+    """Return True for a member-store RHS that :meth:`_build_expr` lowers with no emitted code.
+
+    ``Int`` / ``Var`` / ``String`` / ``&variable`` are the leaves
+    :meth:`_build_expr` returns directly as an :data:`Value` (an immediate, a
+    name, a string label, or a passed-through ``PlaceAddressOf``) WITHOUT
+    appending any preceding instruction.  Restricting member-store migration to
+    these leaves keeps the RHS-vs-address evaluation ordering byte-identical to
+    the legacy store: ``_ir_value_to_ast`` round-trips the leaf back to the
+    exact AST node the legacy ``_emit_place_store`` evaluated in place, so no
+    spill/reload is introduced (cc.py has no register allocator yet — a compound
+    RHS pre-lowered to a temp would).  A compound RHS keeps the store on
+    :class:`Access`.
+    """
+    return isinstance(node, (ast_nodes.Int, ast_nodes.String, ast_nodes.Var)) or (
+        isinstance(node, ast_nodes.PlaceAddressOf) and isinstance(node.place, ast_nodes.VariablePlace)
+    )
+
+
 def _is_constant_true(condition: ast_nodes.Node, /) -> bool:
     """Return True if *condition* is statically nonzero.
 
@@ -107,6 +150,25 @@ def _is_static_member_load(node: ast_nodes.Node, /) -> bool:
         isinstance(node, ast_nodes.PlaceLoad)
         and isinstance(node.place, ast_nodes.MemberPlace)
         and isinstance(node.place.base, ast_nodes.VariablePlace)
+    )
+
+
+def _is_static_member_store(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``variable.member = leaf`` writes — the static store twin.
+
+    ``PlaceStore(MemberPlace(VariablePlace), value)`` is the store twin of
+    :func:`_is_static_member_load`: a fully static member offset on a
+    symbol-rooted base.  Gated on a byte-safe leaf RHS
+    (:func:`_is_byte_safe_store_rhs`) so the RHS-vs-address ordering stays
+    byte-identical to the legacy dot store.  Stage 3b.1 slice 3 lowers exactly
+    this shape onto :class:`Address` + :class:`Store`; every other store shape
+    stays on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceStore)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.VariablePlace)
+        and _is_byte_safe_store_rhs(node.value)
     )
 
 
@@ -920,6 +982,41 @@ class Builder:
                     out=out,
                     strings=strings,
                 )
+            case ast_nodes.PlaceStore(place=place, value=value) if _is_arrow_member_store(stmt):
+                # ``pointer->member = leaf`` write on a plain pointer variable
+                # (Stage 3b.1 slice 3).  The dereference breaks the chain: the
+                # segment's ``base_value`` is the pointer var ``Value`` (the
+                # name ``"p"``), mirroring the arrow LOAD slice.  The RHS is a
+                # byte-safe leaf, so ``_build_expr`` emits NO preceding
+                # instruction and returns the leaf ``Value`` directly; emission
+                # reconstructs the original RHS node via ``_ir_value_to_ast``
+                # and drives the EXISTING member-store path, which orders the
+                # RHS evaluation versus the base materialization exactly as the
+                # legacy arrow store did.  The member ``shape`` drives the
+                # static field layout (offset / width / bitfield) at emission;
+                # ``width`` carries an emission-ignored placeholder (the IR
+                # builder has no struct layout).
+                store_value = self._build_expr(expr=value, out=out, strings=strings)
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=place.base.pointer.name, destination=address_temp, index=None, shape=place),
+                    Store(address=address_temp, value=store_value, width=0),
+                ])
+            case ast_nodes.PlaceStore(place=place, value=value) if _is_static_member_store(stmt):
+                # ``variable.member = leaf`` write — the static store twin of
+                # the slice 1 dot-member load (Stage 3b.1 slice 3).  Resolve the
+                # deref-free member ``place`` to a (static) address value, then
+                # store the byte-safe leaf RHS through it.  ``_build_expr`` emits
+                # no preceding instruction for the leaf, so the RHS-vs-address
+                # ordering the legacy dot store used is preserved byte-for-byte;
+                # ``width`` is derived at emission from ``Address.shape`` and
+                # carries an emission-ignored placeholder here.
+                store_value = self._build_expr(expr=value, out=out, strings=strings)
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, index=None, shape=place),
+                    Store(address=address_temp, value=store_value, width=0),
+                ])
             case _ if _is_migrated_access(stmt):
                 out.append(Access(node=stmt))
             case _:

@@ -2033,6 +2033,23 @@ class EmissionMixin:
                 # ``PlaceLoad`` expression.
                 shape = self._ir_address_ops[address].shape
                 self.emit_store_local(expression=PlaceLoad(line=shape.line, place=shape), name=destination)
+            case ir.Store(address=address, value=value):
+                # ``*(shape) = value`` — drive the EXISTING member-store path
+                # from the producing ``Address``'s deref-free ``shape`` so the
+                # static field layout (offset / width / bitfield) and the
+                # RHS-vs-base evaluation ordering are produced by the EXACT
+                # helper the ``ir.Access`` member-store path used
+                # (``_emit_place_store``).  ``value`` is a byte-safe leaf
+                # (guaranteed by the ``_is_*_member_store`` lowering predicate),
+                # so ``_ir_value_to_ast`` round-trips it to the AST node the
+                # legacy store evaluated in place — no spill/reload, byte-neutral.
+                shape = self._ir_address_ops[address].shape
+                self._emit_place_store(shape, self._ir_value_to_ast(value))
+                # The legacy statement-level ``PlaceStore`` path clears AX
+                # tracking after the store (the accumulator no longer holds a
+                # tracked local); mirror it so downstream codegen decisions
+                # match byte-for-byte.
+                self.ax_clear()
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
 
