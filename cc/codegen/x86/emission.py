@@ -2072,7 +2072,7 @@ class EmissionMixin:
                 # (guaranteed by the ``_is_*_member_store`` lowering predicate),
                 # so ``_ir_value_to_ast`` round-trips it to the AST node the
                 # legacy store evaluated in place — no spill/reload, byte-neutral.
-                shape = self._ir_address_ops[address].shape
+                shape = self._ir_address_with_index(self._ir_address_ops[address])
                 self._emit_place_store(shape, self._ir_value_to_ast(value))
                 # The legacy statement-level ``PlaceStore`` path clears AX
                 # tracking after the store (the accumulator no longer holds a
