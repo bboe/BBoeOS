@@ -2017,6 +2017,22 @@ class EmissionMixin:
                     self._current_call_pinned_initialized = None
             case ir.Switch():
                 self._generate_ir_switch(instruction)
+            case ir.Address(destination=destination):
+                # Pure structured-reference value: emits no code on its own.
+                # Record it so the consuming Load / Store / AddressOf can
+                # recover its ``shape`` for the static-layout resolution.
+                self._ir_address_ops[destination] = instruction
+            case ir.Load(address=address, destination=destination):
+                # ``destination = *(shape)`` — drive ``resolve_address`` from
+                # the producing ``Address``'s deref-free ``shape`` so the
+                # static field layout (offset / width / decay / bitfield) and
+                # the width-aware ``mov`` / ``movzx`` terminal are derived by
+                # the EXACT helpers the ``ir.Access`` member-load path used.
+                # The value lands in the accumulator; the store-to-local tail
+                # is the same one ``emit_store_local`` runs after evaluating a
+                # ``PlaceLoad`` expression.
+                shape = self._ir_address_ops[address].shape
+                self.emit_store_local(expression=PlaceLoad(line=shape.line, place=shape), name=destination)
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
 
@@ -4855,5 +4871,10 @@ class EmissionMixin:
 
     def lower_ir_body(self, body: list[ir.Instruction]) -> None:
         """Generate x86 assembly from a flat IR instruction list."""
+        # ``Address`` ops emit no code; they name a resolved address that a
+        # later ``Load`` / ``Store`` / ``AddressOf`` consumes.  Record each by
+        # its destination temp so the consumer can recover its ``shape`` (the
+        # deref-free place driving the static layout in ``resolve_address``).
+        self._ir_address_ops: dict[str, ir.Address] = {}
         for instruction in body:
             self._lower_ir_instruction(instruction)

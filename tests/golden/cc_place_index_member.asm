@@ -845,12 +845,12 @@ probe_deref_in_if:
         mov esi, [ebp-4]
         mov eax, [esi]
         test eax, eax
-        je ._ir_endif39
+        je ._ir_endif40
         mov eax, 1
         mov esp, ebp
         pop ebp
         ret
-._ir_endif39:
+._ir_endif40:
         xor eax, eax
         mov esp, ebp
         pop ebp
@@ -871,12 +871,12 @@ probe_double_index_in_if:
         add esi, eax
         mov eax, [esi]
         test eax, eax
-        je ._ir_endif41
+        je ._ir_endif42
         mov eax, 1
         mov esp, ebp
         pop ebp
         ret
-._ir_endif41:
+._ir_endif42:
         xor eax, eax
         mov esp, ebp
         pop ebp

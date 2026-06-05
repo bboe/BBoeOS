@@ -72,6 +72,22 @@ def _is_migrated_access(node: ast_nodes.Node, /) -> bool:
     return isinstance(node, (ast_nodes.PlaceCall, ast_nodes.PlaceLoad, ast_nodes.PlaceStore))
 
 
+def _is_static_member_load(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``variable.member`` reads — the simplest static ir.Access load.
+
+    ``PlaceLoad(MemberPlace(VariablePlace))`` is a plain dot-member read of a
+    local / global struct: its address is fully static (a member offset on a
+    symbol-rooted base, no dynamic subscript, no dereference).  Stage 3b.1
+    slice 1 lowers exactly this shape onto :class:`Address` + :class:`Load`;
+    every other access shape stays on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceLoad)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.VariablePlace)
+    )
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class Access(_NoValueFields):
     """Complex-lvalue access (PlaceLoad / PlaceStore / PlaceCall).
@@ -645,6 +661,20 @@ class Builder:
                 return expr
             case ast_nodes.AssignExpr(inner=inner):
                 return self._lower_assign_expr(inner=inner, out=out, strings=strings)
+            case ast_nodes.PlaceLoad(place=place) if _is_static_member_load(expr):
+                # ``variable.member`` read — the simplest static ir.Access load
+                # (Stage 3b.1 slice 1).  Resolve the deref-free member ``place``
+                # to an address value, then load through it.  ``width`` /
+                # ``signed`` are derived at emission from ``Address.shape`` via
+                # the existing field-layout helpers (the IR builder has no
+                # struct layout), so they carry emission-ignored placeholders.
+                address_temp = self._tmp()
+                result_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, index=None, shape=place),
+                    Load(address=address_temp, destination=result_temp, signed=False, width=0),
+                ])
+                return result_temp
             case _ if _is_migrated_access(expr):
                 temp = self._tmp()
                 out.append(Access(node=ast_nodes.Assign(expr=expr, name=temp)))
