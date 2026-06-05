@@ -42,6 +42,28 @@ class _NoValueFields:
     VALUE_FIELDS: ClassVar[tuple[str, ...]] = ()
 
 
+def _is_arrow_member_load(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``pointer->member`` reads on a plain pointer variable.
+
+    ``PlaceLoad(MemberPlace(DereferencePlace(VariablePlace(p)), field))`` is an
+    arrow-member read where the dereferenced pointer is a plain pointer-variable
+    read.  The chain breaks at the dereference: the segment's ``base_value`` is
+    the pointer ``Value`` ``_build_expr(Var(p))`` (the name ``"p"``), which
+    emission turns back into ``Var("p")`` and materializes IDENTICALLY to the
+    inline ``generate_expression`` the legacy arrow-load path runs, so the load
+    is byte-neutral with no separate pointer ``Load`` op for this plain-var case.
+    Stage 3b.1 slice 2 lowers exactly this shape onto :class:`Address` +
+    :class:`Load`; every other arrow / deref shape (``(*pp)->f``, ``a[i]->f``,
+    ``expr->f``, multi-level ``p->a->b``) stays on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceLoad)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.DereferencePlace)
+        and isinstance(node.place.base.pointer, ast_nodes.VariablePlace)
+    )
+
+
 def _is_constant_true(condition: ast_nodes.Node, /) -> bool:
     """Return True if *condition* is statically nonzero.
 
@@ -661,6 +683,26 @@ class Builder:
                 return expr
             case ast_nodes.AssignExpr(inner=inner):
                 return self._lower_assign_expr(inner=inner, out=out, strings=strings)
+            case ast_nodes.PlaceLoad(place=place) if _is_arrow_member_load(expr):
+                # ``pointer->member`` read on a plain pointer variable
+                # (Stage 3b.1 slice 2).  The dereference breaks the chain: the
+                # segment's ``base_value`` is the pointer var ``Value`` (the
+                # name ``"p"``), which emission re-materializes via
+                # ``_ir_value_to_ast`` exactly like the legacy arrow-load path
+                # seeds its base, so no separate pointer ``Load`` op is needed.
+                # The member ``shape`` (still rooted at the dereference) drives
+                # the static field layout at emission via the same helpers the
+                # ``ir.Access`` arrow-load path used; ``width`` / ``signed``
+                # carry emission-ignored placeholders (the IR builder has no
+                # struct layout).
+                base_value = place.base.pointer.name
+                address_temp = self._tmp()
+                result_temp = self._tmp()
+                out.extend([
+                    Address(base_value=base_value, destination=address_temp, index=None, shape=place),
+                    Load(address=address_temp, destination=result_temp, signed=False, width=0),
+                ])
+                return result_temp
             case ast_nodes.PlaceLoad(place=place) if _is_static_member_load(expr):
                 # ``variable.member`` read — the simplest static ir.Access load
                 # (Stage 3b.1 slice 1).  Resolve the deref-free member ``place``
