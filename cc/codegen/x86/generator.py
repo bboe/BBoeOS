@@ -396,6 +396,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # means "no info available" — fall back to saving everything.
         self._ir_call_pinned_initialized: dict[int, frozenset[str]] = {}
         self._current_call_pinned_initialized: frozenset[str] | None = None
+        # IR temps that won a pool-register home in _allocate_ir_temps.
+        # Maps temp name -> register.  Distinct from auto-pinned locals
+        # (which _compute_pinned_initialized_per_call tracks): temps are
+        # single-assignment, so their save-liveness is a simple
+        # def-index < call-index <= last-use-index test, computed by
+        # _compute_temp_pinned_live_per_call and folded into the
+        # per-call filter so _pinned_registers_to_save saves a temp's
+        # register exactly across the calls / rep-string-ops it lives
+        # across.  Reset per function in _allocate_ir_temps.
+        self.temp_pinned_registers: dict[str, str] = {}
         # pointer_array_types maps a variable / parameter name → the structured
         # PointerType(ArrayType(...)) for a pointer-to-array (``int (*p)[3]``)
         # or a decayed multidim array parameter (``int m[][3]`` ==
@@ -1078,7 +1088,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         ``frozenset()`` — distinct from ``None`` which means "no
         analysis was performed" (AST path, naked function, etc.).
         """
-        pinned_locals: dict[str, str] = dict(self.pinned_register)
+        # Locals / params only: register-resident IR temps are pinned in
+        # self.pinned_register too, but their save-liveness is computed
+        # separately by :meth:`_compute_temp_pinned_live_per_call` (a
+        # temp is single-assignment, so a simple def/last-use range, not
+        # the may-defined-store dataflow locals need).  Excluding them
+        # here keeps the two analyses from double-counting; the per-call
+        # filters are unioned in :meth:`_merge_pinned_save_filters`.
+        pinned_locals: dict[str, str] = {
+            name: register for name, register in self.pinned_register.items() if name not in self.temp_pinned_registers
+        }
         if not pinned_locals:
             return {}
         initial: set[str] = set(self._prologue_initialized_pinned_registers())
@@ -1123,6 +1142,95 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             for target_name in self._ir_instruction_store_targets(instruction):
                 if target_name in pinned_locals:
                     defined.add(pinned_locals[target_name])
+        return result
+
+    def _compute_temp_pinned_live_per_call(self, ir_body: list, /) -> dict[int, frozenset[str]]:
+        """Per-clobber-site map of temp-pinned registers that are live across the site.
+
+        Companion to :meth:`_compute_pinned_initialized_per_call` for the
+        register-resident IR temps :meth:`_allocate_ir_temps` produced
+        (recorded in :attr:`temp_pinned_registers`).  An IR temp is
+        single-assignment, so it is live across a clobbering call /
+        ``rep`` string-op / ``CarryBranch`` / ``TailCall`` iff that
+        site's index lies strictly after the temp's definition and at or
+        before its last use::
+
+            definition_index < site_index <= last_use_index
+
+        Temps live across a loop back-edge are handled conservatively:
+        any temp whose live range overlaps a loop region (a back-Jump
+        and its target label) is treated as live across EVERY clobber
+        site inside that region, mirroring the loop pre-merge in
+        :meth:`_compute_pinned_initialized_per_call`.  This errs toward
+        saving — a temp written once before the loop and read again on
+        the next iteration would otherwise look dead at a mid-loop call
+        on the source-order pass.
+
+        The result is folded into :attr:`_ir_call_pinned_initialized`
+        (built just before IR lowering) so :meth:`_pinned_registers_to_save`
+        pushes / pops a temp's register exactly across the sites it lives
+        across.  Returns a dict keyed by ``id(instruction)``; a site
+        absent from the dict has no live temp register.
+        """
+        if not self.temp_pinned_registers:
+            return {}
+        definition_index: dict[str, int] = {}
+        last_use_index: dict[str, int] = {}
+        use_indices: dict[str, list[int]] = {}
+        for index, instruction in enumerate(ir_body):
+            for target_name in self._ir_instruction_store_targets(instruction):
+                if target_name in self.temp_pinned_registers and target_name not in definition_index:
+                    definition_index[target_name] = index
+            for name in regalloc.instruction_uses(instruction=instruction):
+                if name in self.temp_pinned_registers:
+                    last_use_index[name] = index
+                    use_indices.setdefault(name, []).append(index)
+        # Loop carry: an IR temp is single-assignment, so its live range
+        # is exactly [definition, last-use] — NO loop extension is needed
+        # for a temp defined and consumed within one iteration (extending
+        # it backward to the loop head would mark it live across calls
+        # that PRECEDE its definition, over-saving its register and, when
+        # that inflates the save set past the pusha threshold, corrupting
+        # an after-call out_register capture via popa — the fd_read_file
+        # vfs_read_sec miscompile).  The only temp that genuinely lives
+        # across a loop back-edge is one with a use at or before its
+        # definition index (it reads the value the PREVIOUS iteration
+        # produced); extend just those across their enclosing loop.
+        label_positions: dict[str, int] = {}
+        for index, instruction in enumerate(ir_body):
+            if isinstance(instruction, ir.Label):
+                label_positions[instruction.name] = index
+        loop_ranges: list[tuple[int, int]] = []
+        for index, instruction in enumerate(ir_body):
+            if isinstance(instruction, ir.Jump):
+                target = label_positions.get(instruction.target)
+                if target is not None and target < index:
+                    loop_ranges.append((target, index))
+        live_definition = dict(definition_index)
+        live_last_use = dict(last_use_index)
+        for temp, define_at in definition_index.items():
+            if not any(use_at <= define_at for use_at in use_indices.get(temp, ())):
+                continue  # consumed after its def within the iteration; exact range
+            for start, end in loop_ranges:
+                if start <= define_at <= end:
+                    live_definition[temp] = min(live_definition[temp], start)
+                    live_last_use[temp] = max(live_last_use[temp], end)
+        # Record an entry for EVERY clobber site (even with no live
+        # temp) so the merged filter covers all sites: a site present in
+        # the filter with an empty temp contribution still anchors the
+        # precise locals set, whereas an absent site falls back to the
+        # conservative save-everything default — which would re-save a
+        # dead temp register when temps are the only pins.
+        result: dict[int, frozenset[str]] = {}
+        for index, instruction in enumerate(ir_body):
+            if not isinstance(instruction, (ir.Call, ir.CarryBranch, ir.RepString, ir.TailCall)):
+                continue
+            live_registers = {
+                self.temp_pinned_registers[temp]
+                for temp in live_definition
+                if live_definition[temp] < index <= live_last_use.get(temp, live_definition[temp])
+            }
+            result[id(instruction)] = frozenset(live_registers)
         return result
 
     def _dereference_place_width(self, place: DereferencePlace, /) -> int:

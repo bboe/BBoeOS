@@ -441,3 +441,15 @@ def color(
         else:
             final_spilled.add(name)
     return Allocation(homes=final_homes, spilled=frozenset(final_spilled))
+
+
+def instruction_uses(*, instruction: ir.Instruction) -> tuple[str, ...]:
+    """Return every name *instruction* reads, using the interference read model.
+
+    Public wrapper over the exhaustive def/use model the interference builder
+    relies on; callers that need a use count (e.g. the codegen IR-temp spill
+    benefit) share this single source of truth so their reads can never drift
+    from what ``build_interference`` sees.  Raises ``RegallocError`` for an
+    unmodeled instruction, exactly like the builder.
+    """
+    return _instruction_uses(instruction=instruction)

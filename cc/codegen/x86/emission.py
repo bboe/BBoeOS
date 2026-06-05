@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, ClassVar
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from cc import ir
+from cc import ir, regalloc
 from cc.ast_nodes import (
     ArrayDecl,
     Assign,
@@ -334,6 +334,125 @@ class EmissionMixin:
             self.locals[param.name] = -(self.target.param_slot_base + caller_push_index * self.target.int_size)  # negative = above bp
             caller_push_index += 1
 
+    def _allocate_ir_temps(self, *, ir_function: ir.Function) -> None:
+        """Color pure ``_ir_*`` temporaries onto the registers auto-pin left free.
+
+        Auto-pin owns locals/params; this runs after it has finalized
+        ``self.pinned_register`` and colors the leftover pool registers with
+        the IR temporaries that are destinations of *only* pure IR
+        instructions (BinaryOperation / Copy / Index / Call).  Temps that are
+        also a destination of a ``Block`` / ``Access`` escape hatch lower via
+        the AST path and stay in memory.  A temp that wins a register home is
+        added to ``self.pinned_register`` so the existing register-resident
+        load/store/call-protect machinery handles it automatically; the temp
+        slot-allocation loop in :meth:`generate_function` then skips its frame
+        slot.  Temps not live across calls are pinned for free (save cost 0,
+        benefit >= 1); call-crossing temps are pinned only when their use
+        count beats the per-call push/pop cost, which keeps the byte gate from
+        regressing on call-heavy temporaries.
+        """
+        self.temp_pinned_registers = {}
+        # carry_return functions carry a dual result contract: the same
+        # boolean temp drives both the CF (for ``call X / jc`` branch
+        # callers) AND the EAX return value (for value-context callers
+        # that ``test eax`` the result).  generate_return's carry path
+        # only emits ``clc`` / ``stc`` — it does NOT move the result into
+        # EAX — so the value-context contract holds only while the result
+        # temp lives in EAX.  Homing that temp in a pool register breaks
+        # the EAX callers (the asm.c is_ident_char self-host miscompile).
+        # The temp allocator doesn't model this implicit EAX result, so
+        # skip carry_return functions wholesale; their bodies are small
+        # (the win is a handful of bytes) and correctness is paramount.
+        if ir_function.ast_node.carry_return:
+            return
+        body = ir_function.body
+        candidate_temps = self._collect_ir_temps(body)
+        escape_hatch_temps = self._collect_ir_escape_hatch_temps(body)
+        # SIB-fusion guard: a temp used as the ``index`` operand of an
+        # ir.Index / ir.IndexAssign lowers into the [base + index*scale]
+        # effective address, which the peephole folds into a single
+        # ``inc dword [esi + i*4]`` form.  Pinning such a temp to a
+        # register breaks that fusion (the unit test
+        # test_indexed_in_place_increment_fuses_to_inc_dword_sib guards
+        # it), so exclude index-operand temps from the candidate set.
+        sib_index_temps = self._collect_ir_index_operand_temps(body)
+        pure_temps = frozenset(temp for temp in candidate_temps if temp not in escape_hatch_temps and temp not in sib_index_temps)
+        if not pure_temps:
+            return
+
+        # Peephole-aware selection.  The IR allocator cannot see the
+        # post-peephole emission that decides a temp's real memory
+        # traffic, so the IR-level use count alone over-pins temps whose
+        # in-memory form never spills (the value stays in EAX between def
+        # and use).  Two complementary signals approximate the residency
+        # win:
+        #
+        #   * A temp read two or more times reloads from memory on every
+        #     read past the first; a register home pays for itself.
+        #
+        #   * A single-use temp wins ONLY when its use is NOT in the
+        #     immediately-following instruction (def + 1).  A def-then-
+        #     immediately-used temp keeps its value in EAX (ax_local), so
+        #     pinning it just adds a ``mov reg, eax`` and grows the
+        #     function; but a single use separated from its def by an
+        #     AX-clobbering instruction reloads from memory anyway, so a
+        #     register home removes that reload.
+        #
+        # The save-liveness fix (temp pins folded into the per-call
+        # filter) makes call-crossing pins correct; the CostModel below
+        # still spills a call-heavy temp whose use count doesn't beat the
+        # per-call push/pop cost, so the byte gate stays green.
+        use_counts = self._count_ir_temp_uses(body=body, temps=pure_temps)
+        deferred_single_use_temps = self._collect_ir_deferred_single_use_temps(body=body, temps=pure_temps)
+        allocatable_temps = frozenset(temp for temp in pure_temps if use_counts.get(temp, 0) >= 3 or temp in deferred_single_use_temps)
+        if not allocatable_temps:
+            return
+
+        # Exclude (a) registers auto-pin gave to locals/params, (b) ECX, the
+        # transient binop right-operand scratch (a live temp homed there would
+        # be clobbered by emission that build_interference cannot see), and
+        # (c) the frame pointer.
+        reserved_registers = set(self.pinned_register.values())
+        reserved_registers.add(self.target.count_register)
+        reserved_registers.add(self.target.base_register)
+        # (d) BX, when the body resolves a member-index ``base.field[i]``:
+        # _resolve_member_index loads the struct base into BX inline (an
+        # ``ir.Access`` / ``ir.Block`` escape-hatch lowering, not a call),
+        # so a BX-homed temp live across that access would be clobbered
+        # with no save site to bracket it — _pinned_registers_to_save is
+        # never consulted for a non-call BX clobber.  The struct base
+        # value must also survive in BX until the caller's terminal
+        # load/store, so a local push/pop around the base load is
+        # unsound (it would restore the stale pin over the base).  Drop
+        # BX from the temp pool for these functions instead — the
+        # conservative, byte-cheap fix (it costs at most one register of
+        # residency in member-indexing functions, and the runtime matrix
+        # stays green).
+        if self._body_has_member_index_access(body):
+            reserved_registers.add(self.target.bx_register)
+        temp_pool = tuple(register for register in self.target.register_pool if register not in reserved_registers)
+        if not temp_pool:
+            return
+
+        result = regalloc.build_interference(allocatable=allocatable_temps, function=ir_function)
+        restricted_graph = {
+            name: {neighbor for neighbor in neighbors if neighbor in allocatable_temps}
+            for name, neighbors in result.graph.items()
+            if name in allocatable_temps
+        }
+        for temp in allocatable_temps:
+            restricted_graph.setdefault(temp, set())
+
+        spill_benefit = {temp: use_counts.get(temp, 0) for temp in allocatable_temps}
+        register_save_cost = {temp: dict.fromkeys(temp_pool, result.live_across_call.get(temp, 0)) for temp in allocatable_temps}
+        constraints = regalloc.RegisterConstraints(allowed={}, pool=temp_pool, precolored={})
+        costs = regalloc.CostModel(register_save_cost=register_save_cost, spill_benefit=spill_benefit)
+        allocation = regalloc.color(constraints=constraints, costs=costs, interference=restricted_graph, moves=set())
+
+        for temp, register in allocation.homes.items():
+            self.pinned_register[temp] = register
+            self.temp_pinned_registers[temp] = register
+
     def _apply_default_regparm(self, functions: list[Node], /) -> None:
         """Stamp the implicit register-passing convention on eligible callees.
 
@@ -386,6 +505,46 @@ class EmissionMixin:
             ):
                 function.regparm_count = min(3, len(function.params))
 
+    @staticmethod
+    def _body_has_member_index_access(body: list[ir.Instruction]) -> bool:
+        """Return True if any IR instruction resolves a member-index ``base.field[i]``.
+
+        A member-index is a :class:`SubscriptPlace` whose ``base`` is a
+        :class:`MemberPlace`; :meth:`_resolve_member_index` lowers it by
+        loading the struct base into BX inline.  Such accesses arrive
+        wrapped in :class:`ir.Access` / :class:`ir.Block` (the complex-
+        lvalue escape hatch) or inside Switch arms; this walks those AST
+        payloads to decide whether BX must stay out of the temp pool.
+        """
+
+        def ast_has(node: object) -> bool:
+            if isinstance(node, SubscriptPlace) and isinstance(node.base, MemberPlace):
+                return True
+            if not isinstance(node, Node):
+                return False
+            for node_field in fields(node):
+                value = getattr(node, node_field.name)
+                if isinstance(value, Node) and ast_has(value):
+                    return True
+                if isinstance(value, list) and any(isinstance(item, Node) and ast_has(item) for item in value):
+                    return True
+            return False
+
+        def walk(instructions: list[ir.Instruction]) -> bool:
+            for instruction in instructions:
+                match instruction:
+                    case ir.Access(node=node) | ir.Block(node=node):
+                        if ast_has(node):
+                            return True
+                    case ir.Switch(cases=cases):
+                        if any(walk(case.body) for case in cases):
+                            return True
+                    case _:
+                        pass
+            return False
+
+        return walk(body)
+
     def _classify_switch_arms(self, statement: Switch, /, *, cases_override: list | None = None) -> tuple:
         """Split a switch's cases into ``(default_case, case_arms)`` and check enum exhaustiveness.
 
@@ -429,6 +588,132 @@ class EmissionMixin:
                 message = f"switch on enum '{enum_tag}' missing case for {missing_list}"
                 raise CompileError(message, line=line)
         return default_case, case_arms
+
+    def _collect_ir_deferred_single_use_temps(self, *, body: list[ir.Instruction], temps: frozenset[str]) -> set[str]:
+        """Return single-use temps whose lone use reloads from memory and is not fusable.
+
+        A temp defined and immediately consumed by the next instruction
+        keeps its value in EAX (``ax_local``), so a register home only
+        adds a ``mov reg, eax`` and grows the function.  A single-use
+        temp whose use is separated from its def by at least one
+        AX-clobbering instruction reloads from memory regardless, so a
+        register home that removes the spill store AND the reload pays
+        for itself — those single-use temps are worth pinning.
+
+        Two exclusions keep the byte gate green:
+
+        * The use must NOT be the def + 1 instruction (the value is still
+          in EAX, no reload happens).
+
+        * The use must NOT be a :class:`ir.BinaryOperation` operand.  A
+          temp consumed as a binop operand fuses into a memory-operand
+          ALU instruction (``or eax, [temp]``), so the reload IS the
+          operand — a register home saves nothing on the read while
+          still paying the ``mov reg, eax`` at the def, a net growth
+          (the asm.c handle_mov / stdio vsnprintf regressions).  Uses in
+          a branch test, ``Return``, ``Call`` arg, or store materialize
+          the value into a register / flag and benefit from the home.
+
+        Conservative: only the flat top-level instruction order is
+        considered.  A temp whose def or use lives inside a Switch arm
+        (not visited here) is not returned, so it falls back to the
+        ``>= 3`` use gate — never over-pinned on incomplete position
+        information.
+        """
+        definition_index: dict[str, int] = {}
+        use_indices: dict[str, list[int]] = {temp: [] for temp in temps}
+        binop_operand_temps: set[str] = set()
+        for index, instruction in enumerate(body):
+            for name in self._ir_instruction_store_targets(instruction):
+                if name in temps and name not in definition_index:
+                    definition_index[name] = index
+            for name in regalloc.instruction_uses(instruction=instruction):
+                if name in temps:
+                    use_indices[name].append(index)
+            if isinstance(instruction, ir.BinaryOperation):
+                for operand in (instruction.left, instruction.right):
+                    if isinstance(operand, str) and operand in temps:
+                        binop_operand_temps.add(operand)
+        result: set[str] = set()
+        for temp in temps:
+            uses = use_indices[temp]
+            if len(uses) != 1 or temp not in definition_index:
+                continue
+            if temp in binop_operand_temps:
+                continue
+            if uses[0] != definition_index[temp] + 1:
+                result.add(temp)
+        return result
+
+    @staticmethod
+    def _collect_ir_escape_hatch_temps(body: list[ir.Instruction]) -> set[str]:
+        """Return ``_ir_*`` temps that are destinations of a Block/Access escape hatch.
+
+        These lower through the AST path rather than pure IR, so
+        :meth:`_allocate_ir_temps` excludes them and leaves them in memory.
+        Mirrors the Switch recursion in :meth:`_collect_ir_temps` so temps
+        inside switch arms are caught too.
+        """
+        result: set[str] = set()
+
+        def walk(instructions: list[ir.Instruction]) -> None:
+            for instruction in instructions:
+                match instruction:
+                    case ir.Block(node=Assign(name=name)) | ir.Access(node=Assign(name=name)):
+                        if name.startswith("_ir_"):
+                            result.add(name)
+                    case ir.Switch(cases=cases):
+                        for case in cases:
+                            walk(case.body)
+                    case _:
+                        pass
+
+        walk(body)
+        return result
+
+    @staticmethod
+    def _collect_ir_index_operand_temps(body: list[ir.Instruction]) -> set[str]:
+        """Return ``_ir_*`` temps used as the ``index`` operand of Index / IndexAssign.
+
+        These feed the ``[base + index*scale]`` effective address that the
+        SIB peephole folds into a single ``inc dword [esi + i*4]`` /
+        load / store; pinning them to a register defeats the fusion.
+        :meth:`_allocate_ir_temps` excludes them.  Recurses into Switch
+        arms to match the other temp collectors.
+        """
+        result: set[str] = set()
+
+        def walk(instructions: list[ir.Instruction]) -> None:
+            for instruction in instructions:
+                match instruction:
+                    case ir.Index(index=index) | ir.IndexAssign(index=index):
+                        if isinstance(index, str) and index.startswith("_ir_"):
+                            result.add(index)
+                    case ir.Switch(cases=cases):
+                        for case in cases:
+                            walk(case.body)
+                    case _:
+                        pass
+
+        walk(body)
+        return result
+
+    @staticmethod
+    def _count_ir_temp_uses(*, body: list[ir.Instruction], temps: frozenset[str]) -> dict[str, int]:
+        """Return how many times each temp in *temps* is read across *body*.
+
+        Uses the same exhaustive read model as the interference builder
+        (:func:`cc.regalloc.instruction_uses`), which already recurses into
+        Switch arms and opaque AST-wrapping instructions, so the flat
+        top-level walk here covers every read.  The count feeds the spill
+        benefit: a temp read more often wants a register more.
+        """
+        counts: dict[str, int] = dict.fromkeys(temps, 0)
+        for instruction in body:
+            for name in regalloc.instruction_uses(instruction=instruction):
+                if name in temps:
+                    counts[name] += 1
+        return counts
 
     def _emit_function_pointer_call(
         self,
@@ -1735,6 +2020,29 @@ class EmissionMixin:
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
 
+    @staticmethod
+    def _merge_pinned_save_filters(
+        *,
+        locals_initialized: dict[int, frozenset[str]],
+        temp_live: dict[int, frozenset[str]],
+    ) -> dict[int, frozenset[str]]:
+        """Union the locals-initialized and temp-live per-call save filters.
+
+        Each map is keyed by ``id(call-site)``; a value is the set of
+        pinned registers that must be saved across that site (initialized
+        locals from one analysis, live temp registers from the other).
+        The union per site is exactly the registers
+        :meth:`_pinned_registers_to_save` should push / pop.  Sites
+        absent from both maps stay absent (the caller treats absence as
+        ``None`` → save every clobbered pin, the conservative default).
+        """
+        if not locals_initialized and not temp_live:
+            return {}
+        merged: dict[int, frozenset[str]] = {}
+        for site in locals_initialized.keys() | temp_live.keys():
+            merged[site] = locals_initialized.get(site, frozenset()) | temp_live.get(site, frozenset())
+        return merged
+
     def _node_contains_var(self, node: Node, name: str, /) -> bool:
         """Return True if node or any descendant is Var(name).
 
@@ -2519,7 +2827,7 @@ class EmissionMixin:
                     captured_pinned_registers.add(self.pinned_register[capture_name])
             clobbers: frozenset[str] = frozenset(self.target.register_pool)
             saved = [r for r in self._pinned_registers_to_save(clobbers) if r not in captured_pinned_registers]
-            use_pusha = discard_return and len(saved) >= 3
+            use_pusha = discard_return and len(saved) >= 3 and not out_reg_captures
             if not tail_call:
                 if use_pusha:
                     self.emit("        pusha")
@@ -3178,8 +3486,10 @@ class EmissionMixin:
         # Unpack ir.Function: keep the IR body for code generation but use
         # the original AST node for all frame-setup analysis.
         ir_body: list[ir.Instruction] | None = None
+        ir_function: ir.Function | None = None
         ir_strings: list[tuple[str, str]] = []
         if isinstance(function, ir.Function):
+            ir_function = function
             ir_body = function.body
             ir_strings = function.strings
             function = function.ast_node
@@ -3399,13 +3709,6 @@ class EmissionMixin:
         # literal; the AST-level walk preserves the original types.
         self.validate_body_comparisons(body)
 
-        # IR path: pre-allocate compiler-generated temporaries so the
-        # frame size is correct before the prologue is emitted.
-        if ir_body is not None:
-            for temp in self._collect_ir_temps(ir_body):
-                if temp not in self.locals:
-                    self.allocate_local(temp)
-
         # Non-main: pin parameters that won a candidate slot but weren't
         # claimed during scan_locals.  Parameters that don't fit stay on
         # the stack at [bp+N].
@@ -3421,14 +3724,27 @@ class EmissionMixin:
                     continue
                 self.pinned_register[param.name] = self.auto_pin_candidates[param.name]
 
-        # Record the final register-home map for this function so the golden
-        # parity test (tests/test_cc_register_homes.py) can compare the
-        # allocator's choices against the heuristic's.  This is the last point
-        # pinned_register is mutated for the function: scan_locals (above)
-        # claims auto-pin homes, and the non-main loop just above pins any
-        # parameters that won a candidate slot; everything downstream only
-        # reads pinned_register.
+        # Record the final locals/params register-home map for this function
+        # so the golden parity test (tests/test_cc_register_homes.py) can
+        # compare the allocator's choices against the heuristic's.  This is
+        # snapshotted here — before IR-temp coloring below — so the golden
+        # baseline stays a pure locals/params map: scan_locals (above) claims
+        # auto-pin homes, and the non-main loop just above pins any parameters
+        # that won a candidate slot.
         self.register_homes[function.name] = dict(self.pinned_register)
+
+        # IR path: color pure _ir_* temporaries onto the registers auto-pin
+        # left free (must run after locals/params are pinned above so the
+        # temp pool excludes their registers), then pre-allocate frame slots
+        # for the temporaries that stayed in memory so the frame size is
+        # correct before the prologue is emitted.  A temp that won a register
+        # home skips its frame slot.
+        if ir_function is not None:
+            self._allocate_ir_temps(ir_function=ir_function)
+        if ir_body is not None:
+            for temp in self._collect_ir_temps(ir_body):
+                if temp not in self.locals and temp not in self.pinned_register:
+                    self.allocate_local(temp)
 
         # Seed visible_vars with parameters and pinned variables.
         # Block-scoped locals become visible when their declaration
@@ -3502,7 +3818,20 @@ class EmissionMixin:
 
         if ir_body is not None:
             # IR path: lower the flat instruction list directly.
-            self._ir_call_pinned_initialized = self._compute_pinned_initialized_per_call(ir_body)
+            # The per-call save-liveness filter unions two analyses: which
+            # pinned LOCALS hold a meaningful value (so a not-yet-stored
+            # auto-pin isn't saved), and which temp-pinned REGISTERS are
+            # live across the site (so a register-resident IR temp IS
+            # saved across the call / rep it lives across).  Without the
+            # temp half, a temp-pinned register fails the locals-only
+            # filter and is clobbered across the call (the EDI-across-
+            # rep-movsb miscompile).
+            locals_initialized = self._compute_pinned_initialized_per_call(ir_body)
+            temp_live = self._compute_temp_pinned_live_per_call(ir_body)
+            self._ir_call_pinned_initialized = self._merge_pinned_save_filters(
+                locals_initialized=locals_initialized,
+                temp_live=temp_live,
+            )
             self.lower_ir_body(ir_body)
         else:
             # Tail-call: if the last statement is a statement-level user-
