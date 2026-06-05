@@ -89,6 +89,51 @@ class Access(_NoValueFields):
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class Address:
+    """Structured-reference value — resolves a place to an address; emits no code itself.
+
+    The IR-level twin of the input to the x86 generator's
+    ``resolve_address`` (GCC's GIMPLE structured-reference model).  It
+    carries the deref-free place ``shape`` (an AST ``Place`` subtree) so
+    emission derives the *static* layout — member offsets, constant
+    subscripts, element size, bitfield, array decay — from the existing
+    layout helpers, exactly as today.  Its *dynamic* leaves are
+    first-class optimizer-visible operands: ``index`` is the segment's
+    summed dynamic element index temp, and ``base_value`` is the pointer
+    ``Value`` produced by the preceding :class:`Load` when the chain was
+    broken at a dereference (``None`` for a symbol-rooted — global /
+    local — segment).  Each segment has at most these two dynamic leaves
+    because dereference breaks the chain and multiple dynamic indices sum
+    into one temp at lowering, so ``VALUE_FIELDS`` stays flat and static.
+
+    Pure and DCE-able; never CSE'd or hoisted in Stage 3b (that is 3c).
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("base_value", "index")
+
+    base_value: Value | None
+    destination: str
+    index: Value | None
+    shape: ast_nodes.Node
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class AddressOf:
+    """destination = &place — pure address materialization (lowers to ``lea``).
+
+    Reads the resolved ``address`` :class:`Address` value and writes it to
+    ``destination`` without dereferencing.  A read with no memory effect:
+    DCE-able when ``destination`` is unused, but not reordered across a
+    :class:`Store` / :class:`Call` (memory-barrier discipline).
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("address",)
+
+    address: Value
+    destination: str
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class BinaryOperation:
     """destination = left operation right — arithmetic or bitwise binary operation."""
 
@@ -206,6 +251,24 @@ class Label(_NoValueFields):
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class Load:
+    """destination = *(width) address — memory read at a resolved :class:`Address`.
+
+    ``signed`` selects ``movsx`` vs ``movzx`` for sub-word widths.  A read
+    with no memory effect: DCE-able when ``destination`` is unused, but
+    not reordered or CSE'd across a :class:`Store` / :class:`Call`
+    (memory-barrier discipline in Stage 3b).
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("address",)
+
+    address: Value
+    destination: str
+    signed: bool
+    width: int
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class LoopBoundary(_NoValueFields):
     """Push or pop loop label context for the emission layer.
 
@@ -255,6 +318,22 @@ class Return:
     VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("value",)
 
     value: Value | None
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Store:
+    """*(width) address = value — memory write at a resolved :class:`Address`.
+
+    Side-effecting: never eliminated by DCE, and a memory barrier that
+    :class:`Load` / :class:`AddressOf` must not be reordered or CSE'd
+    across (Stage 3b's conservative treatment).
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("address", "value")
+
+    address: Value
+    value: Value
+    width: int
 
 
 @dataclass(kw_only=True, slots=True)
@@ -312,6 +391,8 @@ class TailCall:
 
 Instruction = (
     Access
+    | Address
+    | AddressOf
     | BinaryOperation
     | Block
     | BranchFalse
@@ -323,9 +404,11 @@ Instruction = (
     | InlineAsm
     | Jump
     | Label
+    | Load
     | LoopBoundary
     | RepString
     | Return
+    | Store
     | Switch
     | TailCall
 )

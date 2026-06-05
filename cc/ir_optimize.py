@@ -172,6 +172,7 @@ def _has_side_effects(instruction: ir.Instruction, /) -> bool:
             ir.LoopBoundary,
             ir.RepString,
             ir.Return,
+            ir.Store,
             ir.TailCall,
         ),
     )
@@ -183,7 +184,7 @@ def _instruction_destination(instruction: ir.Instruction, /) -> str | None:
     ``Call.destination`` is ``None`` when the return value is discarded.
     Branch / jump / label instructions have no destination.
     """
-    if isinstance(instruction, (ir.BinaryOperation, ir.Copy, ir.Index)):
+    if isinstance(instruction, (ir.Address, ir.AddressOf, ir.BinaryOperation, ir.Copy, ir.Index, ir.Load)):
         return instruction.destination
     if isinstance(instruction, ir.Call):
         return instruction.destination
@@ -197,10 +198,18 @@ def _instruction_value_operands(instruction: ir.Instruction, /) -> tuple[ir.Valu
     (not ``Value`` operands), so they aren't returned here — they need
     a separate path when counting uses.
     """
+    if isinstance(instruction, ir.Address):
+        return tuple(leaf for leaf in (instruction.base_value, instruction.index) if leaf is not None)
+    if isinstance(instruction, ir.AddressOf):
+        return (instruction.address,)
     if isinstance(instruction, ir.BinaryOperation):
         return (instruction.left, instruction.right)
     if isinstance(instruction, ir.Copy):
         return (instruction.source,)
+    if isinstance(instruction, ir.Load):
+        return (instruction.address,)
+    if isinstance(instruction, ir.Store):
+        return (instruction.address, instruction.value)
     if isinstance(instruction, ir.Call):
         return instruction.args
     if isinstance(instruction, ir.Index):
@@ -346,6 +355,18 @@ def _substitute_value(instruction: ir.Instruction, /, *, source: ir.Value, targe
     optimizer doesn't mutate AST shapes, and ``base`` operands never
     reference a temp under the current builder.
     """
+    if isinstance(instruction, ir.Address):
+        if target not in (instruction.base_value, instruction.index):
+            return instruction
+        return dataclasses.replace(
+            instruction,
+            base_value=source if instruction.base_value == target else instruction.base_value,
+            index=source if instruction.index == target else instruction.index,
+        )
+    if isinstance(instruction, ir.AddressOf):
+        if instruction.address != target:
+            return instruction
+        return dataclasses.replace(instruction, address=source)
     if isinstance(instruction, ir.BinaryOperation):
         if target not in (instruction.left, instruction.right):
             return instruction
@@ -363,6 +384,18 @@ def _substitute_value(instruction: ir.Instruction, /, *, source: ir.Value, targe
             return instruction
         rewritten_args = tuple(source if arg == target else arg for arg in instruction.args)
         return dataclasses.replace(instruction, args=rewritten_args)
+    if isinstance(instruction, ir.Load):
+        if instruction.address != target:
+            return instruction
+        return dataclasses.replace(instruction, address=source)
+    if isinstance(instruction, ir.Store):
+        if target not in (instruction.address, instruction.value):
+            return instruction
+        return dataclasses.replace(
+            instruction,
+            address=source if instruction.address == target else instruction.address,
+            value=source if instruction.value == target else instruction.value,
+        )
     if isinstance(instruction, ir.Index):
         if instruction.index != target:
             return instruction
