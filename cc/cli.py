@@ -88,6 +88,25 @@ def _translate(
     search_paths: tuple[Path, ...],
 ) -> str:
     """Run the preprocess → tokenize → parse → codegen pipeline; may raise :class:`CompileError`."""
+    generator = compile_module(input_path=input_path, options=options, search_paths=search_paths)
+    return generator.output
+
+
+def compile_module(
+    *,
+    input_path: Path,
+    options: CompilerOptions,
+    search_paths: tuple[Path, ...],
+) -> X86CodeGenerator:
+    """Compile *input_path* in-process and return the populated generator.
+
+    Runs the full preprocess → tokenize → parse → codegen pipeline against a
+    single translation unit and returns the :class:`X86CodeGenerator` after it
+    has emitted code, so callers can inspect post-codegen state (the emitted
+    ``generator.output``, ``generator.register_homes``, …).  May raise
+    :class:`CompileError`.  Callers that need only the assembly should read
+    ``generator.output`` directly rather than calling ``generate()`` again.
+    """
     source = input_path.read_text(encoding="utf-8")
     source, defines, function_defines = preprocess(
         source,
@@ -103,11 +122,28 @@ def _translate(
         None,
     )
     constant_values = parse_asm_constants(constants_asm) if constants_asm is not None else {}
-    return X86CodeGenerator(
+    generator = X86CodeGenerator(
         options,
         constant_values=constant_values,
         defines=defines,
-    ).generate(ast)
+    )
+    generator.output = generator.generate(ast)
+    return generator
+
+
+def compile_source_homes(*, source: Path) -> dict[str, dict[str, str]]:
+    """Compile *source* in-process (32-bit, user mode) and return its register homes.
+
+    Returns ``{function_name: {var: register}}`` — the per-function
+    register-home map the heuristic chose.  Side-effect-free: no files are
+    written and nothing is printed.  Include paths are auto-discovered exactly
+    as the CLI does for a bare ``cc.py compile`` of *source*, so the userland
+    corpus resolves its repo-local headers without extra options.
+    """
+    options = CompilerOptions(bits=32, target_mode="user")
+    search_paths = _discover_include_paths(extra_include_paths=(), input_path=source)
+    generator = compile_module(input_path=source, options=options, search_paths=search_paths)
+    return dict(generator.register_homes)
 
 
 def main() -> int:

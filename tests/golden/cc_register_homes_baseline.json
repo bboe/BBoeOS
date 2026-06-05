@@ -1,0 +1,926 @@
+{
+  "user/libbboeos/builtins.c": {
+    "__divdi3": {},
+    "__moddi3": {},
+    "__udivdi3": {},
+    "__umoddi3": {},
+    "udiv64_inner": {
+      "denominator": "ebx",
+      "numerator": "edi",
+      "quotient": "edx",
+      "shift": "ecx"
+    }
+  },
+  "user/libbboeos/ctype.c": {
+    "isalnum": {},
+    "isalpha": {},
+    "iscntrl": {},
+    "isdigit": {},
+    "islower": {},
+    "isprint": {},
+    "ispunct": {},
+    "isspace": {},
+    "isupper": {},
+    "isxdigit": {},
+    "tolower": {},
+    "toupper": {}
+  },
+  "user/libbboeos/dirent.c": {
+    "closedir": {},
+    "opendir": {},
+    "readdir": {
+      "record": "edx"
+    },
+    "rewinddir": {}
+  },
+  "user/libbboeos/errno.c": {},
+  "user/libbboeos/math.c": {
+    "atan2": {},
+    "atan2f": {},
+    "ceil": {},
+    "cos": {},
+    "cosf": {},
+    "exp": {},
+    "fabs": {},
+    "fabsf": {},
+    "floor": {},
+    "floorf": {},
+    "log": {},
+    "log10": {},
+    "log2": {},
+    "pow": {},
+    "powf": {},
+    "sin": {},
+    "sinf": {},
+    "sqrt": {},
+    "sqrtf": {},
+    "tan": {}
+  },
+  "user/libbboeos/signal.c": {
+    "alarm": {},
+    "alarm_ms": {
+      "delay_ms": "edx",
+      "interval_ms": "ecx"
+    },
+    "signal": {}
+  },
+  "user/libbboeos/stdio.c": {
+    "_emit": {},
+    "_emit_pad": {},
+    "_emit_str": {
+      "n": "edx"
+    },
+    "_utoa": {
+      "digits": "ecx",
+      "i": "edx",
+      "n": "ebx",
+      "v": "edi"
+    },
+    "fclose": {},
+    "feof": {},
+    "ferror": {},
+    "fflush": {},
+    "fgetc": {},
+    "fopen": {},
+    "fprintf": {
+      "ap": "edx"
+    },
+    "fputc": {},
+    "fputs": {},
+    "fread": {
+      "done": "edx",
+      "total": "ecx"
+    },
+    "fseek": {},
+    "ftell": {},
+    "fwrite": {},
+    "getchar": {},
+    "printf": {
+      "ap": "edx"
+    },
+    "putchar": {},
+    "puts": {},
+    "remove": {},
+    "rename": {},
+    "rewind": {},
+    "snprintf": {
+      "ap": "edx"
+    },
+    "sprintf": {
+      "ap": "edx"
+    },
+    "sscanf": {},
+    "vfprintf": {},
+    "vprintf": {},
+    "vsnprintf": {},
+    "vsprintf": {}
+  },
+  "user/libbboeos/stdlib.c": {
+    "_swap": {
+      "a": "ecx",
+      "b": "ebx",
+      "t": "edx"
+    },
+    "abort": {},
+    "abs": {},
+    "align_up": {
+      "alignment": "edx",
+      "value": "ecx"
+    },
+    "atexit": {},
+    "atof": {},
+    "atoi": {},
+    "atol": {},
+    "bsearch": {
+      "a": "edi",
+      "hi": "ebx",
+      "lo": "ecx",
+      "mid": "edx"
+    },
+    "calloc": {},
+    "exit": {},
+    "free": {},
+    "getenv": {},
+    "grow_heap": {},
+    "malloc": {
+      "curr": "edx",
+      "prev": "ecx",
+      "tail": "ebx"
+    },
+    "qsort": {
+      "a": "edx",
+      "size": "ecx"
+    },
+    "rand": {},
+    "realloc": {},
+    "release": {
+      "curr": "edx",
+      "prev": "ecx"
+    },
+    "srand": {},
+    "strtol": {
+      "acc": "ecx",
+      "d": "edx",
+      "neg": "ebx",
+      "s": "edi"
+    },
+    "strtoul": {},
+    "system": {}
+  },
+  "user/libbboeos/string.c": {
+    "memchr": {
+      "p": "edx"
+    },
+    "memcmp": {
+      "p": "edx",
+      "q": "ecx"
+    },
+    "memcpy": {},
+    "memmove": {
+      "d": "edx",
+      "s": "ecx"
+    },
+    "memset": {},
+    "strcasecmp": {},
+    "strcat": {},
+    "strchr": {},
+    "strcmp": {},
+    "strcpy": {
+      "dst": "ecx",
+      "r": "edx"
+    },
+    "strdup": {},
+    "strerror": {},
+    "strlen": {
+      "p": "edx"
+    },
+    "strncasecmp": {},
+    "strncat": {},
+    "strncmp": {},
+    "strncpy": {
+      "i": "edx"
+    },
+    "strrchr": {
+      "last": "edx"
+    },
+    "strstr": {
+      "a": "ecx",
+      "b": "edx"
+    }
+  },
+  "user/libbboeos/syscall.c": {
+    "_errno_from_al": {},
+    "_exit": {},
+    "brk": {},
+    "close": {},
+    "getdents": {},
+    "gettimeofday": {},
+    "ioctl": {
+      "arguments": "edx"
+    },
+    "lseek": {},
+    "mkdir": {},
+    "open": {},
+    "read": {},
+    "sbrk": {
+      "old": "ecx",
+      "requested": "edx"
+    },
+    "sleep_ms": {},
+    "stat": {},
+    "uptime_ms": {},
+    "video_map": {},
+    "write": {}
+  },
+  "user/programs/arp.c": {
+    "main": {
+      "tries": "edx"
+    }
+  },
+  "user/programs/asm.c": {
+    "abort_unknown": {},
+    "abort_unknown_impl": {},
+    "adc_sbb_handler": {},
+    "apply_binary": {},
+    "cmov_handler": {},
+    "compute_source_prefix": {
+      "end": "ebx",
+      "i": "edx",
+      "j": "ecx"
+    },
+    "define_label_here": {},
+    "define_macro": {
+      "cur": "ebx",
+      "j": "ecx",
+      "k": "ecx",
+      "len": "edi",
+      "slot": "edx"
+    },
+    "die_error_pass1_io": {},
+    "die_error_pass1_iter": {},
+    "die_symbol_overflow": {},
+    "do_pass": {},
+    "emit_address_disp": {},
+    "emit_address_size_prefix": {},
+    "emit_alu_binop": {},
+    "emit_alu_mem_imm": {},
+    "emit_alu_reg_imm": {},
+    "emit_byte": {},
+    "emit_dword": {},
+    "emit_indexed_mem": {},
+    "emit_modrm_direct": {},
+    "emit_modrm_disp": {
+      "low": "edx"
+    },
+    "emit_modrm_disp8": {},
+    "emit_operand_size_prefix": {},
+    "emit_sib_mem": {},
+    "emit_sized": {},
+    "emit_sized_imm": {},
+    "emit_sized_mem": {},
+    "emit_word": {},
+    "encode_rel8_jump": {},
+    "expand_macro": {
+      "body_offset": "ebx",
+      "ch": "ecx",
+      "cursor": "edx",
+      "dst": "edi",
+      "i": "ebx",
+      "k": "edx",
+      "n": "edx",
+      "next": "edx",
+      "pos": "ecx"
+    },
+    "find_macro": {
+      "cursor": "edi",
+      "i": "ecx",
+      "j": "ebx",
+      "len": "edx"
+    },
+    "flush_output": {},
+    "handle_aam": {},
+    "handle_adc": {},
+    "handle_add": {},
+    "handle_and": {},
+    "handle_call": {},
+    "handle_clc": {},
+    "handle_cld": {},
+    "handle_cli": {},
+    "handle_cmove": {},
+    "handle_cmovg": {},
+    "handle_cmovge": {},
+    "handle_cmovl": {},
+    "handle_cmovle": {},
+    "handle_cmovne": {},
+    "handle_cmp": {},
+    "handle_cmpsb": {},
+    "handle_cmpsw": {},
+    "handle_dec": {},
+    "handle_div": {},
+    "handle_imul": {},
+    "handle_in": {},
+    "handle_inc": {},
+    "handle_int": {},
+    "handle_ja": {},
+    "handle_jb": {},
+    "handle_jbe": {},
+    "handle_jg": {},
+    "handle_jge": {},
+    "handle_jl": {},
+    "handle_jle": {},
+    "handle_jmp": {},
+    "handle_jnc": {},
+    "handle_jne": {},
+    "handle_jns": {},
+    "handle_jz": {},
+    "handle_lea": {},
+    "handle_lgdt": {},
+    "handle_lidt": {},
+    "handle_lodsb": {},
+    "handle_lodsw": {},
+    "handle_loop": {},
+    "handle_mov": {},
+    "handle_movsb": {},
+    "handle_movsd": {},
+    "handle_movsw": {},
+    "handle_movzx": {},
+    "handle_mul": {},
+    "handle_neg": {},
+    "handle_not": {},
+    "handle_or": {},
+    "handle_out": {},
+    "handle_pop": {},
+    "handle_popa": {},
+    "handle_push": {},
+    "handle_pusha": {},
+    "handle_rep": {},
+    "handle_repne": {},
+    "handle_ret": {},
+    "handle_sbb": {},
+    "handle_scasb": {},
+    "handle_shl": {},
+    "handle_shr": {},
+    "handle_stc": {},
+    "handle_stosb": {},
+    "handle_stosd": {},
+    "handle_stosw": {},
+    "handle_sub": {},
+    "handle_test": {},
+    "handle_unknown_word": {},
+    "handle_xchg": {},
+    "handle_xor": {},
+    "hex_digit": {},
+    "inc_dec_handler": {},
+    "include_pop": {},
+    "include_push": {
+      "i": "ecx",
+      "j": "edx",
+      "k": "ebx"
+    },
+    "is_ident_char": {},
+    "load_src_sector": {},
+    "lookup_ident_here": {
+      "end_pos": "edx",
+      "scope": "ecx"
+    },
+    "main": {},
+    "make_modrm_reg_reg_impl": {},
+    "match_seg_ds_es": {},
+    "match_word": {
+      "s": "edx",
+      "saved": "ecx"
+    },
+    "mem_op_reg_emit": {},
+    "op_precedence": {},
+    "parse_atom": {
+      "esc": "ecx",
+      "value": "edx"
+    },
+    "parse_creg": {
+      "c": "edx"
+    },
+    "parse_d_values": {},
+    "parse_db": {},
+    "parse_directive": {},
+    "parse_expression": {},
+    "parse_line": {},
+    "parse_mnemonic": {},
+    "parse_number": {
+      "c": "edx",
+      "d": "ebx",
+      "is_hex": "edi",
+      "value": "ecx"
+    },
+    "parse_operand": {
+      "back": "ecx",
+      "reg_pos": "edx",
+      "reg_size2": "ebx"
+    },
+    "parse_register": {
+      "a": "ecx",
+      "entry": "edx",
+      "size": "edi",
+      "size_bump": "ebx"
+    },
+    "peek_label_target": {},
+    "read_line": {
+      "c": "ecx",
+      "length": "edx"
+    },
+    "reg_to_rm": {},
+    "resolve_label": {},
+    "resolve_value": {},
+    "run_pass1": {
+      "ji": "edx"
+    },
+    "run_pass2": {},
+    "scan_ident_dot": {},
+    "shift_handler": {},
+    "skip_comma": {},
+    "skip_ws": {},
+    "symbol_add": {
+      "index": "ecx",
+      "n": "edx",
+      "saved": "edi",
+      "src": "ebx"
+    },
+    "symbol_add_constant": {},
+    "symbol_lookup": {
+      "index": "edx",
+      "mismatch": "ebx",
+      "name_offset": "ecx",
+      "src": "edi"
+    },
+    "symbol_set": {},
+    "unary_f6f7": {}
+  },
+  "user/programs/cat.c": {
+    "main": {
+      "fd": "edx",
+      "needs_close": "ecx"
+    }
+  },
+  "user/programs/chmod.c": {
+    "main": {
+      "flags": "ecx",
+      "mode": "edx"
+    }
+  },
+  "user/programs/cp.c": {
+    "main": {
+      "bytes": "edx"
+    }
+  },
+  "user/programs/date.c": {
+    "main": {}
+  },
+  "user/programs/dns.c": {
+    "decode_domain": {
+      "byte": "ecx",
+      "copied": "edi",
+      "high": "ecx",
+      "label_count": "ebx",
+      "length": "ecx",
+      "low": "edi",
+      "out_position": "edx"
+    },
+    "encode_domain": {
+      "count": "ecx",
+      "index": "edi",
+      "label_start": "ebx",
+      "position": "edx"
+    },
+    "main": {
+      "offset": "edx"
+    },
+    "skip_name": {
+      "byte": "edx"
+    }
+  },
+  "user/programs/draw.c": {
+    "background_step": {
+      "modulus": "edx",
+      "next": "ecx"
+    },
+    "main": {
+      "background_color_index": "ebp",
+      "character": "edx",
+      "column": "ecx",
+      "row": "ebx",
+      "trail_palette_index": "edi"
+    },
+    "trail_step": {},
+    "trail_wrap": {}
+  },
+  "user/programs/echo.c": {
+    "getopt": {
+      "current": "ecx",
+      "option": "ebx",
+      "spec_index": "edx"
+    },
+    "interpret_escapes": {
+      "emitted": "edi",
+      "next": "ebx",
+      "read_index": "ecx",
+      "write_index": "edx"
+    },
+    "main": {
+      "i": "edx"
+    }
+  },
+  "user/programs/edit.c": {
+    "buffer_character_at": {},
+    "buffer_length": {},
+    "column_before": {
+      "column": "edx",
+      "i": "ecx"
+    },
+    "gap_move_left": {},
+    "gap_move_right": {},
+    "main": {
+      "character": "edx"
+    }
+  },
+  "user/programs/exit_status.c": {
+    "main": {
+      "index": "edx",
+      "n": "ecx",
+      "p": "ebx"
+    }
+  },
+  "user/programs/false.c": {
+    "main": {}
+  },
+  "user/programs/fd_helpers.c": {
+    "main": {},
+    "run_dup2_close_target": {},
+    "run_dup2_self": {},
+    "run_dup_console": {},
+    "run_dup_vga": {},
+    "run_noop": {}
+  },
+  "user/programs/grep.c": {
+    "fold_to_lower": {
+      "i": "edx"
+    },
+    "getopt": {
+      "current": "ecx",
+      "option": "ebx",
+      "spec_index": "edx"
+    },
+    "isspace": {},
+    "line_matches": {
+      "line_length": "ecx",
+      "start": "edx"
+    },
+    "main": {},
+    "read_line": {
+      "count": "edx"
+    },
+    "tolower": {}
+  },
+  "user/programs/head.c": {
+    "getopt": {
+      "current": "ecx",
+      "option": "ebx",
+      "spec_index": "edx"
+    },
+    "isspace": {},
+    "main": {},
+    "read_line": {
+      "count": "edx"
+    },
+    "strtol": {
+      "index": "edx",
+      "sign": "ebx",
+      "value": "ecx"
+    },
+    "tolower": {}
+  },
+  "user/programs/ls.c": {
+    "main": {
+      "arena_used": "edx",
+      "count": "edi",
+      "cursor": "ebx",
+      "i": "edx",
+      "j": "ecx",
+      "key_name": "ebx",
+      "path": "edx",
+      "src": "ecx"
+    }
+  },
+  "user/programs/mkdir.c": {
+    "main": {}
+  },
+  "user/programs/mv.c": {
+    "main": {}
+  },
+  "user/programs/ping.c": {
+    "encode_domain": {
+      "count": "ecx",
+      "index": "edi",
+      "label_start": "ebx",
+      "position": "edx"
+    },
+    "main": {
+      "count": "ecx",
+      "seq": "edx"
+    },
+    "resolve_dns": {
+      "answer_count": "ecx",
+      "offset": "edx",
+      "received": "edi",
+      "record": "ebx",
+      "tries": "edx"
+    },
+    "skip_name": {
+      "byte": "edx"
+    }
+  },
+  "user/programs/pipe_consumer.c": {
+    "main": {
+      "d": "ecx",
+      "n": "ecx",
+      "r": "ebx",
+      "total": "edx"
+    }
+  },
+  "user/programs/pipe_drain.c": {
+    "main": {}
+  },
+  "user/programs/pipe_producer.c": {
+    "main": {
+      "i": "ecx",
+      "j": "edx"
+    }
+  },
+  "user/programs/pipe_spam.c": {
+    "main": {
+      "i": "ecx",
+      "ignore_sigpipe": "ebx",
+      "j": "edx"
+    }
+  },
+  "user/programs/recursive_exec_test.c": {
+    "main": {}
+  },
+  "user/programs/rep_loops_test.c": {
+    "main": {},
+    "run_fills": {
+      "i": "ecx",
+      "j": "ebx",
+      "k": "edi",
+      "m": "edx"
+    }
+  },
+  "user/programs/rm.c": {
+    "main": {}
+  },
+  "user/programs/rmdir.c": {
+    "main": {}
+  },
+  "user/programs/seq.c": {
+    "isspace": {},
+    "main": {
+      "value": "edx"
+    },
+    "strtol": {
+      "base": "edx",
+      "index": "edx",
+      "sign": "ebx",
+      "string": "edi",
+      "value": "ecx"
+    },
+    "tolower": {}
+  },
+  "user/programs/shell.c": {
+    "add_match": {
+      "i": "edx",
+      "name": "ebx",
+      "name_length": "ecx",
+      "prefix_length": "edi"
+    },
+    "apply_redirections": {
+      "flags": "edi",
+      "index": "edx",
+      "op": "ecx",
+      "target": "ebx"
+    },
+    "build_bin_path": {
+      "i": "edx"
+    },
+    "build_command_argv": {
+      "argc": "ebx",
+      "kind": "edx",
+      "token_index": "ecx",
+      "write": "edi"
+    },
+    "collect_matches": {
+      "cursor": "edx",
+      "name": "ecx"
+    },
+    "cursor_back": {},
+    "delete_at_cursor": {
+      "shift": "edx"
+    },
+    "dispatch_command": {
+      "copy_index": "edx",
+      "name": "ecx"
+    },
+    "execute_line": {
+      "chain_op": "ecx",
+      "run": "ebx",
+      "segment_start": "edi",
+      "token_index": "edx"
+    },
+    "execute_pipeline": {
+      "copy_index": "edx"
+    },
+    "expand_word": {
+      "bash_status": "edx",
+      "digit_count": "ebx",
+      "n": "edi",
+      "read_index": "ecx",
+      "reverse_index": "edi",
+      "write_index": "edx"
+    },
+    "history_down": {
+      "entry": "edx"
+    },
+    "history_up": {
+      "entry": "ecx",
+      "max_view": "edx"
+    },
+    "insert_char": {
+      "buf": "edi",
+      "cursor": "ebx",
+      "end": "ecx",
+      "shift": "edx"
+    },
+    "lex_line": {
+      "character": "edi",
+      "scan": "edx",
+      "token_count": "ecx"
+    },
+    "longest_common_prefix": {
+      "i": "ecx",
+      "j": "edx"
+    },
+    "main": {
+      "cursor": "ebp",
+      "end": "edx"
+    },
+    "replace_line": {
+      "erase_index": "edx",
+      "new_length": "ecx"
+    },
+    "restore_redirections": {
+      "index": "edx"
+    },
+    "tab_complete": {
+      "ii": "edi",
+      "insert_extra": "ebx",
+      "last_slash": "ecx",
+      "mi": "ebx",
+      "name": "edx",
+      "suffix_length": "ecx",
+      "word_length": "edx"
+    },
+    "try_exec": {},
+    "visual_bell": {}
+  },
+  "user/programs/sleep_forever.c": {
+    "main": {}
+  },
+  "user/programs/sort.c": {
+    "compare_lines": {
+      "result": "edx"
+    },
+    "getopt": {
+      "current": "ecx",
+      "option": "ebx",
+      "spec_index": "edx"
+    },
+    "isspace": {},
+    "main": {
+      "line_count": "ebx",
+      "output_index": "ecx",
+      "position": "edx",
+      "source": "edi"
+    },
+    "merge_pass": {
+      "left_index": "ecx",
+      "output_index": "edx",
+      "right_index": "ebx",
+      "start": "edi"
+    },
+    "numeric_compare": {},
+    "strtol": {
+      "index": "edx",
+      "sign": "ebx",
+      "value": "ecx"
+    },
+    "tolower": {}
+  },
+  "user/programs/tail.c": {
+    "getopt": {
+      "current": "ecx",
+      "option": "ebx",
+      "spec_index": "edx"
+    },
+    "isspace": {},
+    "main": {},
+    "read_line": {
+      "count": "edx"
+    },
+    "run_file_mode": {
+      "found": "ebx",
+      "index": "edx",
+      "remaining": "edi",
+      "total": "ecx"
+    },
+    "run_stdin_mode": {
+      "idx": "edx",
+      "k": "edi",
+      "offset": "edx",
+      "oldest_in_queue": "edx",
+      "queue_count": "edx",
+      "queue_head": "ebx",
+      "skip": "edi",
+      "start": "edi",
+      "tail": "ecx"
+    },
+    "strtol": {
+      "index": "edx",
+      "sign": "ebx",
+      "value": "ecx"
+    },
+    "tolower": {}
+  },
+  "user/programs/tee.c": {
+    "main": {}
+  },
+  "user/programs/tr.c": {
+    "getopt": {
+      "current": "ecx",
+      "option": "ebx",
+      "spec_index": "edx"
+    },
+    "main": {
+      "character": "edi",
+      "i": "edx",
+      "output_length": "ecx",
+      "set1_input": "ecx"
+    },
+    "set2_next": {
+      "character": "ecx",
+      "end": "edi",
+      "i": "edx",
+      "start": "ebx"
+    }
+  },
+  "user/programs/true.c": {
+    "main": {}
+  },
+  "user/programs/uniq.c": {
+    "emit": {
+      "show_counts": "edx"
+    },
+    "getopt": {
+      "current": "ecx",
+      "option": "ebx",
+      "spec_index": "edx"
+    },
+    "main": {
+      "run_count": "edx"
+    },
+    "read_line": {
+      "count": "edx"
+    }
+  },
+  "user/programs/uptime.c": {
+    "main": {}
+  },
+  "user/programs/wc.c": {
+    "getopt": {
+      "current": "ecx",
+      "option": "ebx",
+      "spec_index": "edx"
+    },
+    "main": {
+      "fd": "edi",
+      "first": "edi",
+      "show_bytes": "ebx",
+      "show_lines": "edx",
+      "show_words": "ecx"
+    },
+    "read_line": {
+      "count": "edx"
+    }
+  },
+  "user/programs/yes.c": {
+    "main": {
+      "word": "edx"
+    }
+  }
+}

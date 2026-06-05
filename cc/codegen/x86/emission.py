@@ -3350,9 +3350,22 @@ class EmissionMixin:
         # always emitted at every call.  Don't subtract pre-store
         # clobbers from the cost gate here or auto-pin will think
         # those saves are free and over-pin.
-        self.auto_pin_candidates = self._select_auto_pin_candidates(
-            body=body, parameters=param_candidates, apply_liveness_elision=name != "main"
-        )
+        # Reserve naked-function in_register params so coloring avoids their
+        # registers.  NOTE: param_candidates (and thus the interference graph)
+        # excludes in_register params, so a precolored param has no graph edges
+        # and the reservation is currently a no-op against allocatable locals —
+        # the same gap the legacy heuristic has.  Dormant today (no naked fn
+        # pairs an in_register param with pinnable locals); revisit if Task 7's
+        # runtime matrix surfaces one.
+        precolored_homes = {param.name: param.in_register for param in parameters if param.in_register is not None and function.naked}
+        if self.use_regalloc:
+            self.auto_pin_candidates = self._allocator_homes(
+                apply_liveness_elision=name != "main", body=body, parameters=param_candidates, precolored=precolored_homes
+            )
+        else:
+            self.auto_pin_candidates = self._select_auto_pin_candidates(
+                body=body, parameters=param_candidates, apply_liveness_elision=name != "main"
+            )
 
         # Reserve local stack slots for regparm params before scan_locals
         # runs so their offsets are stable against body-local allocations.
@@ -3407,6 +3420,15 @@ class EmissionMixin:
                 if param.name not in self.auto_pin_candidates or param.name in self.pinned_register:
                     continue
                 self.pinned_register[param.name] = self.auto_pin_candidates[param.name]
+
+        # Record the final register-home map for this function so the golden
+        # parity test (tests/test_cc_register_homes.py) can compare the
+        # allocator's choices against the heuristic's.  This is the last point
+        # pinned_register is mutated for the function: scan_locals (above)
+        # claims auto-pin homes, and the non-main loop just above pins any
+        # parameters that won a candidate slot; everything downstream only
+        # reads pinned_register.
+        self.register_homes[function.name] = dict(self.pinned_register)
 
         # Seed visible_vars with parameters and pinned variables.
         # Block-scoped locals become visible when their declaration
