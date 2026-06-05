@@ -64,6 +64,56 @@ def _is_arrow_member_load(node: ast_nodes.Node, /) -> bool:
     )
 
 
+def _is_arrow_member_member_load(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``pointer->outer.inner`` reads — member-of-member-of-deref.
+
+    ``PlaceLoad(MemberPlace(MemberPlace(DereferencePlace(VariablePlace(p)),
+    outer), inner))`` is the simplest MULTI-LEVEL member access: one chain-break
+    at the dereference of a plain pointer variable, then TWO static member
+    offsets (``outer`` selecting an embedded struct value, ``inner`` selecting
+    its field) accumulate into the same deref-broken segment shape.  No new
+    chain-break mechanic beyond slice 2's arrow load — the only difference is a
+    longer static member shape, which ``resolve_address`` /
+    ``_resolve_member_place_info`` already accumulate recursively (Stage 3a).
+    The segment's ``base_value`` is the pointer ``Value`` ``p`` (the single
+    dynamic leaf the emission helpers read), so the optimizer counts the pointer
+    use exactly as the arrow-load slice does.  Stage 3b.1 slice 6 lowers exactly
+    this two-level shape onto :class:`Address` + :class:`Load`; deeper / mixed
+    shapes (``p->a->b``, ``p->a.b.c``) stay on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceLoad)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.MemberPlace)
+        and isinstance(node.place.base.base, ast_nodes.DereferencePlace)
+        and isinstance(node.place.base.base.pointer, ast_nodes.VariablePlace)
+    )
+
+
+def _is_arrow_member_member_store(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``pointer->outer.inner = leaf`` writes — the multi-level store twin.
+
+    ``PlaceStore(MemberPlace(MemberPlace(DereferencePlace(VariablePlace(p)),
+    outer), inner), value)`` is the store twin of
+    :func:`_is_arrow_member_member_load`: one chain-break at the plain-pointer
+    dereference, then two static member offsets, then the byte-safe leaf RHS is
+    written through it.  The segment's ``base_value`` is the pointer ``Value``
+    ``p``.  Gated on a byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`) so
+    the RHS-vs-address ordering stays byte-identical to the legacy store.  Stage
+    3b.1 slice 6 lowers exactly this two-level shape onto :class:`Address` +
+    :class:`Store` (``directory->entry.d_ino = ...`` in ``dirent.c`` is a real
+    consumer); deeper / mixed shapes stay on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceStore)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.MemberPlace)
+        and isinstance(node.place.base.base, ast_nodes.DereferencePlace)
+        and isinstance(node.place.base.base.pointer, ast_nodes.VariablePlace)
+        and _is_byte_safe_store_rhs(node.value)
+    )
+
+
 def _is_arrow_member_store(node: ast_nodes.Node, /) -> bool:
     """Return True for ``pointer->member = leaf`` writes on a plain pointer variable.
 
@@ -840,6 +890,25 @@ class Builder:
                 return expr
             case ast_nodes.AssignExpr(inner=inner):
                 return self._lower_assign_expr(inner=inner, out=out, strings=strings)
+            case ast_nodes.PlaceLoad(place=place) if _is_arrow_member_member_load(expr):
+                # ``pointer->outer.inner`` read — member-of-member-of-deref on a
+                # plain pointer variable (Stage 3b.1 slice 6).  One chain-break
+                # at the dereference: the segment's ``base_value`` is the pointer
+                # var ``Value`` (the name ``"p"``), exactly as the single-level
+                # arrow load (slice 2).  The two static member offsets ride the
+                # immutable ``shape`` and accumulate recursively in
+                # ``_resolve_member_place_info`` / ``resolve_address`` at
+                # emission — no new dynamic leaf, so this is just a longer static
+                # member shape over the proven deref chain-break.  ``width`` /
+                # ``signed`` carry emission-ignored placeholders.
+                base_value = place.base.base.pointer.name
+                address_temp = self._tmp()
+                result_temp = self._tmp()
+                out.extend([
+                    Address(base_value=base_value, destination=address_temp, index=None, shape=place),
+                    Load(address=address_temp, destination=result_temp, signed=False, width=0),
+                ])
+                return result_temp
             case ast_nodes.PlaceLoad(place=place) if _is_arrow_member_load(expr):
                 # ``pointer->member`` read on a plain pointer variable
                 # (Stage 3b.1 slice 2).  The dereference breaks the chain: the
@@ -1103,6 +1172,22 @@ class Builder:
                     out=out,
                     strings=strings,
                 )
+            case ast_nodes.PlaceStore(place=place, value=value) if _is_arrow_member_member_store(stmt):
+                # ``pointer->outer.inner = leaf`` write — the multi-level store
+                # twin of the slice 6 load.  One chain-break at the plain-pointer
+                # dereference: ``base_value`` is the pointer var ``Value`` (the
+                # name ``"p"``); the two static member offsets ride the ``shape``
+                # and accumulate at emission.  The byte-safe leaf RHS emits no
+                # preceding instruction, so the RHS-vs-address ordering matches
+                # the legacy store byte-for-byte (``directory->entry.d_ino = ...``
+                # in ``dirent.c``).  ``width`` carries an emission-ignored
+                # placeholder (the field width is derived from the ``shape``).
+                store_value = self._build_expr(expr=value, out=out, strings=strings)
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=place.base.base.pointer.name, destination=address_temp, index=None, shape=place),
+                    Store(address=address_temp, value=store_value, width=0),
+                ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_arrow_member_store(stmt):
                 # ``pointer->member = leaf`` write on a plain pointer variable
                 # (Stage 3b.1 slice 3).  The dereference breaks the chain: the
