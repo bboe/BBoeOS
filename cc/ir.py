@@ -252,6 +252,52 @@ def _is_migrated_access(node: ast_nodes.Node, /) -> bool:
     return isinstance(node, (ast_nodes.PlaceCall, ast_nodes.PlaceLoad, ast_nodes.PlaceStore))
 
 
+def _is_nested_subscript_load(node: ast_nodes.Node, /) -> bool:
+    """Return True for a multidimensional array read ``name[i][j]...`` (2+ subscripts).
+
+    ``PlaceLoad(SubscriptPlace(SubscriptPlace(...VariablePlace...)))`` is the
+    single uniform shape the parser emits for every 2+-subscript access over a
+    named array — whether the declared type is a contiguous multidim array
+    (``int m[2][3]``, row-major addressing) or a legacy array-of-pointers
+    (``int *grid[N]``, deref chain).  Both reconstruct to the identical
+    ``PlaceLoad`` at emission, where :meth:`resolve_address` dispatches on the
+    registered type, so the IR builder lowers them uniformly without an
+    array-type table.  Each subscript index is carried as a distinct dynamic
+    leaf in :attr:`Address.indices` (in outermost-dimension-first order); the
+    per-position row-major strides stay layout-derived at emission.  Gated on
+    simple (bare ``Var`` / ``Int``) indices so the re-seated index node round-
+    trips to the exact AST sub-expression the legacy access walked inline,
+    keeping the address computation byte-identical; a compound index stays on
+    :class:`Access` (the byte gate is the backstop).
+    """
+    if not (
+        isinstance(node, ast_nodes.PlaceLoad)
+        and isinstance(node.place, ast_nodes.SubscriptPlace)
+        and isinstance(node.place.base, ast_nodes.SubscriptPlace)
+    ):
+        return False
+    current: ast_nodes.Node = node.place
+    while isinstance(current, ast_nodes.SubscriptPlace):
+        if not _is_simple_index(current.index):
+            return False
+        current = current.base
+    return isinstance(current, ast_nodes.VariablePlace)
+
+
+def _is_simple_index(node: ast_nodes.Node, /) -> bool:
+    """Return True for a subscript index that lowers to a bare :data:`Value`.
+
+    A ``Var`` name or ``Int`` literal lowers through :meth:`_build_expr` to its
+    own name / value with no emitted instruction, so re-seating it into the
+    access ``shape`` at emission reconstructs the exact node the legacy path
+    walked inline — byte-identical.  A compound index (arithmetic, call, nested
+    subscript) would materialize a register-resident temp whose evaluation may
+    reorder relative to the legacy inline walk, so shapes carrying one are left
+    on :class:`Access`.
+    """
+    return isinstance(node, (ast_nodes.Int, ast_nodes.Var))
+
+
 def _is_static_member_load(node: ast_nodes.Node, /) -> bool:
     """Return True for ``variable.member`` reads — the simplest static ir.Access load.
 
@@ -976,6 +1022,30 @@ class Builder:
                     Load(address=address_temp, destination=result_temp, signed=False, width=0),
                 ])
                 return result_temp
+            case ast_nodes.PlaceLoad(place=place) if _is_nested_subscript_load(expr):
+                # ``name[i][j]...`` multidim read — the first MULTI-index shape to
+                # ride the uniform ops (Stage 3b.1).  Each subscript position is a
+                # distinct dynamic leaf: the indices are pre-lowered here in
+                # outermost-dimension-first order (matching the row-major Horner
+                # walk in ``_emit_multidim_subscript_address``) and carried as the
+                # ``Address.indices`` tuple, generalizing the slice-4 single-index
+                # mechanic to N indices whose per-position strides stay layout-
+                # derived at emission.  For simple-var / constant indices
+                # (the only gated shape) ``_build_expr`` emits NO preceding
+                # instruction, so emission's ``_ir_value_to_ast`` round-trip
+                # re-seats the exact AST index nodes ``resolve_address`` walked
+                # inline today — byte-neutral, for both the contiguous-array and
+                # legacy array-of-pointers declared types (emission dispatches on
+                # the registered type).  ``width`` / ``signed`` carry emission-
+                # ignored placeholders (the IR builder has no array layout).
+                indices = self._lower_subscript_chain_indices(place=place, out=out, strings=strings)
+                address_temp = self._tmp()
+                result_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, indices=indices, shape=place),
+                    Load(address=address_temp, destination=result_temp, signed=False, width=0),
+                ])
+                return result_temp
             case ast_nodes.PlaceLoad(place=place) if _is_static_member_load(expr):
                 # ``variable.member`` read — the simplest static ir.Access load
                 # (Stage 3b.1 slice 1).  Resolve the deref-free member ``place``
@@ -1528,6 +1598,29 @@ class Builder:
         rebound = dataclasses.replace(inner, **{rhs_field: ast_nodes.Var(line=line, name=temp)})
         self._build_stmt(break_tgt=None, cont_tgt=None, out=out, stmt=rebound, strings=strings)
         return temp
+
+    def _lower_subscript_chain_indices(
+        self,
+        *,
+        out: list[Instruction],
+        place: ast_nodes.SubscriptPlace,
+        strings: list[tuple[str, str]],
+    ) -> tuple[Value, ...]:
+        """Lower a nested ``name[i][j]...`` chain's subscript indices to a dimension-ordered tuple.
+
+        Walks the left-nested :class:`~ast_nodes.SubscriptPlace` chain
+        innermost-first, prepending so the collected indices land in
+        outermost-dimension-first order (the order the row-major Horner walk
+        in ``_emit_multidim_subscript_address`` consumes), and lowers each
+        index through :meth:`_build_expr`.  Returns the per-dimension
+        :data:`Value` tuple carried on :attr:`Address.indices`.
+        """
+        index_nodes: list[ast_nodes.Node] = []
+        current: ast_nodes.Node = place
+        while isinstance(current, ast_nodes.SubscriptPlace):
+            index_nodes.insert(0, current.index)
+            current = current.base
+        return tuple(self._build_expr(expr=index_node, out=out, strings=strings) for index_node in index_nodes)
 
     def _tmp(self) -> str:
         name = f"_ir_{self._counter}"

@@ -106,6 +106,22 @@ def test_load_store_uses_and_side_effects() -> None:
     assert _has_side_effects(store)
 
 
+def test_multidim_subscript_load_lowers_to_address_with_index_tuple() -> None:
+    """``m[i][j]`` migrates off Access onto one Address carrying a 2-index tuple + Load."""
+    body = _build_function_body(
+        "int m[2][3];\nint f(int i, int j) { return m[i][j]; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    addresses = [op for op in body if isinstance(op, ir.Address)]
+    assert len(addresses) == 1, f"expected exactly one ir.Address, got {kinds}"
+    assert addresses[0].indices == ("i", "j"), f"expected outer-first index tuple, got {addresses[0].indices}"
+    assert addresses[0].base_value is None
+    assert any(isinstance(op, ir.Load) for op in body), f"expected an ir.Load op, got {kinds}"
+    # The multidim read no longer rides the AST escape hatch.
+    assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"multidim load must not ride Block/Access, got {kinds}"
+
+
 def test_substitute_value_rewrites_access_ops() -> None:
     """Copy-propagation rewrites the new ops' value operands by name."""
     from cc.ir_optimize import _substitute_value  # noqa: PLC0415, PLC2701
