@@ -134,6 +134,22 @@ def test_load_store_uses_and_side_effects() -> None:
     assert _has_side_effects(store)
 
 
+def test_member_store_with_member_load_rhs_lowers_to_load_then_store() -> None:
+    """``p->next = q->prev`` (PlaceLoad RHS) folds: the RHS Load's temp feeds the Store value."""
+    body = _build_function_body(
+        "struct node { struct node *next; struct node *prev; };\nvoid f(struct node *p, struct node *q) { p->next = q->prev; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    loads = [op for op in body if isinstance(op, ir.Load)]
+    stores = [op for op in body if isinstance(op, ir.Store)]
+    assert len(loads) == 1, f"expected exactly one ir.Load, got {kinds}"
+    assert len(stores) == 1, f"expected exactly one ir.Store, got {kinds}"
+    assert stores[0].value == loads[0].destination, "the Store must consume the RHS Load's temp"
+    # Neither side rides the AST escape hatch.
+    assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"store with load RHS must not ride Block/Access, got {kinds}"
+
+
 def test_mixed_subscript_member_chain_store_lowers_to_address_and_store() -> None:
     """``table[i].name[j] = src`` folds onto one Address carrying both chain indices + Store."""
     body = _build_function_body(

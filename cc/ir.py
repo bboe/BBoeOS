@@ -186,36 +186,53 @@ def _is_arrow_member_store(node: ast_nodes.Node, /) -> bool:
 
 
 def _is_byte_safe_store_rhs(node: ast_nodes.Node, /) -> bool:
-    """Return True for a member-store RHS that :meth:`_build_expr` lowers with no emitted code.
+    """Return True for a member-store RHS whose IR pre-lowering is measured byte-neutral.
 
     ``Int`` / ``Var`` / ``String`` / ``&variable`` are the leaves
     :meth:`_build_expr` returns directly as an :data:`Value` (an immediate, a
     name, a string label, or a passed-through ``PlaceAddressOf``) WITHOUT
-    appending any preceding instruction.  Restricting member-store migration to
-    these leaves keeps the RHS-vs-address evaluation ordering byte-identical to
-    the legacy store: ``_ir_value_to_ast`` round-trips the leaf back to the
-    exact AST node the legacy ``_emit_place_store`` evaluated in place, so no
-    spill/reload is introduced.
+    appending any preceding instruction: ``_ir_value_to_ast`` round-trips the
+    leaf back to the exact AST node the legacy ``_emit_place_store`` evaluated
+    in place, so no spill/reload is introduced.
 
-    A COMPOUND RHS stays excluded — re-measured in Stage 3b.1 slice 5 on top of
-    PR #587's IR-temp register allocator and confirmed STILL byte-regressing.
-    The legacy ``_emit_place_store`` computes the RHS directly into the
-    accumulator and stores it through the freshly materialized address; lifting
-    the RHS to an IR temp evaluated BEFORE the address forces the allocator to
-    spill the temp to a frame slot and reload it, because resolving the store
-    address — and any RHS sub-computation that clobbers a scratch register, e.g.
-    ``div``'s ``edx`` — reuses the register the temp would otherwise live in.
-    Measured deltas admitting a ``BinaryOperation`` RHS: ``tv->tv_sec =
-    total_ms / 1000`` grew +21 bytes (an ``eax`` spill/reload plus a
-    ``push``/``pop edx`` around the ``div``), with further regressions in
-    ``readdir`` / ``_emit_str`` / ``release`` / ``malloc`` / ``symbol_add`` /
-    ``strtol``.  Unlike a compound subscript INDEX leaf (slice 4) — which the
-    allocator keeps register-resident because it is consumed IMMEDIATELY by the
-    address scale — a compound RHS must stay live ACROSS the address resolution,
-    so its live range crosses the clobber and the allocator cannot save it.  A
-    compound RHS therefore keeps the store on :class:`Access`.
+    ``PlaceLoad`` is the one COMPOUND RHS class measured byte-neutral
+    (Stage 3b.1, gate 0-delta over all 361 functions): the RHS member load
+    lowers to its own ``Address`` + ``Load`` whose temp lands in the
+    accumulator immediately before the store consumes it — exactly the register
+    the legacy inline RHS evaluation left it in — and the allocator keeps the
+    single-use temp register-resident (``block->next->prev = block->prev`` in
+    ``stdlib.c`` ``release`` / ``malloc``).
+
+    Every other compound RHS stays excluded — re-measured in Stage 3b.1
+    slice 5 on top of PR #587's IR-temp register allocator and confirmed STILL
+    byte-regressing.  The legacy ``_emit_place_store`` computes the RHS
+    directly into the accumulator and stores it through the freshly
+    materialized address; lifting the RHS to an IR temp evaluated BEFORE the
+    address forces the allocator to spill the temp to a frame slot and reload
+    it, because resolving the store address — and any RHS sub-computation that
+    clobbers a scratch register, e.g.  ``div``'s ``edx`` — reuses the register
+    the temp would otherwise live in.  Measured deltas: ``BinaryOperation``
+    RHS ``tv->tv_sec = total_ms / 1000`` grew +21 bytes (an ``eax``
+    spill/reload plus a ``push``/``pop edx`` around the ``div``), with further
+    regressions in ``readdir`` / ``_emit_str`` / ``release`` / ``malloc`` /
+    ``symbol_add`` / ``strtol``; ``Index`` RHS grew ``readdir`` +2; ``Cast``
+    RHS grew ``readdir`` +6 even over a bare-leaf inner expression — the cast
+    picks the store width, which the bare ``Value`` round-trip drops.  Unlike
+    a compound subscript INDEX leaf (slice 4) — which the allocator keeps
+    register-resident because it is consumed IMMEDIATELY by the address scale —
+    a general compound RHS must stay live ACROSS the address resolution, so
+    its live range crosses the clobber and the allocator cannot save it.
+    These RHS classes keep the store on :class:`Access`.
+
+    Every excluded delta is an EXPECTED FUTURE BYTE REDUCTION, not a design
+    cost: the regressions are artifacts of re-seating shapes through the
+    opaque legacy emitter (invisible clobbers; width dropped by the ``Value``
+    round-trip) and are expected to fall to 0-delta-or-shrink once the
+    native-Address emission refactor lands.  The class-by-class ledger — each
+    with its re-admit-and-gate verification check — lives on ``design-specs``:
+    ``2026-06-06-cc-native-address-emission-expected-byte-reductions.md``.
     """
-    return isinstance(node, (ast_nodes.Int, ast_nodes.String, ast_nodes.Var)) or (
+    return isinstance(node, (ast_nodes.Int, ast_nodes.PlaceLoad, ast_nodes.String, ast_nodes.Var)) or (
         isinstance(node, ast_nodes.PlaceAddressOf) and isinstance(node.place, ast_nodes.VariablePlace)
     )
 
