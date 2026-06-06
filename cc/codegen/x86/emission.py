@@ -1828,13 +1828,13 @@ class EmissionMixin:
         )
 
     def _ir_address_with_index(self, address: ir.Address, /) -> Node:
-        """Return the :class:`ir.Address` ``shape``, re-seating its pre-lowered dynamic index.
+        """Return the :class:`ir.Address` ``shape``, re-seating its pre-lowered dynamic indices.
 
-        When ``address.index`` is ``None`` the segment is static (a dot member /
+        When ``address.indices`` is empty the segment is static (a dot member /
         symbol-rooted base) and the immutable ``shape`` already carries the full
         place — returned as-is, exactly as slices 1-3 drove it.
 
-        When ``address.index`` is a :data:`Value` (Stage 3b.1 slice 4's
+        When ``address.indices`` carries one :data:`Value` (Stage 3b.1 slice 4's
         struct-array ``array[index].member`` shape) the dynamic subscript index
         was pre-lowered to that ``Value`` at IR-build time.  Re-seat it into the
         ``shape``'s :class:`SubscriptPlace` via :meth:`_ir_value_to_ast` so the
@@ -1849,11 +1849,14 @@ class EmissionMixin:
         the unchanged layout helpers.
         """
         shape = address.shape
-        if address.index is None:
+        if not address.indices:
             return shape
-        subscript = shape.base
-        reindexed = replace(subscript, index=self._ir_value_to_ast(address.index))
-        return replace(shape, base=reindexed)
+        if len(address.indices) == 1:
+            (index_value,) = address.indices
+            subscript = shape.base
+            reindexed = replace(subscript, index=self._ir_value_to_ast(index_value))
+            return replace(shape, base=reindexed)
+        return self._reseat_nested_subscript_indices(shape, address.indices)
 
     def _ir_value_to_ast(self, value: ir.Value) -> Node:
         """Convert an :data:`ir.Value` to the equivalent simple AST leaf node."""
@@ -2237,6 +2240,31 @@ class EmissionMixin:
     def _rep_width_suffix(element_size: int, /) -> str:
         """Map element size 1/2/4 to the string-op mnemonic suffix."""
         return {1: "b", 2: "w", 4: "d"}[element_size]
+
+    def _reseat_nested_subscript_indices(self, shape: Node, indices: tuple[ir.Value, ...]) -> Node:
+        """Re-seat an N-tuple of pre-lowered indices into a nested ``name[i][j]...`` shape.
+
+        ``shape`` is a left-nested :class:`SubscriptPlace` chain (Stage 3b.1
+        multidim load/store); ``indices`` carries one pre-lowered :data:`Value`
+        per subscript position in outermost-dimension-first order.  Walks the
+        chain innermost-first, prepending so the collected subscripts land in
+        dimension order, then rebuilds the chain bottom-up over the unchanged
+        root, re-seating each subscript's index via :meth:`_ir_value_to_ast`.
+        For a simple-var / constant index the round-trip reconstructs the exact
+        node ``resolve_address`` walked inline, so the rebuilt place is
+        structurally identical to the original and the row-major address
+        computation stays byte-identical; a compound index (rejected at
+        lowering today) would arrive as a register-resident temp ``Var``.
+        """
+        subscripts: list[Node] = []
+        current: Node = shape
+        while isinstance(current, SubscriptPlace):
+            subscripts.insert(0, current)
+            current = current.base
+        rebuilt = current
+        for subscript, index_value in zip(subscripts, indices, strict=True):
+            rebuilt = replace(subscript, base=rebuilt, index=self._ir_value_to_ast(index_value))
+        return rebuilt
 
     @staticmethod
     def _substitute_extended_asm_template(

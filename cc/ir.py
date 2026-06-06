@@ -252,6 +252,64 @@ def _is_migrated_access(node: ast_nodes.Node, /) -> bool:
     return isinstance(node, (ast_nodes.PlaceCall, ast_nodes.PlaceLoad, ast_nodes.PlaceStore))
 
 
+def _is_nested_named_subscript_chain(place: ast_nodes.Node, /) -> bool:
+    """Return True for a left-nested ``name[i][j]...`` subscript chain over an addressable base.
+
+    ``SubscriptPlace(SubscriptPlace(...root...))`` with 2+ subscript levels and
+    every subscript index a simple bare :data:`Value` (:func:`_is_simple_index`),
+    where ``root`` is either a :class:`~ast_nodes.VariablePlace` (a bare array
+    ``m[i][j]`` — contiguous multidim or legacy array-of-pointers) or a
+    :class:`~ast_nodes.MemberPlace` (a struct-field array ``g.cells[i][j]`` /
+    ``p->field[i][j]``).  Emission's :meth:`resolve_address` dispatches each
+    reconstructed shape on the registered type to the matching row-major
+    addresser, so the IR builder lowers them all uniformly without an
+    array-type table.  A compound index is rejected so those keep riding
+    :class:`Access` (the byte gate is the backstop).
+    """
+    if not (isinstance(place, ast_nodes.SubscriptPlace) and isinstance(place.base, ast_nodes.SubscriptPlace)):
+        return False
+    current: ast_nodes.Node = place
+    while isinstance(current, ast_nodes.SubscriptPlace):
+        if not _is_simple_index(current.index):
+            return False
+        current = current.base
+    return isinstance(current, (ast_nodes.MemberPlace, ast_nodes.VariablePlace))
+
+
+def _is_nested_subscript_load(node: ast_nodes.Node, /) -> bool:
+    """Return True for a multidimensional array read ``name[i][j]...`` (2+ subscripts).
+
+    ``PlaceLoad`` of the uniform nested-subscript chain
+    (:func:`_is_nested_named_subscript_chain`) the parser emits for every
+    2+-subscript access over a bare array (``int m[2][3]`` row-major or
+    ``int *grid[N]`` array-of-pointers) or a struct-field array
+    (``g.cells[i][j]`` / ``p->field[i][j]``).  Each subscript index is carried
+    as a distinct dynamic leaf in :attr:`Address.indices` (in
+    outermost-dimension-first order); the per-position row-major strides stay
+    layout-derived at emission, where the reconstructed ``PlaceLoad`` reaches
+    the EXACT addresser the :class:`Access` escape hatch fed.  Gated on simple
+    (bare ``Var`` / ``Int``) indices so the re-seated index node round-trips to
+    the exact AST sub-expression the legacy access walked inline, keeping the
+    address computation byte-identical; a compound index stays on
+    :class:`Access` (the byte gate is the backstop).
+    """
+    return isinstance(node, ast_nodes.PlaceLoad) and _is_nested_named_subscript_chain(node.place)
+
+
+def _is_simple_index(node: ast_nodes.Node, /) -> bool:
+    """Return True for a subscript index that lowers to a bare :data:`Value`.
+
+    A ``Var`` name or ``Int`` literal lowers through :meth:`_build_expr` to its
+    own name / value with no emitted instruction, so re-seating it into the
+    access ``shape`` at emission reconstructs the exact node the legacy path
+    walked inline — byte-identical.  A compound index (arithmetic, call, nested
+    subscript) would materialize a register-resident temp whose evaluation may
+    reorder relative to the legacy inline walk, so shapes carrying one are left
+    on :class:`Access`.
+    """
+    return isinstance(node, (ast_nodes.Int, ast_nodes.Var))
+
+
 def _is_static_member_load(node: ast_nodes.Node, /) -> bool:
     """Return True for ``variable.member`` reads — the simplest static ir.Access load.
 
@@ -322,7 +380,7 @@ def _is_struct_array_member_store(node: ast_nodes.Node, /) -> bool:
     SubscriptPlace base is a bare array variable (no dereference, no nested
     subscript), so the chain never breaks (``base_value`` stays ``None``) and
     the single subscript index is the segment's only dynamic leaf — pre-lowered
-    to a :data:`Value` carried on ``Address.index`` and re-seated into the
+    to a :data:`Value` carried on ``Address.indices`` and re-seated into the
     ``shape`` at emission by :meth:`_ir_address_with_index`, exactly as the load
     twin does.  Gated on a byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`)
     so the RHS-vs-address ordering stays byte-identical to the legacy store.
@@ -365,22 +423,27 @@ class Address:
     emission derives the *static* layout — member offsets, constant
     subscripts, element size, bitfield, array decay — from the existing
     layout helpers, exactly as today.  Its *dynamic* leaves are
-    first-class optimizer-visible operands: ``index`` is the segment's
-    summed dynamic element index temp, and ``base_value`` is the pointer
-    ``Value`` produced by the preceding :class:`Load` when the chain was
-    broken at a dereference (``None`` for a symbol-rooted — global /
-    local — segment).  Each segment has at most these two dynamic leaves
-    because dereference breaks the chain and multiple dynamic indices sum
-    into one temp at lowering, so ``VALUE_FIELDS`` stays flat and static.
+    first-class optimizer-visible operands: ``indices`` is the segment's
+    per-dimension dynamic element index temps (one :data:`Value` per
+    subscript position, outermost dimension first — empty for a
+    subscript-free segment, a one-tuple for a single ``array[i].member``
+    subscript, an N-tuple for an N-dimensional contiguous-array access
+    ``m[i][j]...`` whose per-position strides stay layout-derived at
+    emission), and ``base_value`` is the pointer ``Value`` produced by the
+    preceding :class:`Load` when the chain was broken at a dereference
+    (``None`` for a symbol-rooted — global / local — segment).  Dereference
+    breaks the chain, so a segment carries at most one ``base_value`` plus
+    the index tuple; ``VALUE_FIELDS`` enumerates both and the tuple is
+    flattened element-wise by the operand walkers.
 
     Pure and DCE-able; never CSE'd or hoisted in Stage 3b (that is 3c).
     """
 
-    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("base_value", "index")
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("base_value", "indices")
 
     base_value: Value | None
     destination: str
-    index: Value | None
+    indices: tuple[Value, ...]
     shape: ast_nodes.Node
 
 
@@ -926,7 +989,7 @@ class Builder:
                 address_temp = self._tmp()
                 result_temp = self._tmp()
                 out.extend([
-                    Address(base_value=base_value, destination=address_temp, index=None, shape=place),
+                    Address(base_value=base_value, destination=address_temp, indices=(), shape=place),
                     AddressOf(address=address_temp, destination=result_temp),
                 ])
                 return result_temp
@@ -947,7 +1010,7 @@ class Builder:
                 address_temp = self._tmp()
                 result_temp = self._tmp()
                 out.extend([
-                    Address(base_value=base_value, destination=address_temp, index=None, shape=place),
+                    Address(base_value=base_value, destination=address_temp, indices=(), shape=place),
                     Load(address=address_temp, destination=result_temp, signed=False, width=0),
                 ])
                 return result_temp
@@ -967,7 +1030,31 @@ class Builder:
                 address_temp = self._tmp()
                 result_temp = self._tmp()
                 out.extend([
-                    Address(base_value=base_value, destination=address_temp, index=None, shape=place),
+                    Address(base_value=base_value, destination=address_temp, indices=(), shape=place),
+                    Load(address=address_temp, destination=result_temp, signed=False, width=0),
+                ])
+                return result_temp
+            case ast_nodes.PlaceLoad(place=place) if _is_nested_subscript_load(expr):
+                # ``name[i][j]...`` multidim read — the first MULTI-index shape to
+                # ride the uniform ops (Stage 3b.1).  Each subscript position is a
+                # distinct dynamic leaf: the indices are pre-lowered here in
+                # outermost-dimension-first order (matching the row-major Horner
+                # walk in ``_emit_multidim_subscript_address``) and carried as the
+                # ``Address.indices`` tuple, generalizing the slice-4 single-index
+                # mechanic to N indices whose per-position strides stay layout-
+                # derived at emission.  For simple-var / constant indices
+                # (the only gated shape) ``_build_expr`` emits NO preceding
+                # instruction, so emission's ``_ir_value_to_ast`` round-trip
+                # re-seats the exact AST index nodes ``resolve_address`` walked
+                # inline today — byte-neutral, for both the contiguous-array and
+                # legacy array-of-pointers declared types (emission dispatches on
+                # the registered type).  ``width`` / ``signed`` carry emission-
+                # ignored placeholders (the IR builder has no array layout).
+                indices = self._lower_subscript_chain_indices(place=place, out=out, strings=strings)
+                address_temp = self._tmp()
+                result_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, indices=indices, shape=place),
                     Load(address=address_temp, destination=result_temp, signed=False, width=0),
                 ])
                 return result_temp
@@ -981,7 +1068,7 @@ class Builder:
                 address_temp = self._tmp()
                 result_temp = self._tmp()
                 out.extend([
-                    Address(base_value=None, destination=address_temp, index=None, shape=place),
+                    Address(base_value=None, destination=address_temp, indices=(), shape=place),
                     Load(address=address_temp, destination=result_temp, signed=False, width=0),
                 ])
                 return result_temp
@@ -990,7 +1077,7 @@ class Builder:
                 # to ride the uniform ops (Stage 3b.1 slice 4).  The single
                 # subscript ``index`` is the segment's only dynamic leaf: it is
                 # pre-lowered to a :data:`Value` here and carried on
-                # ``Address.index``, proving the design's central mechanic.  For
+                # ``Address.indices``, proving the design's central mechanic.  For
                 # a simple-var / constant index ``_build_expr`` emits NO
                 # preceding instruction, so emission's ``_ir_value_to_ast``
                 # round-trip reconstructs the exact AST index node
@@ -1007,7 +1094,7 @@ class Builder:
                 address_temp = self._tmp()
                 result_temp = self._tmp()
                 out.extend([
-                    Address(base_value=None, destination=address_temp, index=index_value, shape=place),
+                    Address(base_value=None, destination=address_temp, indices=(index_value,), shape=place),
                     Load(address=address_temp, destination=result_temp, signed=False, width=0),
                 ])
                 return result_temp
@@ -1227,7 +1314,7 @@ class Builder:
                 store_value = self._build_expr(expr=value, out=out, strings=strings)
                 address_temp = self._tmp()
                 out.extend([
-                    Address(base_value=place.base.base.pointer.name, destination=address_temp, index=None, shape=place),
+                    Address(base_value=place.base.base.pointer.name, destination=address_temp, indices=(), shape=place),
                     Store(address=address_temp, value=store_value, width=0),
                 ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_arrow_member_store(stmt):
@@ -1247,7 +1334,7 @@ class Builder:
                 store_value = self._build_expr(expr=value, out=out, strings=strings)
                 address_temp = self._tmp()
                 out.extend([
-                    Address(base_value=place.base.pointer.name, destination=address_temp, index=None, shape=place),
+                    Address(base_value=place.base.pointer.name, destination=address_temp, indices=(), shape=place),
                     Store(address=address_temp, value=store_value, width=0),
                 ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_static_member_store(stmt):
@@ -1262,7 +1349,7 @@ class Builder:
                 store_value = self._build_expr(expr=value, out=out, strings=strings)
                 address_temp = self._tmp()
                 out.extend([
-                    Address(base_value=None, destination=address_temp, index=None, shape=place),
+                    Address(base_value=None, destination=address_temp, indices=(), shape=place),
                     Store(address=address_temp, value=store_value, width=0),
                 ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_deref_store(stmt):
@@ -1280,7 +1367,7 @@ class Builder:
                 store_value = self._build_expr(expr=value, out=out, strings=strings)
                 address_temp = self._tmp()
                 out.extend([
-                    Address(base_value=place.pointer.name, destination=address_temp, index=None, shape=place),
+                    Address(base_value=place.pointer.name, destination=address_temp, indices=(), shape=place),
                     Store(address=address_temp, value=store_value, width=0),
                 ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_struct_array_member_store(stmt):
@@ -1288,7 +1375,7 @@ class Builder:
                 # twin of slice 4's struct-array load (Stage 3b.1 slice 5).  The
                 # single subscript ``index`` is the segment's only dynamic leaf:
                 # pre-lowered to a :data:`Value` here and carried on
-                # ``Address.index``, re-seated into the ``shape`` at emission by
+                # ``Address.indices``, re-seated into the ``shape`` at emission by
                 # ``_ir_address_with_index``.  The byte-safe leaf RHS emits no
                 # preceding instruction, so the RHS-vs-address ordering matches
                 # the legacy store byte-for-byte; the member ``shape`` (rooted at
@@ -1298,7 +1385,7 @@ class Builder:
                 store_value = self._build_expr(expr=value, out=out, strings=strings)
                 address_temp = self._tmp()
                 out.extend([
-                    Address(base_value=None, destination=address_temp, index=index_value, shape=place),
+                    Address(base_value=None, destination=address_temp, indices=(index_value,), shape=place),
                     Store(address=address_temp, value=store_value, width=0),
                 ])
             case _ if _is_migrated_access(stmt):
@@ -1523,6 +1610,29 @@ class Builder:
         rebound = dataclasses.replace(inner, **{rhs_field: ast_nodes.Var(line=line, name=temp)})
         self._build_stmt(break_tgt=None, cont_tgt=None, out=out, stmt=rebound, strings=strings)
         return temp
+
+    def _lower_subscript_chain_indices(
+        self,
+        *,
+        out: list[Instruction],
+        place: ast_nodes.SubscriptPlace,
+        strings: list[tuple[str, str]],
+    ) -> tuple[Value, ...]:
+        """Lower a nested ``name[i][j]...`` chain's subscript indices to a dimension-ordered tuple.
+
+        Walks the left-nested :class:`~ast_nodes.SubscriptPlace` chain
+        innermost-first, prepending so the collected indices land in
+        outermost-dimension-first order (the order the row-major Horner walk
+        in ``_emit_multidim_subscript_address`` consumes), and lowers each
+        index through :meth:`_build_expr`.  Returns the per-dimension
+        :data:`Value` tuple carried on :attr:`Address.indices`.
+        """
+        index_nodes: list[ast_nodes.Node] = []
+        current: ast_nodes.Node = place
+        while isinstance(current, ast_nodes.SubscriptPlace):
+            index_nodes.insert(0, current.index)
+            current = current.base
+        return tuple(self._build_expr(expr=index_node, out=out, strings=strings) for index_node in index_nodes)
 
     def _tmp(self) -> str:
         name = f"_ir_{self._counter}"

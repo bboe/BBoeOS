@@ -8,10 +8,10 @@ import typing
 from cc import ast_nodes, ir
 
 
-def _address(*, base_value: ir.Value | None = None, destination: str = "_ir_0", index: ir.Value | None = None) -> ir.Address:
+def _address(*, base_value: ir.Value | None = None, destination: str = "_ir_0", indices: tuple[ir.Value, ...] = ()) -> ir.Address:
     """Build an :class:`ir.Address` over a single-deref placeholder shape."""
     shape = ast_nodes.DereferencePlace(pointer=ast_nodes.VariablePlace(name="p"))
-    return ir.Address(base_value=base_value, destination=destination, index=index, shape=shape)
+    return ir.Address(base_value=base_value, destination=destination, indices=indices, shape=shape)
 
 
 def _build_function_body(source: str, /, *, name: str) -> list[ir.Instruction]:
@@ -43,7 +43,7 @@ def test_access_op_destinations() -> None:
 
 def test_access_op_value_fields() -> None:
     """:class:`ir.Address` exposes exactly its two dynamic leaves."""
-    assert ir.Address.VALUE_FIELDS == ("base_value", "index")
+    assert ir.Address.VALUE_FIELDS == ("base_value", "indices")
     assert ir.AddressOf.VALUE_FIELDS == ("address",)
     assert ir.Load.VALUE_FIELDS == ("address",)
     assert ir.Store.VALUE_FIELDS == ("address", "value")
@@ -55,12 +55,12 @@ def test_address_value_operands_skip_none_leaves() -> None:
     from cc.regalloc import _instruction_uses  # noqa: PLC0415, PLC2701
     from cc.ssa import _iter_value_operands  # noqa: PLC0415, PLC2701
 
-    static = _address(base_value=None, index=None)
+    static = _address(base_value=None, indices=())
     assert _instruction_value_operands(static) == ()
     assert tuple(_iter_value_operands(static)) == ()
     assert _instruction_uses(instruction=static) == ()
 
-    dynamic = _address(base_value="_ir_1", index="_ir_2")
+    dynamic = _address(base_value="_ir_1", indices=("_ir_2",))
     assert _instruction_value_operands(dynamic) == ("_ir_1", "_ir_2")
     assert tuple(_iter_value_operands(dynamic)) == ("_ir_1", "_ir_2")
     assert set(_instruction_uses(instruction=dynamic)) == {"_ir_1", "_ir_2"}
@@ -106,13 +106,48 @@ def test_load_store_uses_and_side_effects() -> None:
     assert _has_side_effects(store)
 
 
+def test_multidim_subscript_load_lowers_to_address_with_index_tuple() -> None:
+    """``m[i][j]`` migrates off Access onto one Address carrying a 2-index tuple + Load."""
+    body = _build_function_body(
+        "int m[2][3];\nint f(int i, int j) { return m[i][j]; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    addresses = [op for op in body if isinstance(op, ir.Address)]
+    assert len(addresses) == 1, f"expected exactly one ir.Address, got {kinds}"
+    assert addresses[0].indices == ("i", "j"), f"expected outer-first index tuple, got {addresses[0].indices}"
+    assert addresses[0].base_value is None
+    assert any(isinstance(op, ir.Load) for op in body), f"expected an ir.Load op, got {kinds}"
+    # The multidim read no longer rides the AST escape hatch.
+    assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"multidim load must not ride Block/Access, got {kinds}"
+
+
+def test_struct_field_multidim_load_lowers_to_member_rooted_address() -> None:
+    """``p->cells[i][j]`` folds onto an Address whose nested-subscript shape roots at a MemberPlace."""
+    body = _build_function_body(
+        "struct g { int cells[2][3]; };\nint f(struct g *p, int i, int j) { return p->cells[i][j]; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    addresses = [op for op in body if isinstance(op, ir.Address)]
+    assert len(addresses) == 1, f"expected exactly one ir.Address, got {kinds}"
+    assert addresses[0].indices == ("i", "j"), f"expected outer-first index tuple, got {addresses[0].indices}"
+    root: ast_nodes.Node = addresses[0].shape
+    while isinstance(root, ast_nodes.SubscriptPlace):
+        root = root.base
+    assert isinstance(root, ast_nodes.MemberPlace), f"expected a MemberPlace root, got {type(root).__name__}"
+    assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), (
+        f"struct-field multidim load must not ride Block/Access, got {kinds}"
+    )
+
+
 def test_substitute_value_rewrites_access_ops() -> None:
     """Copy-propagation rewrites the new ops' value operands by name."""
     from cc.ir_optimize import _substitute_value  # noqa: PLC0415, PLC2701
 
-    address = _address(base_value="_ir_1", index="_ir_2")
+    address = _address(base_value="_ir_1", indices=("_ir_2",))
     rewritten = _substitute_value(address, source="_ir_9", target="_ir_2")
-    assert rewritten.index == "_ir_9"
+    assert rewritten.indices == ("_ir_9",)
     assert rewritten.base_value == "_ir_1"
 
     store = ir.Store(address="_ir_1", value="_ir_2", width=4)
