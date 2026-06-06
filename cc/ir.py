@@ -252,36 +252,48 @@ def _is_migrated_access(node: ast_nodes.Node, /) -> bool:
     return isinstance(node, (ast_nodes.PlaceCall, ast_nodes.PlaceLoad, ast_nodes.PlaceStore))
 
 
-def _is_nested_subscript_load(node: ast_nodes.Node, /) -> bool:
-    """Return True for a multidimensional array read ``name[i][j]...`` (2+ subscripts).
+def _is_nested_named_subscript_chain(place: ast_nodes.Node, /) -> bool:
+    """Return True for a left-nested ``name[i][j]...`` subscript chain over an addressable base.
 
-    ``PlaceLoad(SubscriptPlace(SubscriptPlace(...VariablePlace...)))`` is the
-    single uniform shape the parser emits for every 2+-subscript access over a
-    named array — whether the declared type is a contiguous multidim array
-    (``int m[2][3]``, row-major addressing) or a legacy array-of-pointers
-    (``int *grid[N]``, deref chain).  Both reconstruct to the identical
-    ``PlaceLoad`` at emission, where :meth:`resolve_address` dispatches on the
-    registered type, so the IR builder lowers them uniformly without an
-    array-type table.  Each subscript index is carried as a distinct dynamic
-    leaf in :attr:`Address.indices` (in outermost-dimension-first order); the
-    per-position row-major strides stay layout-derived at emission.  Gated on
-    simple (bare ``Var`` / ``Int``) indices so the re-seated index node round-
-    trips to the exact AST sub-expression the legacy access walked inline,
-    keeping the address computation byte-identical; a compound index stays on
+    ``SubscriptPlace(SubscriptPlace(...root...))`` with 2+ subscript levels and
+    every subscript index a simple bare :data:`Value` (:func:`_is_simple_index`),
+    where ``root`` is either a :class:`~ast_nodes.VariablePlace` (a bare array
+    ``m[i][j]`` — contiguous multidim or legacy array-of-pointers) or a
+    :class:`~ast_nodes.MemberPlace` (a struct-field array ``g.cells[i][j]`` /
+    ``p->field[i][j]``).  Emission's :meth:`resolve_address` dispatches each
+    reconstructed shape on the registered type to the matching row-major
+    addresser, so the IR builder lowers them all uniformly without an
+    array-type table.  A compound index is rejected so those keep riding
     :class:`Access` (the byte gate is the backstop).
     """
-    if not (
-        isinstance(node, ast_nodes.PlaceLoad)
-        and isinstance(node.place, ast_nodes.SubscriptPlace)
-        and isinstance(node.place.base, ast_nodes.SubscriptPlace)
-    ):
+    if not (isinstance(place, ast_nodes.SubscriptPlace) and isinstance(place.base, ast_nodes.SubscriptPlace)):
         return False
-    current: ast_nodes.Node = node.place
+    current: ast_nodes.Node = place
     while isinstance(current, ast_nodes.SubscriptPlace):
         if not _is_simple_index(current.index):
             return False
         current = current.base
-    return isinstance(current, ast_nodes.VariablePlace)
+    return isinstance(current, (ast_nodes.MemberPlace, ast_nodes.VariablePlace))
+
+
+def _is_nested_subscript_load(node: ast_nodes.Node, /) -> bool:
+    """Return True for a multidimensional array read ``name[i][j]...`` (2+ subscripts).
+
+    ``PlaceLoad`` of the uniform nested-subscript chain
+    (:func:`_is_nested_named_subscript_chain`) the parser emits for every
+    2+-subscript access over a bare array (``int m[2][3]`` row-major or
+    ``int *grid[N]`` array-of-pointers) or a struct-field array
+    (``g.cells[i][j]`` / ``p->field[i][j]``).  Each subscript index is carried
+    as a distinct dynamic leaf in :attr:`Address.indices` (in
+    outermost-dimension-first order); the per-position row-major strides stay
+    layout-derived at emission, where the reconstructed ``PlaceLoad`` reaches
+    the EXACT addresser the :class:`Access` escape hatch fed.  Gated on simple
+    (bare ``Var`` / ``Int``) indices so the re-seated index node round-trips to
+    the exact AST sub-expression the legacy access walked inline, keeping the
+    address computation byte-identical; a compound index stays on
+    :class:`Access` (the byte gate is the backstop).
+    """
+    return isinstance(node, ast_nodes.PlaceLoad) and _is_nested_named_subscript_chain(node.place)
 
 
 def _is_simple_index(node: ast_nodes.Node, /) -> bool:
