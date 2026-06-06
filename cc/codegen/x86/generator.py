@@ -12,11 +12,13 @@ instance; currently we ship :class:`X86CodegenTarget16` (real mode) and
 
 from __future__ import annotations
 
+import dataclasses
+import os
 import re
 from dataclasses import dataclass, field, fields
 from typing import ClassVar, NamedTuple
 
-from cc import ir
+from cc import ir, regalloc
 from cc.ast_nodes import (
     ArrayDecl,
     ArrayInit,
@@ -73,9 +75,10 @@ from cc.codegen.x86.jumps import (
     JUMP_WHEN_TRUE,
     JUMP_WHEN_TRUE_UNSIGNED,
 )
+from cc.codegen.x86.regalloc_inputs import build_allocator_inputs
 from cc.errors import CompileError
 from cc.options import CompilerOptions
-from cc.target import CodegenTarget, X86CodegenTarget16, X86CodegenTarget32
+from cc.target import LOW_BYTE, CodegenTarget, X86CodegenTarget16, X86CodegenTarget32
 from cc.tokens import COMPARISON_OPERATIONS
 from cc.types import ArrayType, PointerType, Type
 from cc.utils import decode_string_escapes, string_byte_length
@@ -90,6 +93,30 @@ RE_MOV_EAX_IMMEDIATE = re.compile(r"^\s*mov eax, (\d+)\s*$")
 RE_MOV_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*mov byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
 RE_NON_BYTE_WRITE = re.compile(r"^\s*mov\b.*\[(?!ebp\b)")
 RE_OR_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*or byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
+
+
+@dataclass(kw_only=True, slots=True)
+class AutoPinEconomics:
+    """The register-allocation economics gathered from a function body.
+
+    The pure inputs both the legacy auto-pin heuristic and the regalloc
+    adapter consume: which locals/params are pin-eligible, how often each is
+    referenced (the spill benefit), how many subscript uses each has (the BP
+    index penalty), and which pre-first-store call clobbers are elided per
+    candidate/register.  ``byte_typed`` is the subset whose width has no 8-bit
+    register alias outside AL/BL/CL/DL (so they may not be homed in DI/SI/BP).
+    ``ranked`` is the candidates surviving expression-temporary and
+    address-taken filtering, body locals first then params, sorted by
+    descending reference count with declaration order as the tiebreaker.
+    """
+
+    address_taken: set[str] = field(default_factory=set)
+    allocatable: frozenset[str] = field(default_factory=frozenset)
+    byte_typed: frozenset[str] = field(default_factory=frozenset)
+    index_uses: dict[str, int] = field(default_factory=dict)
+    pre_store_clobbers: dict[str, dict[str, int]] = field(default_factory=dict)
+    ranked: list[tuple[str, int]] = field(default_factory=list)
+    reference_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -357,6 +384,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.out_register_params: dict[str, dict[int, str]] = {}
         self.param_in_register: dict[str, str] = {}
         self.pinned_register: dict[str, str] = {}
+        self.output: str = ""  # emitted NASM, populated by generate()
+        self.register_homes: dict[str, dict[str, str]] = {}  # function name -> {var: register}; always_inline functions are absent
         # Liveness map for pinned-register saves: maps id(ir.Call /
         # ir.CarryBranch) → frozenset of pinned-register names that are
         # may-defined at that call site.  Populated per function before
@@ -367,6 +396,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # means "no info available" — fall back to saving everything.
         self._ir_call_pinned_initialized: dict[int, frozenset[str]] = {}
         self._current_call_pinned_initialized: frozenset[str] | None = None
+        # IR temps that won a pool-register home in _allocate_ir_temps.
+        # Maps temp name -> register.  Distinct from auto-pinned locals
+        # (which _compute_pinned_initialized_per_call tracks): temps are
+        # single-assignment, so their save-liveness is a simple
+        # def-index < call-index <= last-use-index test, computed by
+        # _compute_temp_pinned_live_per_call and folded into the
+        # per-call filter so _pinned_registers_to_save saves a temp's
+        # register exactly across the calls / rep-string-ops it lives
+        # across.  Reset per function in _allocate_ir_temps.
+        self.temp_pinned_registers: dict[str, str] = {}
         # pointer_array_types maps a variable / parameter name → the structured
         # PointerType(ArrayType(...)) for a pointer-to-array (``int (*p)[3]``)
         # or a decayed multidim array parameter (``int m[][3]`` ==
@@ -390,6 +429,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.struct_layouts: dict[str, dict[str, FieldInfo]] = {}
         self.struct_sizes: dict[str, int] = {}
         self.target_mode: str = target_mode
+        # When BBOE_REGALLOC=1 the per-function home decision routes through
+        # cc.regalloc.color() (see _allocator_homes) instead of the legacy
+        # _select_auto_pin_candidates heuristic.  Read once at construction;
+        # compile_source_homes builds a fresh generator per compile so the
+        # env var is honored per call.
+        self.use_regalloc: bool = os.environ.get("BBOE_REGALLOC") == "1"
+        self.regalloc_liveness_fallbacks: int = 0
 
     def _accumulate_subscript(self, operand: MemoryOperand, /, *, index: Node, element_size: int) -> None:
         """Add *index * element_size* into *operand*, folding constants into displacement.
@@ -447,6 +493,64 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self._emit_scale_index(accumulator, scale=element_size)
         self.emit(f"        pop {si}")
         self.emit(f"        add {si}, {accumulator}")
+
+    def _allocator_homes(
+        self,
+        *,
+        apply_liveness_elision: bool = True,
+        body: list[Node],
+        parameters: list,
+        precolored: dict[str, str],
+    ) -> dict[str, str]:
+        """Color locals/params with cc.regalloc; return {name: register} homes.
+
+        Drop-in replacement for :meth:`_select_auto_pin_candidates`: same economics,
+        but coloring (which generalizes the heuristic's primary + sharing passes)
+        decides homes.  Interference comes from the AST LivenessAnalyzer; on
+        LivenessAnalysisError every allocatable value is treated as mutually
+        interfering (no illegal sharing), and the byte gate catches any cost.
+
+        ``apply_liveness_elision`` mirrors the heuristic's ``main`` carve-out: the
+        AST codegen path always emits pinned-register saves around calls, so for
+        ``main`` the pre-first-store clobber elision must not be subtracted (it
+        would make those saves look free and over-pin).  When ``False`` the
+        economics are rebuilt with empty ``pre_store_clobbers`` before the cost
+        model is derived.
+        """
+        if not self.safe_pin_registers:
+            return {}
+        economics = self._compute_pin_economics(body=body, parameters=parameters)
+        if not economics.allocatable:
+            return {}
+        if not apply_liveness_elision:
+            economics = dataclasses.replace(economics, pre_store_clobbers={})
+        try:
+            interference = LivenessAnalyzer(body=body, parameters=parameters).interference()
+        except LivenessAnalysisError:
+            self.regalloc_liveness_fallbacks += 1
+            interference = {name: set(economics.allocatable) - {name} for name in economics.allocatable}
+
+        pool = tuple(self.safe_pin_registers)
+        byte_pool = frozenset(register for register in pool if register in LOW_BYTE)
+        base_register = self.target.base_register if self.elide_frame else None
+        argument_affinity = self._compute_argument_register_affinity(body=body, parameters=parameters)
+        inputs = build_allocator_inputs(
+            argument_affinity=argument_affinity,
+            base_register=base_register,
+            byte_pool=byte_pool,
+            economics=economics,
+            interference=interference,
+            pool=pool,
+            precolored=precolored,
+            register_clobber_counts=self.register_clobber_counts,
+        )
+        allocation = regalloc.color(
+            constraints=inputs.constraints,
+            costs=inputs.costs,
+            interference=inputs.interference,
+            moves=set(),  # no coalescing: AST locals/params have no IR Copy pairs; coalescing is PR 3's IR-temp concern
+        )
+        return {name: register for name, register in allocation.homes.items() if name in economics.allocatable}
 
     def _analyze_user_function_conventions(self, functions: list[Node], /) -> None:
         """Pre-compute each user function's pinned-param register map.
@@ -714,6 +818,24 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 for case in statement.cases:
                     self._collect_auto_pin_body_candidates(case.body, body_candidates=body_candidates, top_level=False)
 
+    def _collect_byte_typed_locals(self, statements: list[Node], /, *, byte_types: set[str], byte_typed: set[str]) -> None:
+        """Record names of VarDecl locals whose declared type has no high-register byte alias."""
+        for statement in statements:
+            if isinstance(statement, (Compound, DoWhile, While)):
+                self._collect_byte_typed_locals(statement.body, byte_types=byte_types, byte_typed=byte_typed)
+            elif isinstance(statement, For):
+                self._collect_byte_typed_locals(statement.init, byte_types=byte_types, byte_typed=byte_typed)
+                self._collect_byte_typed_locals(statement.body, byte_types=byte_types, byte_typed=byte_typed)
+            elif isinstance(statement, If):
+                self._collect_byte_typed_locals(statement.body, byte_types=byte_types, byte_typed=byte_typed)
+                if statement.else_body is not None:
+                    self._collect_byte_typed_locals(statement.else_body, byte_types=byte_types, byte_typed=byte_typed)
+            elif isinstance(statement, Switch):
+                for case in statement.cases:
+                    self._collect_byte_typed_locals(case.body, byte_types=byte_types, byte_typed=byte_typed)
+            elif isinstance(statement, VarDecl) and statement.type_name in byte_types:
+                byte_typed.add(statement.name)
+
     def _collect_function_pointer_vars(self, body: list[Node], /, *, parameters: list | None = None) -> set[str]:
         """Return every name that names a function_pointer (params + locals + file-scope globals).
 
@@ -775,6 +897,170 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     stack.extend(item for item in child if isinstance(item, Node))
         return reads
 
+    def _compute_argument_register_affinity(self, *, body: list[Node], parameters: list) -> dict[str, dict[str, int]]:
+        """Tally how often each local/param is a register-convention call argument.
+
+        Walks *body* and, for every :class:`Call` to a register-convention callee
+        (a fastcall user function or a libbboeos extern), records — for argument
+        positions 1 (``edx``) and 2 (``ecx``) that fall within the callee's
+        regparm count — an affinity for the convention register when the argument
+        is a plain :class:`Var`.  Homing such a value in its convention register
+        lets the call site skip a ``mov reg, src`` (see
+        :meth:`_emit_register_arg_single`), the byte saving the legacy heuristic
+        captured by greedy-rank luck.
+
+        Position 0 (``eax``) is never recorded: EAX is not in the pinnable pool,
+        so arg0 affinity can never influence coloring.  Builtins (custom per-arg
+        register maps — e.g. ``memcpy``/``memset`` use ESI/EDI/ECX via
+        ``rep movsb``, NOT the regparm convention) are skipped even when the
+        builtin name also appears in ``libbboeos_extern_declarations``, mirroring
+        the call-emission dispatch which prefers a ``builtin_<name>`` handler over
+        the regparm extern path.  Function-pointer/unknown callees and variadic
+        extra arguments are skipped too; the ``index < regparm_count`` guard
+        already drops the variadic stack args.  Names are recorded
+        unconditionally; the caller restricts the dictionary to allocatable
+        values.
+
+        Safety: the whole tally is suppressed (returns ``{}``) for any function
+        that contains a *register-custom builtin* call (one with a
+        ``builtin_<name>`` handler) taking two or more arguments where at least
+        one argument is not a plain :class:`Var`.  Such a call site loads several
+        registers from caller expressions before a single emitted operation
+        (``write``/``read``/``memcpy`` …); its cycle-breaker can only spill a
+        simple-``Var`` argument to AX (see :meth:`_emit_register_arg_moves`), so
+        an Index/expression argument leaves a cycle unbreakable.  Perturbing the
+        register assignment with affinity can push exactly these sites into that
+        unbreakable cycle in 16-bit mode (``ls.c`` line 91), so we conservatively
+        keep parity-as-baseline for those functions rather than risk a
+        compile-time failure.  Functions whose register-custom builtin calls take
+        only simple-``Var`` arguments (e.g. ``write(STDOUT, line, length)``) stay
+        eligible.
+        """
+        affinity: dict[str, dict[str, int]] = {}
+        position_register = {1: self.target.dx_register, 2: self.target.count_register}
+
+        stack: list[Node] = [statement for statement in body if isinstance(statement, Node)]
+        stack.extend(parameter for parameter in parameters if isinstance(parameter, Node))
+        while stack:
+            current = stack.pop()
+            if isinstance(current, Call):
+                # A ``builtin_<name>`` handler wins over the regparm extern path
+                # in call emission, so a builtin name (even one shadowing a
+                # libbboeos export) never follows the EAX/EDX/ECX convention.
+                if getattr(self, f"builtin_{current.name}", None) is not None:
+                    # Register-custom builtin call: if it loads 2+ registers from
+                    # caller expressions and any source is not a plain Var, the
+                    # arg-lowering cycle-breaker may be unable to break a cycle
+                    # the affinity-perturbed allocation introduces (16-bit).
+                    # Suppress affinity entirely for this function.
+                    if len(current.args) >= 2 and any(not isinstance(argument, Var) for argument in current.args):
+                        return {}
+                    regparm_count = 0
+                elif current.name in self.fastcall_functions:
+                    regparm_count = self.function_regparm_count.get(current.name, 0)
+                elif current.name in self.libbboeos_extern_declarations:
+                    regparm_count = min(3, self.libbboeos_extern_declarations[current.name])
+                else:
+                    regparm_count = 0
+                if regparm_count:
+                    for index, argument in enumerate(current.args):
+                        if index not in position_register or index >= regparm_count:
+                            continue
+                        if isinstance(argument, Var):
+                            register = position_register[index]
+                            affinity.setdefault(argument.name, {})
+                            affinity[argument.name][register] = affinity[argument.name].get(register, 0) + 1
+            for slot in getattr(type(current), "__slots__", ()):
+                child = getattr(current, slot, None)
+                if isinstance(child, Node):
+                    stack.append(child)
+                elif isinstance(child, list):
+                    stack.extend(item for item in child if isinstance(item, Node))
+        return affinity
+
+    def _compute_pin_economics(
+        self,
+        *,
+        body: list[Node],
+        parameters: list,
+    ) -> AutoPinEconomics:
+        """Gather the pin economics for *body* (pure; no register assignment).
+
+        Mirrors the candidate-collection and tally prefix of
+        :meth:`_select_auto_pin_candidates`: eligible candidates (params + body
+        locals minus asm-operand, expression-temporary, and address-taken vars),
+        reference counts, subscript counts, and per-candidate pre-first-store
+        clobbers.  Both the legacy heuristic and the regalloc adapter consume the
+        returned bundle.
+        """
+        self.switch_pin_overrides = set()
+
+        param_candidates: list[tuple[str, int]] = []
+        byte_types: set[str] = {"char", "signed char", "unsigned char", "_Bool"}
+        byte_typed: set[str] = set()
+        for order, param in enumerate(parameters):
+            if param.is_array:
+                continue
+            param_candidates.append((param.name, order))
+            if param.type in byte_types:
+                byte_typed.add(param.name)
+
+        body_candidates: list[tuple[str, int]] = []
+        function_pointer_vars: set[str] = self._collect_function_pointer_vars(body, parameters=parameters)
+        self._collect_auto_pin_body_candidates(body, body_candidates=body_candidates, top_level=True)
+        asm_operand_vars = self._collect_asm_operand_vars(body)
+        body_candidates = [(name, o) for name, o in body_candidates if name not in asm_operand_vars]
+
+        state = AutoPinTallyState(body_candidates=body_candidates)
+        for statement in body:
+            self._tally_auto_pin_counts(statement, state=state)
+        address_taken = state.address_taken
+        ax_resident_uses = state.ax_resident_uses
+        body_candidates = state.body_candidates
+        counts = state.counts
+        index_uses = state.index_uses
+        init_count = state.init_count
+        init_expr = state.init_expr
+        other_uses = state.other_uses
+
+        candidate_names = {name for name, _ in body_candidates}
+        pre_store_clobbers: dict[str, dict[str, int]] = {name: {} for name in candidate_names}
+        written: dict[str, bool] = dict.fromkeys(candidate_names, False)
+        for statement in body:
+            self._tally_pre_store_clobbers(
+                statement,
+                candidate_names=candidate_names,
+                function_pointer_vars=function_pointer_vars,
+                pre_store_clobbers=pre_store_clobbers,
+                written=written,
+            )
+
+        self._collect_byte_typed_locals(body, byte_types=byte_types, byte_typed=byte_typed)
+
+        combined = self._rank_candidates(body_candidates, counts=counts) + self._rank_candidates(param_candidates, counts=counts)
+        combined = [
+            item
+            for item in combined
+            if not self._is_candidate_expression_temporary(
+                item[0],
+                ax_resident_uses=ax_resident_uses,
+                init_count=init_count,
+                init_expr=init_expr,
+                other_uses=other_uses,
+            )
+        ]
+        combined = [item for item in combined if item[0] not in address_taken]
+
+        return AutoPinEconomics(
+            address_taken=address_taken,
+            allocatable=frozenset(name for name, _ in combined),
+            byte_typed=frozenset(byte_typed),
+            index_uses=index_uses,
+            pre_store_clobbers=pre_store_clobbers,
+            ranked=combined,
+            reference_counts=counts,
+        )
+
     def _compute_pinned_initialized_per_call(self, ir_body: list, /) -> dict[int, frozenset[str]]:
         """Pre-pass: for each ir.Call / ir.CarryBranch, the may-defined pinned register set.
 
@@ -802,7 +1088,16 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         ``frozenset()`` — distinct from ``None`` which means "no
         analysis was performed" (AST path, naked function, etc.).
         """
-        pinned_locals: dict[str, str] = dict(self.pinned_register)
+        # Locals / params only: register-resident IR temps are pinned in
+        # self.pinned_register too, but their save-liveness is computed
+        # separately by :meth:`_compute_temp_pinned_live_per_call` (a
+        # temp is single-assignment, so a simple def/last-use range, not
+        # the may-defined-store dataflow locals need).  Excluding them
+        # here keeps the two analyses from double-counting; the per-call
+        # filters are unioned in :meth:`_merge_pinned_save_filters`.
+        pinned_locals: dict[str, str] = {
+            name: register for name, register in self.pinned_register.items() if name not in self.temp_pinned_registers
+        }
         if not pinned_locals:
             return {}
         initial: set[str] = set(self._prologue_initialized_pinned_registers())
@@ -847,6 +1142,95 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             for target_name in self._ir_instruction_store_targets(instruction):
                 if target_name in pinned_locals:
                     defined.add(pinned_locals[target_name])
+        return result
+
+    def _compute_temp_pinned_live_per_call(self, ir_body: list, /) -> dict[int, frozenset[str]]:
+        """Per-clobber-site map of temp-pinned registers that are live across the site.
+
+        Companion to :meth:`_compute_pinned_initialized_per_call` for the
+        register-resident IR temps :meth:`_allocate_ir_temps` produced
+        (recorded in :attr:`temp_pinned_registers`).  An IR temp is
+        single-assignment, so it is live across a clobbering call /
+        ``rep`` string-op / ``CarryBranch`` / ``TailCall`` iff that
+        site's index lies strictly after the temp's definition and at or
+        before its last use::
+
+            definition_index < site_index <= last_use_index
+
+        Temps live across a loop back-edge are handled conservatively:
+        any temp whose live range overlaps a loop region (a back-Jump
+        and its target label) is treated as live across EVERY clobber
+        site inside that region, mirroring the loop pre-merge in
+        :meth:`_compute_pinned_initialized_per_call`.  This errs toward
+        saving — a temp written once before the loop and read again on
+        the next iteration would otherwise look dead at a mid-loop call
+        on the source-order pass.
+
+        The result is folded into :attr:`_ir_call_pinned_initialized`
+        (built just before IR lowering) so :meth:`_pinned_registers_to_save`
+        pushes / pops a temp's register exactly across the sites it lives
+        across.  Returns a dict keyed by ``id(instruction)``; a site
+        absent from the dict has no live temp register.
+        """
+        if not self.temp_pinned_registers:
+            return {}
+        definition_index: dict[str, int] = {}
+        last_use_index: dict[str, int] = {}
+        use_indices: dict[str, list[int]] = {}
+        for index, instruction in enumerate(ir_body):
+            for target_name in self._ir_instruction_store_targets(instruction):
+                if target_name in self.temp_pinned_registers and target_name not in definition_index:
+                    definition_index[target_name] = index
+            for name in regalloc.instruction_uses(instruction=instruction):
+                if name in self.temp_pinned_registers:
+                    last_use_index[name] = index
+                    use_indices.setdefault(name, []).append(index)
+        # Loop carry: an IR temp is single-assignment, so its live range
+        # is exactly [definition, last-use] — NO loop extension is needed
+        # for a temp defined and consumed within one iteration (extending
+        # it backward to the loop head would mark it live across calls
+        # that PRECEDE its definition, over-saving its register and, when
+        # that inflates the save set past the pusha threshold, corrupting
+        # an after-call out_register capture via popa — the fd_read_file
+        # vfs_read_sec miscompile).  The only temp that genuinely lives
+        # across a loop back-edge is one with a use at or before its
+        # definition index (it reads the value the PREVIOUS iteration
+        # produced); extend just those across their enclosing loop.
+        label_positions: dict[str, int] = {}
+        for index, instruction in enumerate(ir_body):
+            if isinstance(instruction, ir.Label):
+                label_positions[instruction.name] = index
+        loop_ranges: list[tuple[int, int]] = []
+        for index, instruction in enumerate(ir_body):
+            if isinstance(instruction, ir.Jump):
+                target = label_positions.get(instruction.target)
+                if target is not None and target < index:
+                    loop_ranges.append((target, index))
+        live_definition = dict(definition_index)
+        live_last_use = dict(last_use_index)
+        for temp, define_at in definition_index.items():
+            if not any(use_at <= define_at for use_at in use_indices.get(temp, ())):
+                continue  # consumed after its def within the iteration; exact range
+            for start, end in loop_ranges:
+                if start <= define_at <= end:
+                    live_definition[temp] = min(live_definition[temp], start)
+                    live_last_use[temp] = max(live_last_use[temp], end)
+        # Record an entry for EVERY clobber site (even with no live
+        # temp) so the merged filter covers all sites: a site present in
+        # the filter with an empty temp contribution still anchors the
+        # precise locals set, whereas an absent site falls back to the
+        # conservative save-everything default — which would re-save a
+        # dead temp register when temps are the only pins.
+        result: dict[int, frozenset[str]] = {}
+        for index, instruction in enumerate(ir_body):
+            if not isinstance(instruction, (ir.Call, ir.CarryBranch, ir.RepString, ir.TailCall)):
+                continue
+            live_registers = {
+                self.temp_pinned_registers[temp]
+                for temp in live_definition
+                if live_definition[temp] < index <= live_last_use.get(temp, live_definition[temp])
+            }
+            result[id(instruction)] = frozenset(live_registers)
         return result
 
     def _dereference_place_width(self, place: DereferencePlace, /) -> int:
@@ -4564,85 +4948,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """
         if not self.safe_pin_registers:
             return {}
-        # Reset the switch-discriminant override set on every call: this
-        # function runs once during the pre-pass that computes per-callee
-        # register conventions and once per function body, and the body
-        # pass's :meth:`can_auto_pin` reads the set after this call.
-        self.switch_pin_overrides = set()
-
-        param_candidates: list[tuple[str, int]] = []
-        for order, param in enumerate(parameters):
-            if param.is_array:
-                continue
-            param_candidates.append((param.name, order))
-
-        body_candidates: list[tuple[str, int]] = []
-        function_pointer_vars: set[str] = self._collect_function_pointer_vars(body, parameters=parameters)
-
-        self._collect_auto_pin_body_candidates(body, body_candidates=body_candidates, top_level=True)
-
-        asm_operand_vars = self._collect_asm_operand_vars(body)
-        body_candidates = [(name, o) for name, o in body_candidates if name not in asm_operand_vars]
-
-        # ``ax_resident_uses`` (inside *state*) counts Var refs sitting
-        # on the LEFT of a comparison whose right side is an integer
-        # literal — those are exactly the sites ``emit_comparison``
-        # reuses an AX-resident value for via the ``ax_local`` fast
-        # path.  Right operands and non-cmp uses go to ``other_uses``
-        # because the left operand's expression eval clobbers AX before
-        # they're reached, so they need either a memory load or a pin.
-        state = AutoPinTallyState(body_candidates=body_candidates)
-        for statement in body:
-            self._tally_auto_pin_counts(statement, state=state)
-        address_taken = state.address_taken
-        ax_resident_uses = state.ax_resident_uses
-        body_candidates = state.body_candidates
-        counts = state.counts
-        index_uses = state.index_uses
-        init_count = state.init_count
-        init_expr = state.init_expr
-        other_uses = state.other_uses
-
-        # Per-candidate-per-register count of calls that ran BEFORE the
-        # candidate's first AST-level store.  PR #454's liveness pre-pass
-        # elides ``push <pin>`` / ``pop <pin>`` around those calls
-        # (the pin holds garbage), so the auto-pin cost gate subtracts
-        # them from ``register_clobber_counts`` per-candidate.
-        # Parameters are not tracked — the prologue counts as their first
-        # store, so every call in the body is post-store for them.
-        candidate_names = {name for name, _ in body_candidates}
-        pre_store_clobbers: dict[str, dict[str, int]] = {name: {} for name in candidate_names}
-        written: dict[str, bool] = dict.fromkeys(candidate_names, False)
-
-        for statement in body:
-            self._tally_pre_store_clobbers(
-                statement,
-                candidate_names=candidate_names,
-                function_pointer_vars=function_pointer_vars,
-                pre_store_clobbers=pre_store_clobbers,
-                written=written,
-            )
-
-        combined = self._rank_candidates(body_candidates, counts=counts) + self._rank_candidates(param_candidates, counts=counts)
-        # Drop expression-temporary vars: pinning them adds a 2-byte
-        # ``mov pin, ax`` after their single complex-expression
-        # initializer without shrinking the comparisons that follow
-        # (those already work against AX).
-        combined = [
-            item
-            for item in combined
-            if not self._is_candidate_expression_temporary(
-                item[0],
-                ax_resident_uses=ax_resident_uses,
-                init_count=init_count,
-                init_expr=init_expr,
-                other_uses=other_uses,
-            )
-        ]
-        # An auto-pinned register has no memory address; vars whose
-        # address is taken (``&x``) must live in a frame slot so
-        # ``_local_address`` can hand back a real pointer.
-        combined = [item for item in combined if item[0] not in address_taken]
+        economics = self._compute_pin_economics(body=body, parameters=parameters)
+        counts = economics.reference_counts
+        index_uses = economics.index_uses
+        pre_store_clobbers = economics.pre_store_clobbers
+        combined = economics.ranked
         assignments: dict[str, str] = {}
         available = list(self.safe_pin_registers)
         # ``register_holders``: register name -> list of pinned-var names
