@@ -277,6 +277,40 @@ def _is_migrated_access(node: ast_nodes.Node, /) -> bool:
     return isinstance(node, (ast_nodes.PlaceCall, ast_nodes.PlaceLoad, ast_nodes.PlaceStore))
 
 
+def _is_mixed_subscript_chain_store(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``name[i].member[j]... = leaf`` writes over a mixed subscript/member chain.
+
+    ``PlaceStore`` whose place is a :class:`~ast_nodes.SubscriptPlace` chain of
+    2+ simple subscripts — possibly separated by static
+    :class:`~ast_nodes.MemberPlace` segments — rooted at a
+    :class:`~ast_nodes.VariablePlace`.  Each subscript index is carried as a
+    distinct dynamic leaf in :attr:`Address.indices` (in source order, matching
+    :meth:`Builder._lower_subscript_chain_indices`); the static member offsets
+    and per-position element strides stay layout-derived at emission, where the
+    reconstructed ``PlaceStore`` reaches the EXACT ``_emit_place_store`` path
+    the :class:`Access` escape hatch fed.  Gated on simple indices
+    (:func:`_is_simple_index`) and a byte-safe leaf RHS
+    (:func:`_is_byte_safe_store_rhs`) so every re-seated node round-trips to
+    the exact AST sub-expression the legacy store walked inline — byte-neutral.
+    ``symbol_table[index].name[n] = src`` / ``= 0`` in ``asm.c`` ``symbol_add``
+    are the real consumers; compound-index or compound-RHS chains stay on
+    :class:`Access` (the byte gate is the backstop).
+    """
+    if not (isinstance(node, ast_nodes.PlaceStore) and isinstance(node.place, ast_nodes.SubscriptPlace)):
+        return False
+    if not _is_byte_safe_store_rhs(node.value):
+        return False
+    subscript_count = 0
+    current: ast_nodes.Node = node.place
+    while isinstance(current, (ast_nodes.MemberPlace, ast_nodes.SubscriptPlace)):
+        if isinstance(current, ast_nodes.SubscriptPlace):
+            if not _is_simple_index(current.index):
+                return False
+            subscript_count += 1
+        current = current.base
+    return subscript_count >= 2 and isinstance(current, ast_nodes.VariablePlace)
+
+
 def _is_nested_named_subscript_chain(place: ast_nodes.Node, /) -> bool:
     """Return True for a left-nested ``name[i][j]...`` subscript chain over an addressable base.
 
@@ -1433,6 +1467,25 @@ class Builder:
                     Address(base_value=place.pointer.name, destination=address_temp, indices=(), shape=place),
                     Store(address=address_temp, value=store_value, width=0),
                 ])
+            case ast_nodes.PlaceStore(place=place, value=value) if _is_mixed_subscript_chain_store(stmt):
+                # ``name[i].member[j]... = leaf`` write over a mixed
+                # subscript/member chain rooted at a named variable.  Every
+                # simple subscript index is a distinct dynamic leaf on
+                # ``Address.indices`` (source order); the static member
+                # offsets ride the ``shape`` and accumulate at emission, where
+                # ``_reseat_nested_subscript_indices`` rebuilds the chain and
+                # drives the EXACT legacy ``_emit_place_store`` path.  The
+                # byte-safe leaf RHS emits no preceding instruction, so the
+                # RHS-vs-address ordering matches the legacy store
+                # byte-for-byte (``symbol_table[index].name[n] = src`` in
+                # ``asm.c`` ``symbol_add``).
+                indices = self._lower_subscript_chain_indices(place=place, out=out, strings=strings)
+                store_value = self._build_expr(expr=value, out=out, strings=strings)
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, indices=indices, shape=place),
+                    Store(address=address_temp, value=store_value, width=0),
+                ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_struct_array_member_store(stmt):
                 # ``array[index].member = leaf`` write — the dynamic-index store
                 # twin of slice 4's struct-array load (Stage 3b.1 slice 5).  The
@@ -1681,19 +1734,22 @@ class Builder:
         place: ast_nodes.SubscriptPlace,
         strings: list[tuple[str, str]],
     ) -> tuple[Value, ...]:
-        """Lower a nested ``name[i][j]...`` chain's subscript indices to a dimension-ordered tuple.
+        """Lower a nested ``name[i][j]...`` chain's subscript indices to a source-ordered tuple.
 
         Walks the left-nested :class:`~ast_nodes.SubscriptPlace` chain
-        innermost-first, prepending so the collected indices land in
-        outermost-dimension-first order (the order the row-major Horner walk
-        in ``_emit_multidim_subscript_address`` consumes), and lowers each
-        index through :meth:`_build_expr`.  Returns the per-dimension
-        :data:`Value` tuple carried on :attr:`Address.indices`.
+        innermost-first — passing through any static
+        :class:`~ast_nodes.MemberPlace` segments (``table[i].name[j]``), which
+        carry no dynamic leaf — prepending so the collected indices land in
+        source order (outermost-dimension-first for a pure multidim chain, the
+        order the row-major Horner walk in ``_emit_multidim_subscript_address``
+        consumes), and lowers each index through :meth:`_build_expr`.  Returns
+        the per-subscript :data:`Value` tuple carried on :attr:`Address.indices`.
         """
         index_nodes: list[ast_nodes.Node] = []
         current: ast_nodes.Node = place
-        while isinstance(current, ast_nodes.SubscriptPlace):
-            index_nodes.insert(0, current.index)
+        while isinstance(current, (ast_nodes.MemberPlace, ast_nodes.SubscriptPlace)):
+            if isinstance(current, ast_nodes.SubscriptPlace):
+                index_nodes.insert(0, current.index)
             current = current.base
         return tuple(self._build_expr(expr=index_node, out=out, strings=strings) for index_node in index_nodes)
 

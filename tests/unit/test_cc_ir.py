@@ -134,6 +134,21 @@ def test_load_store_uses_and_side_effects() -> None:
     assert _has_side_effects(store)
 
 
+def test_mixed_subscript_member_chain_store_lowers_to_address_and_store() -> None:
+    """``table[i].name[j] = src`` folds onto one Address carrying both chain indices + Store."""
+    body = _build_function_body(
+        "struct entry { char name[8]; int value; };\nstruct entry table[4];\nvoid f(int i, int j, int src) { table[i].name[j] = src; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    addresses = [op for op in body if isinstance(op, ir.Address)]
+    assert len(addresses) == 1, f"expected exactly one ir.Address, got {kinds}"
+    assert addresses[0].indices == ("i", "j"), f"expected source-order index tuple, got {addresses[0].indices}"
+    assert any(isinstance(op, ir.Store) for op in body), f"expected an ir.Store op, got {kinds}"
+    # The mixed-chain store no longer rides the AST escape hatch.
+    assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"mixed-chain store must not ride Block/Access, got {kinds}"
+
+
 def test_multidim_subscript_load_lowers_to_address_with_index_tuple() -> None:
     """``m[i][j]`` migrates off Access onto one Address carrying a 2-index tuple + Load."""
     body = _build_function_body(

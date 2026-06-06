@@ -2254,26 +2254,36 @@ class EmissionMixin:
     def _reseat_nested_subscript_indices(self, shape: Node, indices: tuple[ir.Value, ...]) -> Node:
         """Re-seat an N-tuple of pre-lowered indices into a nested ``name[i][j]...`` shape.
 
-        ``shape`` is a left-nested :class:`SubscriptPlace` chain (Stage 3b.1
-        multidim load/store); ``indices`` carries one pre-lowered :data:`Value`
-        per subscript position in outermost-dimension-first order.  Walks the
-        chain innermost-first, prepending so the collected subscripts land in
-        dimension order, then rebuilds the chain bottom-up over the unchanged
-        root, re-seating each subscript's index via :meth:`_ir_value_to_ast`.
-        For a simple-var / constant index the round-trip reconstructs the exact
-        node ``resolve_address`` walked inline, so the rebuilt place is
-        structurally identical to the original and the row-major address
-        computation stays byte-identical; a compound index (rejected at
-        lowering today) would arrive as a register-resident temp ``Var``.
+        ``shape`` is a left-nested :class:`SubscriptPlace` chain — possibly
+        with static :class:`MemberPlace` segments between subscripts
+        (``table[i].name[j]``), which carry no dynamic leaf — and ``indices``
+        carries one pre-lowered :data:`Value` per subscript position in source
+        order (Stage 3b.1 multidim / mixed-chain load/store).  Walks the chain
+        innermost-first, prepending so the collected segments land in source
+        order, then rebuilds the chain bottom-up over the unchanged root,
+        re-seating each subscript's index via :meth:`_ir_value_to_ast`.  For a
+        simple-var / constant index the round-trip reconstructs the exact node
+        ``resolve_address`` walked inline, so the rebuilt place is structurally
+        identical to the original and the address computation stays
+        byte-identical; a compound index (rejected at lowering today) would
+        arrive as a register-resident temp ``Var``.
         """
-        subscripts: list[Node] = []
+        segments: list[Node] = []
         current: Node = shape
-        while isinstance(current, SubscriptPlace):
-            subscripts.insert(0, current)
+        while isinstance(current, (MemberPlace, SubscriptPlace)):
+            segments.insert(0, current)
             current = current.base
+        subscript_count = sum(1 for segment in segments if isinstance(segment, SubscriptPlace))
+        if subscript_count != len(indices):
+            message = f"Address carries {len(indices)} indices but its shape has {subscript_count} subscripts"
+            raise ValueError(message)
         rebuilt = current
-        for subscript, index_value in zip(subscripts, indices, strict=True):
-            rebuilt = replace(subscript, base=rebuilt, index=self._ir_value_to_ast(index_value))
+        index_iterator = iter(indices)
+        for segment in segments:
+            if isinstance(segment, SubscriptPlace):
+                rebuilt = replace(segment, base=rebuilt, index=self._ir_value_to_ast(next(index_iterator)))
+            else:
+                rebuilt = replace(segment, base=rebuilt)
         return rebuilt
 
     @staticmethod
