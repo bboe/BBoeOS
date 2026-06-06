@@ -165,7 +165,9 @@ def _has_side_effects(instruction: ir.Instruction, /) -> bool:
             ir.BranchFalse,
             ir.Call,
             ir.CarryBranch,
+            ir.IncrementDecrement,
             ir.IndexAssign,
+            ir.IndirectCall,
             ir.InlineAsm,
             ir.Jump,
             ir.Label,
@@ -207,6 +209,8 @@ def _instruction_value_operands(instruction: ir.Instruction, /) -> tuple[ir.Valu
         return (instruction.left, instruction.right)
     if isinstance(instruction, ir.Copy):
         return (instruction.source,)
+    if isinstance(instruction, ir.IncrementDecrement):
+        return (instruction.address,)
     if isinstance(instruction, ir.Load):
         return (instruction.address,)
     if isinstance(instruction, ir.Store):
@@ -217,6 +221,8 @@ def _instruction_value_operands(instruction: ir.Instruction, /) -> tuple[ir.Valu
         return (instruction.index,)
     if isinstance(instruction, ir.IndexAssign):
         return (instruction.index, instruction.source)
+    if isinstance(instruction, ir.IndirectCall):
+        return (instruction.address,)
     if isinstance(instruction, ir.BranchFalse):
         return (instruction.left, instruction.right)
     if isinstance(instruction, ir.RepString):
@@ -380,6 +386,10 @@ def _substitute_value(instruction: ir.Instruction, /, *, source: ir.Value, targe
         if instruction.source != target:
             return instruction
         return dataclasses.replace(instruction, source=source)
+    if isinstance(instruction, ir.IncrementDecrement):
+        if instruction.address != target:
+            return instruction
+        return dataclasses.replace(instruction, address=source)
     if isinstance(instruction, ir.Call):
         if target not in instruction.args:
             return instruction
@@ -409,6 +419,10 @@ def _substitute_value(instruction: ir.Instruction, /, *, source: ir.Value, targe
             index=source if instruction.index == target else instruction.index,
             source=source if instruction.source == target else instruction.source,
         )
+    if isinstance(instruction, ir.IndirectCall):
+        if instruction.address != target:
+            return instruction
+        return dataclasses.replace(instruction, address=source)
     if isinstance(instruction, ir.BranchFalse):
         if target not in (instruction.left, instruction.right):
             return instruction

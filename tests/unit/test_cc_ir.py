@@ -79,6 +79,21 @@ def test_arrow_member_address_of_lowers_to_address_of_op() -> None:
     assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"address-of must not ride Block/Access, got {kinds}"
 
 
+def test_arrow_member_increment_lowers_to_increment_decrement_op() -> None:
+    """``s->len++`` in statement position migrates off Block onto Address + IncrementDecrement."""
+    body = _build_function_body(
+        "struct sink { int len; };\nvoid f(struct sink *s) { s->len++; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    increments = [op for op in body if isinstance(op, ir.IncrementDecrement)]
+    assert len(increments) == 1, f"expected exactly one ir.IncrementDecrement, got {kinds}"
+    assert increments[0].delta == 1
+    assert any(isinstance(op, ir.Address) for op in body), f"expected an ir.Address op, got {kinds}"
+    # The member increment no longer rides the AST escape hatch.
+    assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"member increment must not ride Block/Access, got {kinds}"
+
+
 def test_every_instruction_subclass_declares_value_fields() -> None:
     """Every member of :data:`cc.ir.Instruction` declares ``VALUE_FIELDS``.
 
@@ -93,6 +108,19 @@ def test_every_instruction_subclass_declares_value_fields() -> None:
     assert missing == [], f"missing VALUE_FIELDS: {[cls.__name__ for cls in missing]}"
 
 
+def test_increment_decrement_op_uses_and_side_effects() -> None:
+    """IncrementDecrement reads its address, defines nothing, and is side-effecting."""
+    from cc.ir_optimize import _has_side_effects, _instruction_destination  # noqa: PLC0415, PLC2701
+    from cc.regalloc import _instruction_defs, _instruction_uses  # noqa: PLC0415, PLC2701
+
+    increment = ir.IncrementDecrement(address="_ir_1", delta=1, is_postfix=True)
+    assert ir.IncrementDecrement.VALUE_FIELDS == ("address",)
+    assert _instruction_uses(instruction=increment) == ("_ir_1",)
+    assert _instruction_defs(instruction=increment) == ()
+    assert _instruction_destination(increment) is None
+    assert _has_side_effects(increment)
+
+
 def test_load_store_uses_and_side_effects() -> None:
     """Load reads its address; Store reads address+value and is side-effecting."""
     from cc.ir_optimize import _has_side_effects  # noqa: PLC0415, PLC2701
@@ -104,6 +132,37 @@ def test_load_store_uses_and_side_effects() -> None:
     assert set(_instruction_uses(instruction=store)) == {"_ir_1", "_ir_3"}
     assert not _has_side_effects(load)
     assert _has_side_effects(store)
+
+
+def test_member_store_with_member_load_rhs_lowers_to_load_then_store() -> None:
+    """``p->next = q->prev`` (PlaceLoad RHS) folds: the RHS Load's temp feeds the Store value."""
+    body = _build_function_body(
+        "struct node { struct node *next; struct node *prev; };\nvoid f(struct node *p, struct node *q) { p->next = q->prev; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    loads = [op for op in body if isinstance(op, ir.Load)]
+    stores = [op for op in body if isinstance(op, ir.Store)]
+    assert len(loads) == 1, f"expected exactly one ir.Load, got {kinds}"
+    assert len(stores) == 1, f"expected exactly one ir.Store, got {kinds}"
+    assert stores[0].value == loads[0].destination, "the Store must consume the RHS Load's temp"
+    # Neither side rides the AST escape hatch.
+    assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"store with load RHS must not ride Block/Access, got {kinds}"
+
+
+def test_mixed_subscript_member_chain_store_lowers_to_address_and_store() -> None:
+    """``table[i].name[j] = src`` folds onto one Address carrying both chain indices + Store."""
+    body = _build_function_body(
+        "struct entry { char name[8]; int value; };\nstruct entry table[4];\nvoid f(int i, int j, int src) { table[i].name[j] = src; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    addresses = [op for op in body if isinstance(op, ir.Address)]
+    assert len(addresses) == 1, f"expected exactly one ir.Address, got {kinds}"
+    assert addresses[0].indices == ("i", "j"), f"expected source-order index tuple, got {addresses[0].indices}"
+    assert any(isinstance(op, ir.Store) for op in body), f"expected an ir.Store op, got {kinds}"
+    # The mixed-chain store no longer rides the AST escape hatch.
+    assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"mixed-chain store must not ride Block/Access, got {kinds}"
 
 
 def test_multidim_subscript_load_lowers_to_address_with_index_tuple() -> None:
@@ -139,6 +198,24 @@ def test_struct_field_multidim_load_lowers_to_member_rooted_address() -> None:
     assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), (
         f"struct-field multidim load must not ride Block/Access, got {kinds}"
     )
+
+
+def test_subscript_call_lowers_to_address_and_indirect_call() -> None:
+    """``handlers[--count]();`` folds onto Address + IndirectCall and leaves the Access hatch."""
+    body = _build_function_body(
+        "void (*handlers[4])(void);\nint count;\nvoid f(void) { handlers[--count](); }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    addresses = [op for op in body if isinstance(op, ir.Address)]
+    indirect_calls = [op for op in body if isinstance(op, ir.IndirectCall)]
+    assert len(addresses) == 1, f"expected exactly one ir.Address, got {kinds}"
+    assert len(addresses[0].indices) == 1, f"expected a single pre-lowered index leaf, got {addresses[0].indices}"
+    assert len(indirect_calls) == 1, f"expected exactly one ir.IndirectCall, got {kinds}"
+    assert indirect_calls[0].address == addresses[0].destination
+    # The call itself no longer rides the AST escape hatch (the compound
+    # index pre-lowering may still emit a Block for the -- assign).
+    assert not any(isinstance(op, ir.Access) for op in body), f"subscript call must not ride Access, got {kinds}"
 
 
 def test_substitute_value_rewrites_access_ops() -> None:

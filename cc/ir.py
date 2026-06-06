@@ -64,6 +64,31 @@ def _is_arrow_member_address_of(node: ast_nodes.Node, /) -> bool:
     )
 
 
+def _is_arrow_member_increment_decrement(node: ast_nodes.Node, /) -> bool:
+    """Return True for statement-position ``pointer->member++`` / ``--`` on a plain pointer variable.
+
+    ``PlaceIncrementDecrement(MemberPlace(DereferencePlace(VariablePlace(p)),
+    field))`` is the read-modify-write twin of :func:`_is_arrow_member_store`:
+    the chain breaks at the dereference, so the segment's ``base_value`` is the
+    pointer ``Value`` (the name ``"p"``), which emission re-materializes
+    IDENTICALLY to the inline ``generate_expression`` the legacy increment path
+    runs.  Only the discarded-value STATEMENT form folds (``_build_stmt``); a
+    value-position increment (``x = s->len++``) arrives Assign-wrapped in
+    ``_build_expr`` and stays on :class:`Block` unchanged.  Bare
+    ``VariablePlace`` increments also stay on :class:`Block` — they back the
+    loop induction-variable matchers in ``cc.loops`` (the Stage 3b.2 rewrite).
+    Stage 3b.1 lowers exactly this shape onto :class:`Address` +
+    :class:`IncrementDecrement` (``s->len++`` in ``stdio.c`` ``_emit`` is the
+    real consumer).
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceIncrementDecrement)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.DereferencePlace)
+        and isinstance(node.place.base.pointer, ast_nodes.VariablePlace)
+    )
+
+
 def _is_arrow_member_load(node: ast_nodes.Node, /) -> bool:
     """Return True for ``pointer->member`` reads on a plain pointer variable.
 
@@ -161,36 +186,53 @@ def _is_arrow_member_store(node: ast_nodes.Node, /) -> bool:
 
 
 def _is_byte_safe_store_rhs(node: ast_nodes.Node, /) -> bool:
-    """Return True for a member-store RHS that :meth:`_build_expr` lowers with no emitted code.
+    """Return True for a member-store RHS whose IR pre-lowering is measured byte-neutral.
 
     ``Int`` / ``Var`` / ``String`` / ``&variable`` are the leaves
     :meth:`_build_expr` returns directly as an :data:`Value` (an immediate, a
     name, a string label, or a passed-through ``PlaceAddressOf``) WITHOUT
-    appending any preceding instruction.  Restricting member-store migration to
-    these leaves keeps the RHS-vs-address evaluation ordering byte-identical to
-    the legacy store: ``_ir_value_to_ast`` round-trips the leaf back to the
-    exact AST node the legacy ``_emit_place_store`` evaluated in place, so no
-    spill/reload is introduced.
+    appending any preceding instruction: ``_ir_value_to_ast`` round-trips the
+    leaf back to the exact AST node the legacy ``_emit_place_store`` evaluated
+    in place, so no spill/reload is introduced.
 
-    A COMPOUND RHS stays excluded — re-measured in Stage 3b.1 slice 5 on top of
-    PR #587's IR-temp register allocator and confirmed STILL byte-regressing.
-    The legacy ``_emit_place_store`` computes the RHS directly into the
-    accumulator and stores it through the freshly materialized address; lifting
-    the RHS to an IR temp evaluated BEFORE the address forces the allocator to
-    spill the temp to a frame slot and reload it, because resolving the store
-    address — and any RHS sub-computation that clobbers a scratch register, e.g.
-    ``div``'s ``edx`` — reuses the register the temp would otherwise live in.
-    Measured deltas admitting a ``BinaryOperation`` RHS: ``tv->tv_sec =
-    total_ms / 1000`` grew +21 bytes (an ``eax`` spill/reload plus a
-    ``push``/``pop edx`` around the ``div``), with further regressions in
-    ``readdir`` / ``_emit_str`` / ``release`` / ``malloc`` / ``symbol_add`` /
-    ``strtol``.  Unlike a compound subscript INDEX leaf (slice 4) — which the
-    allocator keeps register-resident because it is consumed IMMEDIATELY by the
-    address scale — a compound RHS must stay live ACROSS the address resolution,
-    so its live range crosses the clobber and the allocator cannot save it.  A
-    compound RHS therefore keeps the store on :class:`Access`.
+    ``PlaceLoad`` is the one COMPOUND RHS class measured byte-neutral
+    (Stage 3b.1, gate 0-delta over all 361 functions): the RHS member load
+    lowers to its own ``Address`` + ``Load`` whose temp lands in the
+    accumulator immediately before the store consumes it — exactly the register
+    the legacy inline RHS evaluation left it in — and the allocator keeps the
+    single-use temp register-resident (``block->next->prev = block->prev`` in
+    ``stdlib.c`` ``release`` / ``malloc``).
+
+    Every other compound RHS stays excluded — re-measured in Stage 3b.1
+    slice 5 on top of PR #587's IR-temp register allocator and confirmed STILL
+    byte-regressing.  The legacy ``_emit_place_store`` computes the RHS
+    directly into the accumulator and stores it through the freshly
+    materialized address; lifting the RHS to an IR temp evaluated BEFORE the
+    address forces the allocator to spill the temp to a frame slot and reload
+    it, because resolving the store address — and any RHS sub-computation that
+    clobbers a scratch register, e.g.  ``div``'s ``edx`` — reuses the register
+    the temp would otherwise live in.  Measured deltas: ``BinaryOperation``
+    RHS ``tv->tv_sec = total_ms / 1000`` grew +21 bytes (an ``eax``
+    spill/reload plus a ``push``/``pop edx`` around the ``div``), with further
+    regressions in ``readdir`` / ``_emit_str`` / ``release`` / ``malloc`` /
+    ``symbol_add`` / ``strtol``; ``Index`` RHS grew ``readdir`` +2; ``Cast``
+    RHS grew ``readdir`` +6 even over a bare-leaf inner expression — the cast
+    picks the store width, which the bare ``Value`` round-trip drops.  Unlike
+    a compound subscript INDEX leaf (slice 4) — which the allocator keeps
+    register-resident because it is consumed IMMEDIATELY by the address scale —
+    a general compound RHS must stay live ACROSS the address resolution, so
+    its live range crosses the clobber and the allocator cannot save it.
+    These RHS classes keep the store on :class:`Access`.
+
+    Every excluded delta is an EXPECTED FUTURE BYTE REDUCTION, not a design
+    cost: the regressions are artifacts of re-seating shapes through the
+    opaque legacy emitter (invisible clobbers; width dropped by the ``Value``
+    round-trip) and are expected to fall to 0-delta-or-shrink once the
+    native-Address emission refactor lands.  The class-by-class ledger — each
+    with its re-admit-and-gate verification check — lives on ``design-specs``:
+    ``2026-06-06-cc-native-address-emission-expected-byte-reductions.md``.
     """
-    return isinstance(node, (ast_nodes.Int, ast_nodes.String, ast_nodes.Var)) or (
+    return isinstance(node, (ast_nodes.Int, ast_nodes.PlaceLoad, ast_nodes.String, ast_nodes.Var)) or (
         isinstance(node, ast_nodes.PlaceAddressOf) and isinstance(node.place, ast_nodes.VariablePlace)
     )
 
@@ -250,6 +292,40 @@ def _is_migrated_access(node: ast_nodes.Node, /) -> bool:
     ``cc.loops``); see the Stage 1 plan's Scope boundary.
     """
     return isinstance(node, (ast_nodes.PlaceCall, ast_nodes.PlaceLoad, ast_nodes.PlaceStore))
+
+
+def _is_mixed_subscript_chain_store(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``name[i].member[j]... = leaf`` writes over a mixed subscript/member chain.
+
+    ``PlaceStore`` whose place is a :class:`~ast_nodes.SubscriptPlace` chain of
+    2+ simple subscripts — possibly separated by static
+    :class:`~ast_nodes.MemberPlace` segments — rooted at a
+    :class:`~ast_nodes.VariablePlace`.  Each subscript index is carried as a
+    distinct dynamic leaf in :attr:`Address.indices` (in source order, matching
+    :meth:`Builder._lower_subscript_chain_indices`); the static member offsets
+    and per-position element strides stay layout-derived at emission, where the
+    reconstructed ``PlaceStore`` reaches the EXACT ``_emit_place_store`` path
+    the :class:`Access` escape hatch fed.  Gated on simple indices
+    (:func:`_is_simple_index`) and a byte-safe leaf RHS
+    (:func:`_is_byte_safe_store_rhs`) so every re-seated node round-trips to
+    the exact AST sub-expression the legacy store walked inline — byte-neutral.
+    ``symbol_table[index].name[n] = src`` / ``= 0`` in ``asm.c`` ``symbol_add``
+    are the real consumers; compound-index or compound-RHS chains stay on
+    :class:`Access` (the byte gate is the backstop).
+    """
+    if not (isinstance(node, ast_nodes.PlaceStore) and isinstance(node.place, ast_nodes.SubscriptPlace)):
+        return False
+    if not _is_byte_safe_store_rhs(node.value):
+        return False
+    subscript_count = 0
+    current: ast_nodes.Node = node.place
+    while isinstance(current, (ast_nodes.MemberPlace, ast_nodes.SubscriptPlace)):
+        if isinstance(current, ast_nodes.SubscriptPlace):
+            if not _is_simple_index(current.index):
+                return False
+            subscript_count += 1
+        current = current.base
+    return subscript_count >= 2 and isinstance(current, ast_nodes.VariablePlace)
 
 
 def _is_nested_named_subscript_chain(place: ast_nodes.Node, /) -> bool:
@@ -397,6 +473,30 @@ def _is_struct_array_member_store(node: ast_nodes.Node, /) -> bool:
     )
 
 
+def _is_subscript_call(node: ast_nodes.Node, /) -> bool:
+    """Return True for statement-position ``name[index]()`` no-argument calls.
+
+    ``PlaceCall(SubscriptPlace(VariablePlace), args=[])`` — a call through a
+    function-pointer slot of a bare array variable.  The subscript index may be
+    COMPOUND (the slice-4 precedent: an index temp is consumed IMMEDIATELY by
+    the address scale, so the allocator keeps it register-resident —
+    ``_atexit_fns[--_atexit_count]()`` in ``stdlib.c`` ``exit`` is the real
+    consumer and the byte gate the proof).  Emission re-seats the index into
+    the ``shape`` and drives the EXACT legacy function-pointer call statement
+    path, which folds the slot load and the call into one ``call [table +
+    reg*4]`` instruction — hence :class:`IndirectCall` consumes the SLOT
+    :class:`Address`, not a pre-loaded pointer.  Gated on zero arguments and
+    discarded result (statement position): argument evaluation ordering and
+    the result store stay on :class:`Access` until a consumer surfaces.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceCall)
+        and not node.args
+        and isinstance(node.place, ast_nodes.SubscriptPlace)
+        and isinstance(node.place.base, ast_nodes.VariablePlace)
+    )
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class Access(_NoValueFields):
     """Complex-lvalue access (PlaceLoad / PlaceStore / PlaceCall).
@@ -538,6 +638,26 @@ class Copy:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class IncrementDecrement:
+    """*(address) += delta — statement-position read-modify-write at a resolved :class:`Address`.
+
+    The discarded-value ``place++`` / ``place--`` / ``++place`` / ``--place``
+    statement.  ``delta`` is ``+1`` or ``-1``; ``is_postfix`` is carried only so
+    emission can rebuild the exact source :class:`ast_nodes.PlaceIncrementDecrement`
+    (pre vs post is indistinguishable once the value is discarded).
+    Side-effecting like :class:`Store`: never eliminated by DCE, and a memory
+    barrier that :class:`Load` / :class:`AddressOf` must not be reordered or
+    CSE'd across (Stage 3b's conservative treatment).
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("address",)
+
+    address: Value
+    delta: int
+    is_postfix: bool
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Index:
     """destination = base[index] — array / pointer read."""
 
@@ -557,6 +677,27 @@ class IndexAssign:
     base: str
     index: Value
     source: Value
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class IndirectCall:
+    """call [address] — discarded-result call through the function pointer stored at a resolved :class:`Address`.
+
+    The statement-position ``place()`` no-argument call through a
+    function-pointer slot (``handlers[index]()``).  The single x86
+    instruction loads and calls through the slot in one step, so the op
+    consumes the SLOT address, not a pre-loaded pointer value.
+    Side-effecting like :class:`Call`: never eliminated by DCE, and a memory
+    barrier that :class:`Load` / :class:`AddressOf` must not be reordered or
+    CSE'd across (Stage 3b's conservative treatment).  Caller-saved-register
+    correctness rides emission's conservative pinned-register saves (the same
+    default the :class:`Access`-resident call used), so the op deliberately
+    stays out of regalloc's ``_CALL_TYPES`` save-cost counter for byte parity.
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("address",)
+
+    address: Value
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -729,8 +870,10 @@ Instruction = (
     | Call
     | CarryBranch
     | Copy
+    | IncrementDecrement
     | Index
     | IndexAssign
+    | IndirectCall
     | InlineAsm
     | Jump
     | Label
@@ -1301,6 +1444,38 @@ class Builder:
                     out=out,
                     strings=strings,
                 )
+            case ast_nodes.PlaceCall(place=place) if _is_subscript_call(stmt):
+                # Statement-position ``name[index]()`` no-argument call through
+                # a function-pointer slot.  The index — compound allowed, the
+                # slice-4 immediate-consumption precedent — pre-lowers to the
+                # segment's only dynamic leaf on ``Address.indices``; emission
+                # re-seats it into the ``shape`` and drives the EXACT legacy
+                # function-pointer call path, which loads and calls through the
+                # slot in one ``call [table + reg*4]`` instruction
+                # (``_atexit_fns[--_atexit_count]()`` in ``stdlib.c`` ``exit``).
+                index_value = self._build_expr(expr=place.index, out=out, strings=strings)
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, indices=(index_value,), shape=place),
+                    IndirectCall(address=address_temp),
+                ])
+            case ast_nodes.PlaceIncrementDecrement(place=place) if _is_arrow_member_increment_decrement(stmt):
+                # Statement-position ``pointer->member++`` / ``--`` on a plain
+                # pointer variable.  The dereference breaks the chain: the
+                # segment's ``base_value`` is the pointer var ``Value`` (the
+                # name ``"s"``), mirroring the arrow store slice.  Emission
+                # rebuilds the exact source ``PlaceIncrementDecrement`` from the
+                # ``shape`` + ``delta`` / ``is_postfix`` and drives the EXISTING
+                # statement increment path, so the read-modify-write sequence
+                # (including a single-instruction ``inc``/``dec`` on memory) is
+                # byte-identical; the ``Address`` makes the pointer use and the
+                # memory write visible to the optimizer (``s->len++`` in
+                # ``stdio.c`` ``_emit``).
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=place.base.pointer.name, destination=address_temp, indices=(), shape=place),
+                    IncrementDecrement(address=address_temp, delta=stmt.delta, is_postfix=stmt.is_postfix),
+                ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_arrow_member_member_store(stmt):
                 # ``pointer->outer.inner = leaf`` write — the multi-level store
                 # twin of the slice 6 load.  One chain-break at the plain-pointer
@@ -1368,6 +1543,25 @@ class Builder:
                 address_temp = self._tmp()
                 out.extend([
                     Address(base_value=place.pointer.name, destination=address_temp, indices=(), shape=place),
+                    Store(address=address_temp, value=store_value, width=0),
+                ])
+            case ast_nodes.PlaceStore(place=place, value=value) if _is_mixed_subscript_chain_store(stmt):
+                # ``name[i].member[j]... = leaf`` write over a mixed
+                # subscript/member chain rooted at a named variable.  Every
+                # simple subscript index is a distinct dynamic leaf on
+                # ``Address.indices`` (source order); the static member
+                # offsets ride the ``shape`` and accumulate at emission, where
+                # ``_reseat_nested_subscript_indices`` rebuilds the chain and
+                # drives the EXACT legacy ``_emit_place_store`` path.  The
+                # byte-safe leaf RHS emits no preceding instruction, so the
+                # RHS-vs-address ordering matches the legacy store
+                # byte-for-byte (``symbol_table[index].name[n] = src`` in
+                # ``asm.c`` ``symbol_add``).
+                indices = self._lower_subscript_chain_indices(place=place, out=out, strings=strings)
+                store_value = self._build_expr(expr=value, out=out, strings=strings)
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, indices=indices, shape=place),
                     Store(address=address_temp, value=store_value, width=0),
                 ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_struct_array_member_store(stmt):
@@ -1618,19 +1812,22 @@ class Builder:
         place: ast_nodes.SubscriptPlace,
         strings: list[tuple[str, str]],
     ) -> tuple[Value, ...]:
-        """Lower a nested ``name[i][j]...`` chain's subscript indices to a dimension-ordered tuple.
+        """Lower a nested ``name[i][j]...`` chain's subscript indices to a source-ordered tuple.
 
         Walks the left-nested :class:`~ast_nodes.SubscriptPlace` chain
-        innermost-first, prepending so the collected indices land in
-        outermost-dimension-first order (the order the row-major Horner walk
-        in ``_emit_multidim_subscript_address`` consumes), and lowers each
-        index through :meth:`_build_expr`.  Returns the per-dimension
-        :data:`Value` tuple carried on :attr:`Address.indices`.
+        innermost-first — passing through any static
+        :class:`~ast_nodes.MemberPlace` segments (``table[i].name[j]``), which
+        carry no dynamic leaf — prepending so the collected indices land in
+        source order (outermost-dimension-first for a pure multidim chain, the
+        order the row-major Horner walk in ``_emit_multidim_subscript_address``
+        consumes), and lowers each index through :meth:`_build_expr`.  Returns
+        the per-subscript :data:`Value` tuple carried on :attr:`Address.indices`.
         """
         index_nodes: list[ast_nodes.Node] = []
         current: ast_nodes.Node = place
-        while isinstance(current, ast_nodes.SubscriptPlace):
-            index_nodes.insert(0, current.index)
+        while isinstance(current, (ast_nodes.MemberPlace, ast_nodes.SubscriptPlace)):
+            if isinstance(current, ast_nodes.SubscriptPlace):
+                index_nodes.insert(0, current.index)
             current = current.base
         return tuple(self._build_expr(expr=index_node, out=out, strings=strings) for index_node in index_nodes)
 
