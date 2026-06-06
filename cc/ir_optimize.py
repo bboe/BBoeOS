@@ -165,6 +165,7 @@ def _has_side_effects(instruction: ir.Instruction, /) -> bool:
             ir.BranchFalse,
             ir.Call,
             ir.CarryBranch,
+            ir.IncrementDecrement,
             ir.IndexAssign,
             ir.InlineAsm,
             ir.Jump,
@@ -207,6 +208,8 @@ def _instruction_value_operands(instruction: ir.Instruction, /) -> tuple[ir.Valu
         return (instruction.left, instruction.right)
     if isinstance(instruction, ir.Copy):
         return (instruction.source,)
+    if isinstance(instruction, ir.IncrementDecrement):
+        return (instruction.address,)
     if isinstance(instruction, ir.Load):
         return (instruction.address,)
     if isinstance(instruction, ir.Store):
@@ -380,6 +383,10 @@ def _substitute_value(instruction: ir.Instruction, /, *, source: ir.Value, targe
         if instruction.source != target:
             return instruction
         return dataclasses.replace(instruction, source=source)
+    if isinstance(instruction, ir.IncrementDecrement):
+        if instruction.address != target:
+            return instruction
+        return dataclasses.replace(instruction, address=source)
     if isinstance(instruction, ir.Call):
         if target not in instruction.args:
             return instruction

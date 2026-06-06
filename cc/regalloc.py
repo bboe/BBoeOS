@@ -49,6 +49,7 @@ _MODELED_VALUE_TYPES = (
     ir.BranchFalse,
     ir.Call,
     ir.Copy,
+    ir.IncrementDecrement,
     ir.Index,
     ir.IndexAssign,
     ir.Load,

@@ -79,6 +79,21 @@ def test_arrow_member_address_of_lowers_to_address_of_op() -> None:
     assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"address-of must not ride Block/Access, got {kinds}"
 
 
+def test_arrow_member_increment_lowers_to_increment_decrement_op() -> None:
+    """``s->len++`` in statement position migrates off Block onto Address + IncrementDecrement."""
+    body = _build_function_body(
+        "struct sink { int len; };\nvoid f(struct sink *s) { s->len++; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    increments = [op for op in body if isinstance(op, ir.IncrementDecrement)]
+    assert len(increments) == 1, f"expected exactly one ir.IncrementDecrement, got {kinds}"
+    assert increments[0].delta == 1
+    assert any(isinstance(op, ir.Address) for op in body), f"expected an ir.Address op, got {kinds}"
+    # The member increment no longer rides the AST escape hatch.
+    assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"member increment must not ride Block/Access, got {kinds}"
+
+
 def test_every_instruction_subclass_declares_value_fields() -> None:
     """Every member of :data:`cc.ir.Instruction` declares ``VALUE_FIELDS``.
 
@@ -91,6 +106,19 @@ def test_every_instruction_subclass_declares_value_fields() -> None:
     instruction_types = typing.get_args(ir.Instruction)
     missing = [cls for cls in instruction_types if not hasattr(cls, "VALUE_FIELDS")]
     assert missing == [], f"missing VALUE_FIELDS: {[cls.__name__ for cls in missing]}"
+
+
+def test_increment_decrement_op_uses_and_side_effects() -> None:
+    """IncrementDecrement reads its address, defines nothing, and is side-effecting."""
+    from cc.ir_optimize import _has_side_effects, _instruction_destination  # noqa: PLC0415, PLC2701
+    from cc.regalloc import _instruction_defs, _instruction_uses  # noqa: PLC0415, PLC2701
+
+    increment = ir.IncrementDecrement(address="_ir_1", delta=1, is_postfix=True)
+    assert ir.IncrementDecrement.VALUE_FIELDS == ("address",)
+    assert _instruction_uses(instruction=increment) == ("_ir_1",)
+    assert _instruction_defs(instruction=increment) == ()
+    assert _instruction_destination(increment) is None
+    assert _has_side_effects(increment)
 
 
 def test_load_store_uses_and_side_effects() -> None:

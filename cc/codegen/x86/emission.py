@@ -2093,6 +2093,16 @@ class EmissionMixin:
                 # expression, so this is byte-neutral with the prior temp+Block.
                 shape = self._ir_address_with_index(self._ir_address_ops[address])
                 self.emit_store_local(expression=PlaceAddressOf(line=shape.line, place=shape), name=destination)
+            case ir.IncrementDecrement(address=address, delta=delta, is_postfix=is_postfix):
+                # ``*(shape) += delta`` — drive the EXISTING statement
+                # increment path from the producing ``Address``'s deref-free
+                # ``shape`` by rebuilding the exact source
+                # ``PlaceIncrementDecrement`` node, so the read-modify-write
+                # sequence (including the single-instruction memory
+                # ``inc``/``dec``) is produced by the EXACT emitter the
+                # ``Block`` path used — byte-neutral with the prior Block.
+                shape = self._ir_address_with_index(self._ir_address_ops[address])
+                self.generate_statement(PlaceIncrementDecrement(line=shape.line, delta=delta, is_postfix=is_postfix, place=shape))
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
 

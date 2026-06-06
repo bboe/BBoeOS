@@ -64,6 +64,31 @@ def _is_arrow_member_address_of(node: ast_nodes.Node, /) -> bool:
     )
 
 
+def _is_arrow_member_increment_decrement(node: ast_nodes.Node, /) -> bool:
+    """Return True for statement-position ``pointer->member++`` / ``--`` on a plain pointer variable.
+
+    ``PlaceIncrementDecrement(MemberPlace(DereferencePlace(VariablePlace(p)),
+    field))`` is the read-modify-write twin of :func:`_is_arrow_member_store`:
+    the chain breaks at the dereference, so the segment's ``base_value`` is the
+    pointer ``Value`` (the name ``"p"``), which emission re-materializes
+    IDENTICALLY to the inline ``generate_expression`` the legacy increment path
+    runs.  Only the discarded-value STATEMENT form folds (``_build_stmt``); a
+    value-position increment (``x = s->len++``) arrives Assign-wrapped in
+    ``_build_expr`` and stays on :class:`Block` unchanged.  Bare
+    ``VariablePlace`` increments also stay on :class:`Block` — they back the
+    loop induction-variable matchers in ``cc.loops`` (the Stage 3b.2 rewrite).
+    Stage 3b.1 lowers exactly this shape onto :class:`Address` +
+    :class:`IncrementDecrement` (``s->len++`` in ``stdio.c`` ``_emit`` is the
+    real consumer).
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceIncrementDecrement)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.DereferencePlace)
+        and isinstance(node.place.base.pointer, ast_nodes.VariablePlace)
+    )
+
+
 def _is_arrow_member_load(node: ast_nodes.Node, /) -> bool:
     """Return True for ``pointer->member`` reads on a plain pointer variable.
 
@@ -538,6 +563,26 @@ class Copy:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class IncrementDecrement:
+    """*(address) += delta — statement-position read-modify-write at a resolved :class:`Address`.
+
+    The discarded-value ``place++`` / ``place--`` / ``++place`` / ``--place``
+    statement.  ``delta`` is ``+1`` or ``-1``; ``is_postfix`` is carried only so
+    emission can rebuild the exact source :class:`ast_nodes.PlaceIncrementDecrement`
+    (pre vs post is indistinguishable once the value is discarded).
+    Side-effecting like :class:`Store`: never eliminated by DCE, and a memory
+    barrier that :class:`Load` / :class:`AddressOf` must not be reordered or
+    CSE'd across (Stage 3b's conservative treatment).
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("address",)
+
+    address: Value
+    delta: int
+    is_postfix: bool
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class Index:
     """destination = base[index] — array / pointer read."""
 
@@ -729,6 +774,7 @@ Instruction = (
     | Call
     | CarryBranch
     | Copy
+    | IncrementDecrement
     | Index
     | IndexAssign
     | InlineAsm
@@ -1301,6 +1347,23 @@ class Builder:
                     out=out,
                     strings=strings,
                 )
+            case ast_nodes.PlaceIncrementDecrement(place=place) if _is_arrow_member_increment_decrement(stmt):
+                # Statement-position ``pointer->member++`` / ``--`` on a plain
+                # pointer variable.  The dereference breaks the chain: the
+                # segment's ``base_value`` is the pointer var ``Value`` (the
+                # name ``"s"``), mirroring the arrow store slice.  Emission
+                # rebuilds the exact source ``PlaceIncrementDecrement`` from the
+                # ``shape`` + ``delta`` / ``is_postfix`` and drives the EXISTING
+                # statement increment path, so the read-modify-write sequence
+                # (including a single-instruction ``inc``/``dec`` on memory) is
+                # byte-identical; the ``Address`` makes the pointer use and the
+                # memory write visible to the optimizer (``s->len++`` in
+                # ``stdio.c`` ``_emit``).
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=place.base.pointer.name, destination=address_temp, indices=(), shape=place),
+                    IncrementDecrement(address=address_temp, delta=stmt.delta, is_postfix=stmt.is_postfix),
+                ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_arrow_member_member_store(stmt):
                 # ``pointer->outer.inner = leaf`` write — the multi-level store
                 # twin of the slice 6 load.  One chain-break at the plain-pointer
