@@ -8,10 +8,10 @@ import typing
 from cc import ast_nodes, ir
 
 
-def _address(*, base_value: ir.Value | None = None, destination: str = "_ir_0", index: ir.Value | None = None) -> ir.Address:
+def _address(*, base_value: ir.Value | None = None, destination: str = "_ir_0", indices: tuple[ir.Value, ...] = ()) -> ir.Address:
     """Build an :class:`ir.Address` over a single-deref placeholder shape."""
     shape = ast_nodes.DereferencePlace(pointer=ast_nodes.VariablePlace(name="p"))
-    return ir.Address(base_value=base_value, destination=destination, index=index, shape=shape)
+    return ir.Address(base_value=base_value, destination=destination, indices=indices, shape=shape)
 
 
 def _build_function_body(source: str, /, *, name: str) -> list[ir.Instruction]:
@@ -43,7 +43,7 @@ def test_access_op_destinations() -> None:
 
 def test_access_op_value_fields() -> None:
     """:class:`ir.Address` exposes exactly its two dynamic leaves."""
-    assert ir.Address.VALUE_FIELDS == ("base_value", "index")
+    assert ir.Address.VALUE_FIELDS == ("base_value", "indices")
     assert ir.AddressOf.VALUE_FIELDS == ("address",)
     assert ir.Load.VALUE_FIELDS == ("address",)
     assert ir.Store.VALUE_FIELDS == ("address", "value")
@@ -55,12 +55,12 @@ def test_address_value_operands_skip_none_leaves() -> None:
     from cc.regalloc import _instruction_uses  # noqa: PLC0415, PLC2701
     from cc.ssa import _iter_value_operands  # noqa: PLC0415, PLC2701
 
-    static = _address(base_value=None, index=None)
+    static = _address(base_value=None, indices=())
     assert _instruction_value_operands(static) == ()
     assert tuple(_iter_value_operands(static)) == ()
     assert _instruction_uses(instruction=static) == ()
 
-    dynamic = _address(base_value="_ir_1", index="_ir_2")
+    dynamic = _address(base_value="_ir_1", indices=("_ir_2",))
     assert _instruction_value_operands(dynamic) == ("_ir_1", "_ir_2")
     assert tuple(_iter_value_operands(dynamic)) == ("_ir_1", "_ir_2")
     assert set(_instruction_uses(instruction=dynamic)) == {"_ir_1", "_ir_2"}
@@ -110,9 +110,9 @@ def test_substitute_value_rewrites_access_ops() -> None:
     """Copy-propagation rewrites the new ops' value operands by name."""
     from cc.ir_optimize import _substitute_value  # noqa: PLC0415, PLC2701
 
-    address = _address(base_value="_ir_1", index="_ir_2")
+    address = _address(base_value="_ir_1", indices=("_ir_2",))
     rewritten = _substitute_value(address, source="_ir_9", target="_ir_2")
-    assert rewritten.index == "_ir_9"
+    assert rewritten.indices == ("_ir_9",)
     assert rewritten.base_value == "_ir_1"
 
     store = ir.Store(address="_ir_1", value="_ir_2", width=4)

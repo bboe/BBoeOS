@@ -322,7 +322,7 @@ def _is_struct_array_member_store(node: ast_nodes.Node, /) -> bool:
     SubscriptPlace base is a bare array variable (no dereference, no nested
     subscript), so the chain never breaks (``base_value`` stays ``None``) and
     the single subscript index is the segment's only dynamic leaf — pre-lowered
-    to a :data:`Value` carried on ``Address.index`` and re-seated into the
+    to a :data:`Value` carried on ``Address.indices`` and re-seated into the
     ``shape`` at emission by :meth:`_ir_address_with_index`, exactly as the load
     twin does.  Gated on a byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`)
     so the RHS-vs-address ordering stays byte-identical to the legacy store.
@@ -365,22 +365,27 @@ class Address:
     emission derives the *static* layout — member offsets, constant
     subscripts, element size, bitfield, array decay — from the existing
     layout helpers, exactly as today.  Its *dynamic* leaves are
-    first-class optimizer-visible operands: ``index`` is the segment's
-    summed dynamic element index temp, and ``base_value`` is the pointer
-    ``Value`` produced by the preceding :class:`Load` when the chain was
-    broken at a dereference (``None`` for a symbol-rooted — global /
-    local — segment).  Each segment has at most these two dynamic leaves
-    because dereference breaks the chain and multiple dynamic indices sum
-    into one temp at lowering, so ``VALUE_FIELDS`` stays flat and static.
+    first-class optimizer-visible operands: ``indices`` is the segment's
+    per-dimension dynamic element index temps (one :data:`Value` per
+    subscript position, outermost dimension first — empty for a
+    subscript-free segment, a one-tuple for a single ``array[i].member``
+    subscript, an N-tuple for an N-dimensional contiguous-array access
+    ``m[i][j]...`` whose per-position strides stay layout-derived at
+    emission), and ``base_value`` is the pointer ``Value`` produced by the
+    preceding :class:`Load` when the chain was broken at a dereference
+    (``None`` for a symbol-rooted — global / local — segment).  Dereference
+    breaks the chain, so a segment carries at most one ``base_value`` plus
+    the index tuple; ``VALUE_FIELDS`` enumerates both and the tuple is
+    flattened element-wise by the operand walkers.
 
     Pure and DCE-able; never CSE'd or hoisted in Stage 3b (that is 3c).
     """
 
-    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("base_value", "index")
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("base_value", "indices")
 
     base_value: Value | None
     destination: str
-    index: Value | None
+    indices: tuple[Value, ...]
     shape: ast_nodes.Node
 
 
@@ -926,7 +931,7 @@ class Builder:
                 address_temp = self._tmp()
                 result_temp = self._tmp()
                 out.extend([
-                    Address(base_value=base_value, destination=address_temp, index=None, shape=place),
+                    Address(base_value=base_value, destination=address_temp, indices=(), shape=place),
                     AddressOf(address=address_temp, destination=result_temp),
                 ])
                 return result_temp
@@ -947,7 +952,7 @@ class Builder:
                 address_temp = self._tmp()
                 result_temp = self._tmp()
                 out.extend([
-                    Address(base_value=base_value, destination=address_temp, index=None, shape=place),
+                    Address(base_value=base_value, destination=address_temp, indices=(), shape=place),
                     Load(address=address_temp, destination=result_temp, signed=False, width=0),
                 ])
                 return result_temp
@@ -967,7 +972,7 @@ class Builder:
                 address_temp = self._tmp()
                 result_temp = self._tmp()
                 out.extend([
-                    Address(base_value=base_value, destination=address_temp, index=None, shape=place),
+                    Address(base_value=base_value, destination=address_temp, indices=(), shape=place),
                     Load(address=address_temp, destination=result_temp, signed=False, width=0),
                 ])
                 return result_temp
@@ -981,7 +986,7 @@ class Builder:
                 address_temp = self._tmp()
                 result_temp = self._tmp()
                 out.extend([
-                    Address(base_value=None, destination=address_temp, index=None, shape=place),
+                    Address(base_value=None, destination=address_temp, indices=(), shape=place),
                     Load(address=address_temp, destination=result_temp, signed=False, width=0),
                 ])
                 return result_temp
@@ -990,7 +995,7 @@ class Builder:
                 # to ride the uniform ops (Stage 3b.1 slice 4).  The single
                 # subscript ``index`` is the segment's only dynamic leaf: it is
                 # pre-lowered to a :data:`Value` here and carried on
-                # ``Address.index``, proving the design's central mechanic.  For
+                # ``Address.indices``, proving the design's central mechanic.  For
                 # a simple-var / constant index ``_build_expr`` emits NO
                 # preceding instruction, so emission's ``_ir_value_to_ast``
                 # round-trip reconstructs the exact AST index node
@@ -1007,7 +1012,7 @@ class Builder:
                 address_temp = self._tmp()
                 result_temp = self._tmp()
                 out.extend([
-                    Address(base_value=None, destination=address_temp, index=index_value, shape=place),
+                    Address(base_value=None, destination=address_temp, indices=(index_value,), shape=place),
                     Load(address=address_temp, destination=result_temp, signed=False, width=0),
                 ])
                 return result_temp
@@ -1227,7 +1232,7 @@ class Builder:
                 store_value = self._build_expr(expr=value, out=out, strings=strings)
                 address_temp = self._tmp()
                 out.extend([
-                    Address(base_value=place.base.base.pointer.name, destination=address_temp, index=None, shape=place),
+                    Address(base_value=place.base.base.pointer.name, destination=address_temp, indices=(), shape=place),
                     Store(address=address_temp, value=store_value, width=0),
                 ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_arrow_member_store(stmt):
@@ -1247,7 +1252,7 @@ class Builder:
                 store_value = self._build_expr(expr=value, out=out, strings=strings)
                 address_temp = self._tmp()
                 out.extend([
-                    Address(base_value=place.base.pointer.name, destination=address_temp, index=None, shape=place),
+                    Address(base_value=place.base.pointer.name, destination=address_temp, indices=(), shape=place),
                     Store(address=address_temp, value=store_value, width=0),
                 ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_static_member_store(stmt):
@@ -1262,7 +1267,7 @@ class Builder:
                 store_value = self._build_expr(expr=value, out=out, strings=strings)
                 address_temp = self._tmp()
                 out.extend([
-                    Address(base_value=None, destination=address_temp, index=None, shape=place),
+                    Address(base_value=None, destination=address_temp, indices=(), shape=place),
                     Store(address=address_temp, value=store_value, width=0),
                 ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_deref_store(stmt):
@@ -1280,7 +1285,7 @@ class Builder:
                 store_value = self._build_expr(expr=value, out=out, strings=strings)
                 address_temp = self._tmp()
                 out.extend([
-                    Address(base_value=place.pointer.name, destination=address_temp, index=None, shape=place),
+                    Address(base_value=place.pointer.name, destination=address_temp, indices=(), shape=place),
                     Store(address=address_temp, value=store_value, width=0),
                 ])
             case ast_nodes.PlaceStore(place=place, value=value) if _is_struct_array_member_store(stmt):
@@ -1288,7 +1293,7 @@ class Builder:
                 # twin of slice 4's struct-array load (Stage 3b.1 slice 5).  The
                 # single subscript ``index`` is the segment's only dynamic leaf:
                 # pre-lowered to a :data:`Value` here and carried on
-                # ``Address.index``, re-seated into the ``shape`` at emission by
+                # ``Address.indices``, re-seated into the ``shape`` at emission by
                 # ``_ir_address_with_index``.  The byte-safe leaf RHS emits no
                 # preceding instruction, so the RHS-vs-address ordering matches
                 # the legacy store byte-for-byte; the member ``shape`` (rooted at
@@ -1298,7 +1303,7 @@ class Builder:
                 store_value = self._build_expr(expr=value, out=out, strings=strings)
                 address_temp = self._tmp()
                 out.extend([
-                    Address(base_value=None, destination=address_temp, index=index_value, shape=place),
+                    Address(base_value=None, destination=address_temp, indices=(index_value,), shape=place),
                     Store(address=address_temp, value=store_value, width=0),
                 ])
             case _ if _is_migrated_access(stmt):

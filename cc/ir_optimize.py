@@ -199,7 +199,8 @@ def _instruction_value_operands(instruction: ir.Instruction, /) -> tuple[ir.Valu
     a separate path when counting uses.
     """
     if isinstance(instruction, ir.Address):
-        return tuple(leaf for leaf in (instruction.base_value, instruction.index) if leaf is not None)
+        base = () if instruction.base_value is None else (instruction.base_value,)
+        return base + instruction.indices
     if isinstance(instruction, ir.AddressOf):
         return (instruction.address,)
     if isinstance(instruction, ir.BinaryOperation):
@@ -356,12 +357,12 @@ def _substitute_value(instruction: ir.Instruction, /, *, source: ir.Value, targe
     reference a temp under the current builder.
     """
     if isinstance(instruction, ir.Address):
-        if target not in (instruction.base_value, instruction.index):
+        if target != instruction.base_value and target not in instruction.indices:
             return instruction
         return dataclasses.replace(
             instruction,
             base_value=source if instruction.base_value == target else instruction.base_value,
-            index=source if instruction.index == target else instruction.index,
+            indices=tuple(source if leaf == target else leaf for leaf in instruction.indices),
         )
     if isinstance(instruction, ir.AddressOf):
         if instruction.address != target:

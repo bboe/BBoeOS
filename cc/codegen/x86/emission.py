@@ -1828,13 +1828,13 @@ class EmissionMixin:
         )
 
     def _ir_address_with_index(self, address: ir.Address, /) -> Node:
-        """Return the :class:`ir.Address` ``shape``, re-seating its pre-lowered dynamic index.
+        """Return the :class:`ir.Address` ``shape``, re-seating its pre-lowered dynamic indices.
 
-        When ``address.index`` is ``None`` the segment is static (a dot member /
+        When ``address.indices`` is empty the segment is static (a dot member /
         symbol-rooted base) and the immutable ``shape`` already carries the full
         place — returned as-is, exactly as slices 1-3 drove it.
 
-        When ``address.index`` is a :data:`Value` (Stage 3b.1 slice 4's
+        When ``address.indices`` carries one :data:`Value` (Stage 3b.1 slice 4's
         struct-array ``array[index].member`` shape) the dynamic subscript index
         was pre-lowered to that ``Value`` at IR-build time.  Re-seat it into the
         ``shape``'s :class:`SubscriptPlace` via :meth:`_ir_value_to_ast` so the
@@ -1849,10 +1849,11 @@ class EmissionMixin:
         the unchanged layout helpers.
         """
         shape = address.shape
-        if address.index is None:
+        if not address.indices:
             return shape
+        (index_value,) = address.indices
         subscript = shape.base
-        reindexed = replace(subscript, index=self._ir_value_to_ast(address.index))
+        reindexed = replace(subscript, index=self._ir_value_to_ast(index_value))
         return replace(shape, base=reindexed)
 
     def _ir_value_to_ast(self, value: ir.Value) -> Node:
