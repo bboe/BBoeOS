@@ -14,6 +14,15 @@ def _address(*, base_value: ir.Value | None = None, destination: str = "_ir_0", 
     return ir.Address(base_value=base_value, destination=destination, index=index, shape=shape)
 
 
+def _build_function_body(source: str, /, *, name: str) -> list[ir.Instruction]:
+    """Lower a single C source string to one function's flat IR instruction list."""
+    from cc.lexer import tokenize  # noqa: PLC0415
+    from cc.parser import Parser  # noqa: PLC0415
+
+    program = ir.Builder().build_program(Parser(tokenize(source)).parse_program())
+    return next(function for function in program.functions if function.ast_node.name == name).body
+
+
 def test_access_op_destinations() -> None:
     """Address / AddressOf / Load define a destination; Store does not."""
     from cc.ir_optimize import _instruction_destination as optimize_destination  # noqa: PLC0415, PLC2701
@@ -55,6 +64,19 @@ def test_address_value_operands_skip_none_leaves() -> None:
     assert _instruction_value_operands(dynamic) == ("_ir_1", "_ir_2")
     assert tuple(_iter_value_operands(dynamic)) == ("_ir_1", "_ir_2")
     assert set(_instruction_uses(instruction=dynamic)) == {"_ir_1", "_ir_2"}
+
+
+def test_arrow_member_address_of_lowers_to_address_of_op() -> None:
+    """``&pointer->member`` migrates off the Block/Access escape hatch onto Address + AddressOf."""
+    body = _build_function_body(
+        "struct s { int x; };\nint *f(struct s *p) { return &p->x; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    assert any(isinstance(op, ir.AddressOf) for op in body), f"expected an ir.AddressOf op, got {kinds}"
+    assert any(isinstance(op, ir.Address) for op in body), f"expected an ir.Address op, got {kinds}"
+    # The arrow-member address-of no longer rides the AST escape hatch.
+    assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"address-of must not ride Block/Access, got {kinds}"
 
 
 def test_every_instruction_subclass_declares_value_fields() -> None:

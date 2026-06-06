@@ -42,6 +42,28 @@ class _NoValueFields:
     VALUE_FIELDS: ClassVar[tuple[str, ...]] = ()
 
 
+def _is_arrow_member_address_of(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``&pointer->member`` address-of on a plain pointer variable.
+
+    ``PlaceAddressOf(MemberPlace(DereferencePlace(VariablePlace(p)), field))`` is
+    the lea-terminal address twin of :func:`_is_arrow_member_load`: the chain
+    breaks at the dereference, so the segment's ``base_value`` is the pointer
+    ``Value`` (the name ``"p"``), which emission re-materializes IDENTICALLY to
+    the inline ``generate_expression`` the legacy ``_emit_place_address_of`` path
+    runs — no separate pointer ``Load`` op, byte-neutral.  AddressOf is a pure
+    ``lea`` with no dereference and no width.  Stage 3b.1 lowers exactly this
+    shape onto :class:`Address` + :class:`AddressOf` (``&directory->entry`` in
+    ``dirent.c``); every other address-of shape stays on :class:`Block`
+    unchanged (``&var`` rides a passed-through leaf, not this path).
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceAddressOf)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.DereferencePlace)
+        and isinstance(node.place.base.pointer, ast_nodes.VariablePlace)
+    )
+
+
 def _is_arrow_member_load(node: ast_nodes.Node, /) -> bool:
     """Return True for ``pointer->member`` reads on a plain pointer variable.
 
@@ -886,8 +908,28 @@ class Builder:
                 # Pass ``&name`` through as-is so generate_call can detect
                 # out_register arguments without the node being replaced by a
                 # temp.  Member / dereference ``PlaceAddressOf`` shapes fall to
-                # the default temp+Block, exactly as they did before the fold.
+                # the default temp+Block, exactly as they did before the fold
+                # (except the arrow-member shape lowered just below).
                 return expr
+            case ast_nodes.PlaceAddressOf(place=place) if _is_arrow_member_address_of(expr):
+                # ``&pointer->member`` address-of on a plain pointer variable
+                # (Stage 3b.1 — the lea-terminal twin of the slice 2 arrow
+                # load).  One chain-break at the dereference: ``base_value`` is
+                # the pointer var ``Value`` (the name ``"p"``), which emission
+                # re-materializes exactly like the legacy address-of path seeds
+                # its base, so no separate pointer ``Load`` op is needed.  The
+                # member ``shape`` (still rooted at the dereference) drives the
+                # static field offset at emission via the same helpers the
+                # legacy ``_emit_place_address_of`` used; :class:`AddressOf` is a
+                # pure ``lea`` terminal — no width, no signedness.
+                base_value = place.base.pointer.name
+                address_temp = self._tmp()
+                result_temp = self._tmp()
+                out.extend([
+                    Address(base_value=base_value, destination=address_temp, index=None, shape=place),
+                    AddressOf(address=address_temp, destination=result_temp),
+                ])
+                return result_temp
             case ast_nodes.AssignExpr(inner=inner):
                 return self._lower_assign_expr(inner=inner, out=out, strings=strings)
             case ast_nodes.PlaceLoad(place=place) if _is_arrow_member_member_load(expr):

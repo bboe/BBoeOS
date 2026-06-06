@@ -2079,6 +2079,17 @@ class EmissionMixin:
                 # tracked local); mirror it so downstream codegen decisions
                 # match byte-for-byte.
                 self.ax_clear()
+            case ir.AddressOf(address=address, destination=destination):
+                # ``destination = &(shape)`` — drive the EXISTING address-of
+                # path from the producing ``Address``'s deref-free ``shape`` so
+                # the static field layout (offset) and the ``lea`` terminal are
+                # produced by the EXACT helper the legacy ``PlaceAddressOf``
+                # expression used (``_emit_place_address_of``).  The address
+                # lands in the accumulator and the store-to-local tail matches
+                # the one ``emit_store_local`` runs after a ``PlaceAddressOf``
+                # expression, so this is byte-neutral with the prior temp+Block.
+                shape = self._ir_address_with_index(self._ir_address_ops[address])
+                self.emit_store_local(expression=PlaceAddressOf(line=shape.line, place=shape), name=destination)
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
 
