@@ -200,6 +200,24 @@ def test_struct_field_multidim_load_lowers_to_member_rooted_address() -> None:
     )
 
 
+def test_subscript_call_lowers_to_address_and_indirect_call() -> None:
+    """``handlers[--count]();`` folds onto Address + IndirectCall and leaves the Access hatch."""
+    body = _build_function_body(
+        "void (*handlers[4])(void);\nint count;\nvoid f(void) { handlers[--count](); }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    addresses = [op for op in body if isinstance(op, ir.Address)]
+    indirect_calls = [op for op in body if isinstance(op, ir.IndirectCall)]
+    assert len(addresses) == 1, f"expected exactly one ir.Address, got {kinds}"
+    assert len(addresses[0].indices) == 1, f"expected a single pre-lowered index leaf, got {addresses[0].indices}"
+    assert len(indirect_calls) == 1, f"expected exactly one ir.IndirectCall, got {kinds}"
+    assert indirect_calls[0].address == addresses[0].destination
+    # The call itself no longer rides the AST escape hatch (the compound
+    # index pre-lowering may still emit a Block for the -- assign).
+    assert not any(isinstance(op, ir.Access) for op in body), f"subscript call must not ride Access, got {kinds}"
+
+
 def test_substitute_value_rewrites_access_ops() -> None:
     """Copy-propagation rewrites the new ops' value operands by name."""
     from cc.ir_optimize import _substitute_value  # noqa: PLC0415, PLC2701

@@ -52,6 +52,7 @@ _MODELED_VALUE_TYPES = (
     ir.IncrementDecrement,
     ir.Index,
     ir.IndexAssign,
+    ir.IndirectCall,
     ir.Load,
     ir.RepString,
     ir.Return,

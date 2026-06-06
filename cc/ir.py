@@ -473,6 +473,30 @@ def _is_struct_array_member_store(node: ast_nodes.Node, /) -> bool:
     )
 
 
+def _is_subscript_call(node: ast_nodes.Node, /) -> bool:
+    """Return True for statement-position ``name[index]()`` no-argument calls.
+
+    ``PlaceCall(SubscriptPlace(VariablePlace), args=[])`` — a call through a
+    function-pointer slot of a bare array variable.  The subscript index may be
+    COMPOUND (the slice-4 precedent: an index temp is consumed IMMEDIATELY by
+    the address scale, so the allocator keeps it register-resident —
+    ``_atexit_fns[--_atexit_count]()`` in ``stdlib.c`` ``exit`` is the real
+    consumer and the byte gate the proof).  Emission re-seats the index into
+    the ``shape`` and drives the EXACT legacy function-pointer call statement
+    path, which folds the slot load and the call into one ``call [table +
+    reg*4]`` instruction — hence :class:`IndirectCall` consumes the SLOT
+    :class:`Address`, not a pre-loaded pointer.  Gated on zero arguments and
+    discarded result (statement position): argument evaluation ordering and
+    the result store stay on :class:`Access` until a consumer surfaces.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceCall)
+        and not node.args
+        and isinstance(node.place, ast_nodes.SubscriptPlace)
+        and isinstance(node.place.base, ast_nodes.VariablePlace)
+    )
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class Access(_NoValueFields):
     """Complex-lvalue access (PlaceLoad / PlaceStore / PlaceCall).
@@ -656,6 +680,27 @@ class IndexAssign:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class IndirectCall:
+    """call [address] — discarded-result call through the function pointer stored at a resolved :class:`Address`.
+
+    The statement-position ``place()`` no-argument call through a
+    function-pointer slot (``handlers[index]()``).  The single x86
+    instruction loads and calls through the slot in one step, so the op
+    consumes the SLOT address, not a pre-loaded pointer value.
+    Side-effecting like :class:`Call`: never eliminated by DCE, and a memory
+    barrier that :class:`Load` / :class:`AddressOf` must not be reordered or
+    CSE'd across (Stage 3b's conservative treatment).  Caller-saved-register
+    correctness rides emission's conservative pinned-register saves (the same
+    default the :class:`Access`-resident call used), so the op deliberately
+    stays out of regalloc's ``_CALL_TYPES`` save-cost counter for byte parity.
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("address",)
+
+    address: Value
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class InlineAsm(_NoValueFields):
     """Pass-through inline-asm block."""
 
@@ -828,6 +873,7 @@ Instruction = (
     | IncrementDecrement
     | Index
     | IndexAssign
+    | IndirectCall
     | InlineAsm
     | Jump
     | Label
@@ -1398,6 +1444,21 @@ class Builder:
                     out=out,
                     strings=strings,
                 )
+            case ast_nodes.PlaceCall(place=place) if _is_subscript_call(stmt):
+                # Statement-position ``name[index]()`` no-argument call through
+                # a function-pointer slot.  The index — compound allowed, the
+                # slice-4 immediate-consumption precedent — pre-lowers to the
+                # segment's only dynamic leaf on ``Address.indices``; emission
+                # re-seats it into the ``shape`` and drives the EXACT legacy
+                # function-pointer call path, which loads and calls through the
+                # slot in one ``call [table + reg*4]`` instruction
+                # (``_atexit_fns[--_atexit_count]()`` in ``stdlib.c`` ``exit``).
+                index_value = self._build_expr(expr=place.index, out=out, strings=strings)
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, indices=(index_value,), shape=place),
+                    IndirectCall(address=address_temp),
+                ])
             case ast_nodes.PlaceIncrementDecrement(place=place) if _is_arrow_member_increment_decrement(stmt):
                 # Statement-position ``pointer->member++`` / ``--`` on a plain
                 # pointer variable.  The dereference breaks the chain: the

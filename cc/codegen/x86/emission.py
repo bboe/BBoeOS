@@ -1834,28 +1834,26 @@ class EmissionMixin:
         symbol-rooted base) and the immutable ``shape`` already carries the full
         place — returned as-is, exactly as slices 1-3 drove it.
 
-        When ``address.indices`` carries one :data:`Value` (Stage 3b.1 slice 4's
-        struct-array ``array[index].member`` shape) the dynamic subscript index
-        was pre-lowered to that ``Value`` at IR-build time.  Re-seat it into the
-        ``shape``'s :class:`SubscriptPlace` via :meth:`_ir_value_to_ast` so the
-        existing ``resolve_address`` / ``_accumulate_subscript`` path
-        materializes and scales the index from the IR ``Value`` instead of
-        re-walking the original AST sub-expression.  For a simple-var / constant
-        index the round-trip reconstructs the exact node ``resolve_address``
-        walked inline today, so the materialize / scale / index-register choice
-        is byte-identical; a compound index arrives as a register-resident temp
-        ``Var`` (the byte gate is the backstop).  The static member offset /
-        element stride / width are still derived from the rebuilt ``shape`` by
-        the unchanged layout helpers.
+        When ``address.indices`` carries :data:`Value` leaves, each dynamic
+        subscript index was pre-lowered to a ``Value`` at IR-build time.
+        :meth:`_reseat_nested_subscript_indices` walks the ``shape``'s
+        subscript/member chain and re-seats every index via
+        :meth:`_ir_value_to_ast`, so the existing ``resolve_address`` /
+        ``_accumulate_subscript`` path materializes and scales each index from
+        the IR ``Value`` instead of re-walking the original AST sub-expression
+        — covering slice 4's single-index ``array[index].member``, the multidim
+        / mixed chains, and the top-level ``name[index]`` call-slot shape
+        uniformly.  For a simple-var / constant index the round-trip
+        reconstructs the exact node ``resolve_address`` walked inline today, so
+        the materialize / scale / index-register choice is byte-identical; a
+        compound index arrives as a register-resident temp ``Var`` (the byte
+        gate is the backstop).  The static member offset / element stride /
+        width are still derived from the rebuilt ``shape`` by the unchanged
+        layout helpers.
         """
         shape = address.shape
         if not address.indices:
             return shape
-        if len(address.indices) == 1:
-            (index_value,) = address.indices
-            subscript = shape.base
-            reindexed = replace(subscript, index=self._ir_value_to_ast(index_value))
-            return replace(shape, base=reindexed)
         return self._reseat_nested_subscript_indices(shape, address.indices)
 
     def _ir_value_to_ast(self, value: ir.Value) -> Node:
@@ -2103,6 +2101,15 @@ class EmissionMixin:
                 # ``Block`` path used — byte-neutral with the prior Block.
                 shape = self._ir_address_with_index(self._ir_address_ops[address])
                 self.generate_statement(PlaceIncrementDecrement(line=shape.line, delta=delta, is_postfix=is_postfix, place=shape))
+            case ir.IndirectCall(address=address):
+                # ``call [shape]`` — drive the EXISTING function-pointer call
+                # statement path from the producing ``Address``'s ``shape`` by
+                # rebuilding the source ``PlaceCall``, so the slot load + call
+                # fold into the single ``call [table + reg*4]`` instruction the
+                # ``Access`` path emitted — byte-neutral, including the
+                # conservative pinned-register save default around the call.
+                shape = self._ir_address_with_index(self._ir_address_ops[address])
+                self.generate_statement(PlaceCall(line=shape.line, args=[], place=shape))
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
 
