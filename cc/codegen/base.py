@@ -350,6 +350,8 @@ class CodeGeneratorBase:
                         destination = name
                     case ir.Call(destination=name):
                         destination = name
+                    case ir.AddressOf(destination=name) | ir.Load(destination=name):
+                        destination = name
                     case ir.Block(node=Assign(name=name)) | ir.Access(node=Assign(name=name)):
                         destination = name
                     case ir.Switch(cases=cases):

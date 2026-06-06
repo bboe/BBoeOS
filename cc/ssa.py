@@ -316,7 +316,7 @@ def _instruction_destination(instruction: ir.Instruction, /) -> str | None:
     Duplicates :func:`cc.ir_optimize._instruction_destination` to keep
     ssa.py free of the optimizer's import surface.
     """
-    if isinstance(instruction, (ir.BinaryOperation, ir.Copy, ir.Index)):
+    if isinstance(instruction, (ir.Address, ir.AddressOf, ir.BinaryOperation, ir.Copy, ir.Index, ir.Load)):
         return instruction.destination
     if isinstance(instruction, ir.Call):
         return instruction.destination

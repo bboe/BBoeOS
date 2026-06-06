@@ -42,6 +42,159 @@ class _NoValueFields:
     VALUE_FIELDS: ClassVar[tuple[str, ...]] = ()
 
 
+def _is_arrow_member_address_of(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``&pointer->member`` address-of on a plain pointer variable.
+
+    ``PlaceAddressOf(MemberPlace(DereferencePlace(VariablePlace(p)), field))`` is
+    the lea-terminal address twin of :func:`_is_arrow_member_load`: the chain
+    breaks at the dereference, so the segment's ``base_value`` is the pointer
+    ``Value`` (the name ``"p"``), which emission re-materializes IDENTICALLY to
+    the inline ``generate_expression`` the legacy ``_emit_place_address_of`` path
+    runs — no separate pointer ``Load`` op, byte-neutral.  AddressOf is a pure
+    ``lea`` with no dereference and no width.  Stage 3b.1 lowers exactly this
+    shape onto :class:`Address` + :class:`AddressOf` (``&directory->entry`` in
+    ``dirent.c``); every other address-of shape stays on :class:`Block`
+    unchanged (``&var`` rides a passed-through leaf, not this path).
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceAddressOf)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.DereferencePlace)
+        and isinstance(node.place.base.pointer, ast_nodes.VariablePlace)
+    )
+
+
+def _is_arrow_member_load(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``pointer->member`` reads on a plain pointer variable.
+
+    ``PlaceLoad(MemberPlace(DereferencePlace(VariablePlace(p)), field))`` is an
+    arrow-member read where the dereferenced pointer is a plain pointer-variable
+    read.  The chain breaks at the dereference: the segment's ``base_value`` is
+    the pointer ``Value`` ``_build_expr(Var(p))`` (the name ``"p"``), which
+    emission turns back into ``Var("p")`` and materializes IDENTICALLY to the
+    inline ``generate_expression`` the legacy arrow-load path runs, so the load
+    is byte-neutral with no separate pointer ``Load`` op for this plain-var case.
+    Stage 3b.1 slice 2 lowers exactly this shape onto :class:`Address` +
+    :class:`Load`; every other arrow / deref shape (``(*pp)->f``, ``a[i]->f``,
+    ``expr->f``, multi-level ``p->a->b``) stays on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceLoad)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.DereferencePlace)
+        and isinstance(node.place.base.pointer, ast_nodes.VariablePlace)
+    )
+
+
+def _is_arrow_member_member_load(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``pointer->outer.inner`` reads — member-of-member-of-deref.
+
+    ``PlaceLoad(MemberPlace(MemberPlace(DereferencePlace(VariablePlace(p)),
+    outer), inner))`` is the simplest MULTI-LEVEL member access: one chain-break
+    at the dereference of a plain pointer variable, then TWO static member
+    offsets (``outer`` selecting an embedded struct value, ``inner`` selecting
+    its field) accumulate into the same deref-broken segment shape.  No new
+    chain-break mechanic beyond slice 2's arrow load — the only difference is a
+    longer static member shape, which ``resolve_address`` /
+    ``_resolve_member_place_info`` already accumulate recursively (Stage 3a).
+    The segment's ``base_value`` is the pointer ``Value`` ``p`` (the single
+    dynamic leaf the emission helpers read), so the optimizer counts the pointer
+    use exactly as the arrow-load slice does.  Stage 3b.1 slice 6 lowers exactly
+    this two-level shape onto :class:`Address` + :class:`Load`; deeper / mixed
+    shapes (``p->a->b``, ``p->a.b.c``) stay on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceLoad)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.MemberPlace)
+        and isinstance(node.place.base.base, ast_nodes.DereferencePlace)
+        and isinstance(node.place.base.base.pointer, ast_nodes.VariablePlace)
+    )
+
+
+def _is_arrow_member_member_store(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``pointer->outer.inner = leaf`` writes — the multi-level store twin.
+
+    ``PlaceStore(MemberPlace(MemberPlace(DereferencePlace(VariablePlace(p)),
+    outer), inner), value)`` is the store twin of
+    :func:`_is_arrow_member_member_load`: one chain-break at the plain-pointer
+    dereference, then two static member offsets, then the byte-safe leaf RHS is
+    written through it.  The segment's ``base_value`` is the pointer ``Value``
+    ``p``.  Gated on a byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`) so
+    the RHS-vs-address ordering stays byte-identical to the legacy store.  Stage
+    3b.1 slice 6 lowers exactly this two-level shape onto :class:`Address` +
+    :class:`Store` (``directory->entry.d_ino = ...`` in ``dirent.c`` is a real
+    consumer); deeper / mixed shapes stay on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceStore)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.MemberPlace)
+        and isinstance(node.place.base.base, ast_nodes.DereferencePlace)
+        and isinstance(node.place.base.base.pointer, ast_nodes.VariablePlace)
+        and _is_byte_safe_store_rhs(node.value)
+    )
+
+
+def _is_arrow_member_store(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``pointer->member = leaf`` writes on a plain pointer variable.
+
+    ``PlaceStore(MemberPlace(DereferencePlace(VariablePlace(p)), field), value)``
+    is the store twin of :func:`_is_arrow_member_load`: the chain breaks at the
+    dereference, so the segment's ``base_value`` is the pointer ``Value`` (the
+    name ``"p"``), which emission re-materializes IDENTICALLY to the inline
+    ``generate_expression`` the legacy arrow-store path runs.  Gated on a
+    byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`): without a register
+    allocator a compound RHS pre-lowered to a temp would spill/reload and
+    reorder versus the legacy store's RHS-vs-base evaluation ordering, breaking
+    byte-neutrality.  Stage 3b.1 slice 3 lowers exactly this shape onto
+    :class:`Address` + :class:`Store`; every other arrow / deref store shape
+    stays on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceStore)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.DereferencePlace)
+        and isinstance(node.place.base.pointer, ast_nodes.VariablePlace)
+        and _is_byte_safe_store_rhs(node.value)
+    )
+
+
+def _is_byte_safe_store_rhs(node: ast_nodes.Node, /) -> bool:
+    """Return True for a member-store RHS that :meth:`_build_expr` lowers with no emitted code.
+
+    ``Int`` / ``Var`` / ``String`` / ``&variable`` are the leaves
+    :meth:`_build_expr` returns directly as an :data:`Value` (an immediate, a
+    name, a string label, or a passed-through ``PlaceAddressOf``) WITHOUT
+    appending any preceding instruction.  Restricting member-store migration to
+    these leaves keeps the RHS-vs-address evaluation ordering byte-identical to
+    the legacy store: ``_ir_value_to_ast`` round-trips the leaf back to the
+    exact AST node the legacy ``_emit_place_store`` evaluated in place, so no
+    spill/reload is introduced.
+
+    A COMPOUND RHS stays excluded — re-measured in Stage 3b.1 slice 5 on top of
+    PR #587's IR-temp register allocator and confirmed STILL byte-regressing.
+    The legacy ``_emit_place_store`` computes the RHS directly into the
+    accumulator and stores it through the freshly materialized address; lifting
+    the RHS to an IR temp evaluated BEFORE the address forces the allocator to
+    spill the temp to a frame slot and reload it, because resolving the store
+    address — and any RHS sub-computation that clobbers a scratch register, e.g.
+    ``div``'s ``edx`` — reuses the register the temp would otherwise live in.
+    Measured deltas admitting a ``BinaryOperation`` RHS: ``tv->tv_sec =
+    total_ms / 1000`` grew +21 bytes (an ``eax`` spill/reload plus a
+    ``push``/``pop edx`` around the ``div``), with further regressions in
+    ``readdir`` / ``_emit_str`` / ``release`` / ``malloc`` / ``symbol_add`` /
+    ``strtol``.  Unlike a compound subscript INDEX leaf (slice 4) — which the
+    allocator keeps register-resident because it is consumed IMMEDIATELY by the
+    address scale — a compound RHS must stay live ACROSS the address resolution,
+    so its live range crosses the clobber and the allocator cannot save it.  A
+    compound RHS therefore keeps the store on :class:`Access`.
+    """
+    return isinstance(node, (ast_nodes.Int, ast_nodes.String, ast_nodes.Var)) or (
+        isinstance(node, ast_nodes.PlaceAddressOf) and isinstance(node.place, ast_nodes.VariablePlace)
+    )
+
+
 def _is_constant_true(condition: ast_nodes.Node, /) -> bool:
     """Return True if *condition* is statically nonzero.
 
@@ -60,6 +213,33 @@ def _is_constant_true(condition: ast_nodes.Node, /) -> bool:
     return isinstance(condition.left, ast_nodes.Int) and condition.left.value != 0
 
 
+def _is_deref_store(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``*pointer = leaf`` writes on a plain pointer variable.
+
+    ``PlaceStore(DereferencePlace(Var(p)), value)`` is the lvalue deref store:
+    the parser only produces a bare :class:`DereferencePlace` as a store target
+    for the ``*name = expr`` form (rvalue ``*p`` desugars to ``Index(p, 0)``
+    instead), and only over a plain pointer-variable read ``Var(p)``.  This is
+    the no-member, no-index sibling of :func:`_is_arrow_member_store`: the
+    dereference IS the whole place, so the segment's ``base_value`` is the
+    pointer ``Value`` (the name ``"p"``) and there is no static member offset to
+    derive.  Gated on a byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`) so
+    the RHS-vs-address ordering stays byte-identical to the legacy deref store.
+    Emission drives the EXACT legacy ``_emit_place_store`` path off the
+    immutable ``DereferencePlace`` ``shape``; ``base_value`` is purely the
+    optimizer-visible dynamic leaf.  Stage 3b.1 slice 5 lowers exactly this
+    plain-pointer-var subset onto :class:`Address` + :class:`Store`; every
+    other deref store shape (``*(p + 1)``, ``*(T *)e``, ``*pp``) stays on
+    :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceStore)
+        and isinstance(node.place, ast_nodes.DereferencePlace)
+        and isinstance(node.place.pointer, ast_nodes.Var)
+        and _is_byte_safe_store_rhs(node.value)
+    )
+
+
 def _is_migrated_access(node: ast_nodes.Node, /) -> bool:
     """Return True for the Place-access shapes Stage 1 lowers to :class:`Access`.
 
@@ -70,6 +250,93 @@ def _is_migrated_access(node: ast_nodes.Node, /) -> bool:
     ``cc.loops``); see the Stage 1 plan's Scope boundary.
     """
     return isinstance(node, (ast_nodes.PlaceCall, ast_nodes.PlaceLoad, ast_nodes.PlaceStore))
+
+
+def _is_static_member_load(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``variable.member`` reads — the simplest static ir.Access load.
+
+    ``PlaceLoad(MemberPlace(VariablePlace))`` is a plain dot-member read of a
+    local / global struct: its address is fully static (a member offset on a
+    symbol-rooted base, no dynamic subscript, no dereference).  Stage 3b.1
+    slice 1 lowers exactly this shape onto :class:`Address` + :class:`Load`;
+    every other access shape stays on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceLoad)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.VariablePlace)
+    )
+
+
+def _is_static_member_store(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``variable.member = leaf`` writes — the static store twin.
+
+    ``PlaceStore(MemberPlace(VariablePlace), value)`` is the store twin of
+    :func:`_is_static_member_load`: a fully static member offset on a
+    symbol-rooted base.  Gated on a byte-safe leaf RHS
+    (:func:`_is_byte_safe_store_rhs`) so the RHS-vs-address ordering stays
+    byte-identical to the legacy dot store.  Stage 3b.1 slice 3 lowers exactly
+    this shape onto :class:`Address` + :class:`Store`; every other store shape
+    stays on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceStore)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.VariablePlace)
+        and _is_byte_safe_store_rhs(node.value)
+    )
+
+
+def _is_struct_array_member_load(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``array[index].member`` reads — the first DYNAMIC-index ir.Access load.
+
+    ``PlaceLoad(MemberPlace(SubscriptPlace(VariablePlace)))`` is a member read
+    of a struct-array element: one dynamic subscript ``index`` selects the
+    element, then a static member offset selects the field.  This is the
+    simplest access shape with exactly ONE dynamic index leaf and otherwise
+    static structure — the SubscriptPlace base is a bare array variable (no
+    dereference, no nested subscript), so the chain never breaks
+    (``base_value`` stays ``None``) and the single subscript index is the
+    segment's only dynamic leaf.  Stage 3b.1 slice 4 lowers exactly this shape
+    onto :class:`Address` (carrying the element index in its ``index`` leaf) +
+    :class:`Load`, proving the design's central mechanic: pre-lowering a
+    dynamic subscript index to an optimizer-visible :data:`Value` that emission
+    then materializes / scales exactly where ``_accumulate_subscript`` does.
+    Every other subscript / member shape stays on :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceLoad)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.SubscriptPlace)
+        and isinstance(node.place.base.base, ast_nodes.VariablePlace)
+    )
+
+
+def _is_struct_array_member_store(node: ast_nodes.Node, /) -> bool:
+    """Return True for ``array[index].member = leaf`` writes — the dynamic-index store twin.
+
+    ``PlaceStore(MemberPlace(SubscriptPlace(VariablePlace)), value)`` is the
+    store twin of :func:`_is_struct_array_member_load`: one dynamic subscript
+    ``index`` selects the struct-array element, then a static member offset
+    selects the field, then the byte-safe leaf RHS is written through it.  The
+    SubscriptPlace base is a bare array variable (no dereference, no nested
+    subscript), so the chain never breaks (``base_value`` stays ``None``) and
+    the single subscript index is the segment's only dynamic leaf — pre-lowered
+    to a :data:`Value` carried on ``Address.index`` and re-seated into the
+    ``shape`` at emission by :meth:`_ir_address_with_index`, exactly as the load
+    twin does.  Gated on a byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`)
+    so the RHS-vs-address ordering stays byte-identical to the legacy store.
+    Stage 3b.1 slice 5 lowers exactly this shape onto :class:`Address` +
+    :class:`Store`; every other subscript-member store shape stays on
+    :class:`Access` unchanged.
+    """
+    return (
+        isinstance(node, ast_nodes.PlaceStore)
+        and isinstance(node.place, ast_nodes.MemberPlace)
+        and isinstance(node.place.base, ast_nodes.SubscriptPlace)
+        and isinstance(node.place.base.base, ast_nodes.VariablePlace)
+        and _is_byte_safe_store_rhs(node.value)
+    )
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -86,6 +353,51 @@ class Access(_NoValueFields):
     """
 
     node: ast_nodes.Node
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Address:
+    """Structured-reference value — resolves a place to an address; emits no code itself.
+
+    The IR-level twin of the input to the x86 generator's
+    ``resolve_address`` (GCC's GIMPLE structured-reference model).  It
+    carries the deref-free place ``shape`` (an AST ``Place`` subtree) so
+    emission derives the *static* layout — member offsets, constant
+    subscripts, element size, bitfield, array decay — from the existing
+    layout helpers, exactly as today.  Its *dynamic* leaves are
+    first-class optimizer-visible operands: ``index`` is the segment's
+    summed dynamic element index temp, and ``base_value`` is the pointer
+    ``Value`` produced by the preceding :class:`Load` when the chain was
+    broken at a dereference (``None`` for a symbol-rooted — global /
+    local — segment).  Each segment has at most these two dynamic leaves
+    because dereference breaks the chain and multiple dynamic indices sum
+    into one temp at lowering, so ``VALUE_FIELDS`` stays flat and static.
+
+    Pure and DCE-able; never CSE'd or hoisted in Stage 3b (that is 3c).
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("base_value", "index")
+
+    base_value: Value | None
+    destination: str
+    index: Value | None
+    shape: ast_nodes.Node
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class AddressOf:
+    """destination = &place — pure address materialization (lowers to ``lea``).
+
+    Reads the resolved ``address`` :class:`Address` value and writes it to
+    ``destination`` without dereferencing.  A read with no memory effect:
+    DCE-able when ``destination`` is unused, but not reordered across a
+    :class:`Store` / :class:`Call` (memory-barrier discipline).
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("address",)
+
+    address: Value
+    destination: str
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -206,6 +518,24 @@ class Label(_NoValueFields):
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
+class Load:
+    """destination = *(width) address — memory read at a resolved :class:`Address`.
+
+    ``signed`` selects ``movsx`` vs ``movzx`` for sub-word widths.  A read
+    with no memory effect: DCE-able when ``destination`` is unused, but
+    not reordered or CSE'd across a :class:`Store` / :class:`Call`
+    (memory-barrier discipline in Stage 3b).
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("address",)
+
+    address: Value
+    destination: str
+    signed: bool
+    width: int
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
 class LoopBoundary(_NoValueFields):
     """Push or pop loop label context for the emission layer.
 
@@ -255,6 +585,22 @@ class Return:
     VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("value",)
 
     value: Value | None
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Store:
+    """*(width) address = value — memory write at a resolved :class:`Address`.
+
+    Side-effecting: never eliminated by DCE, and a memory barrier that
+    :class:`Load` / :class:`AddressOf` must not be reordered or CSE'd
+    across (Stage 3b's conservative treatment).
+    """
+
+    VALUE_FIELDS: ClassVar[tuple[str, ...]] = ("address", "value")
+
+    address: Value
+    value: Value
+    width: int
 
 
 @dataclass(kw_only=True, slots=True)
@@ -312,6 +658,8 @@ class TailCall:
 
 Instruction = (
     Access
+    | Address
+    | AddressOf
     | BinaryOperation
     | Block
     | BranchFalse
@@ -323,9 +671,11 @@ Instruction = (
     | InlineAsm
     | Jump
     | Label
+    | Load
     | LoopBoundary
     | RepString
     | Return
+    | Store
     | Switch
     | TailCall
 )
@@ -558,10 +908,109 @@ class Builder:
                 # Pass ``&name`` through as-is so generate_call can detect
                 # out_register arguments without the node being replaced by a
                 # temp.  Member / dereference ``PlaceAddressOf`` shapes fall to
-                # the default temp+Block, exactly as they did before the fold.
+                # the default temp+Block, exactly as they did before the fold
+                # (except the arrow-member shape lowered just below).
                 return expr
+            case ast_nodes.PlaceAddressOf(place=place) if _is_arrow_member_address_of(expr):
+                # ``&pointer->member`` address-of on a plain pointer variable
+                # (Stage 3b.1 — the lea-terminal twin of the slice 2 arrow
+                # load).  One chain-break at the dereference: ``base_value`` is
+                # the pointer var ``Value`` (the name ``"p"``), which emission
+                # re-materializes exactly like the legacy address-of path seeds
+                # its base, so no separate pointer ``Load`` op is needed.  The
+                # member ``shape`` (still rooted at the dereference) drives the
+                # static field offset at emission via the same helpers the
+                # legacy ``_emit_place_address_of`` used; :class:`AddressOf` is a
+                # pure ``lea`` terminal — no width, no signedness.
+                base_value = place.base.pointer.name
+                address_temp = self._tmp()
+                result_temp = self._tmp()
+                out.extend([
+                    Address(base_value=base_value, destination=address_temp, index=None, shape=place),
+                    AddressOf(address=address_temp, destination=result_temp),
+                ])
+                return result_temp
             case ast_nodes.AssignExpr(inner=inner):
                 return self._lower_assign_expr(inner=inner, out=out, strings=strings)
+            case ast_nodes.PlaceLoad(place=place) if _is_arrow_member_member_load(expr):
+                # ``pointer->outer.inner`` read — member-of-member-of-deref on a
+                # plain pointer variable (Stage 3b.1 slice 6).  One chain-break
+                # at the dereference: the segment's ``base_value`` is the pointer
+                # var ``Value`` (the name ``"p"``), exactly as the single-level
+                # arrow load (slice 2).  The two static member offsets ride the
+                # immutable ``shape`` and accumulate recursively in
+                # ``_resolve_member_place_info`` / ``resolve_address`` at
+                # emission — no new dynamic leaf, so this is just a longer static
+                # member shape over the proven deref chain-break.  ``width`` /
+                # ``signed`` carry emission-ignored placeholders.
+                base_value = place.base.base.pointer.name
+                address_temp = self._tmp()
+                result_temp = self._tmp()
+                out.extend([
+                    Address(base_value=base_value, destination=address_temp, index=None, shape=place),
+                    Load(address=address_temp, destination=result_temp, signed=False, width=0),
+                ])
+                return result_temp
+            case ast_nodes.PlaceLoad(place=place) if _is_arrow_member_load(expr):
+                # ``pointer->member`` read on a plain pointer variable
+                # (Stage 3b.1 slice 2).  The dereference breaks the chain: the
+                # segment's ``base_value`` is the pointer var ``Value`` (the
+                # name ``"p"``), which emission re-materializes via
+                # ``_ir_value_to_ast`` exactly like the legacy arrow-load path
+                # seeds its base, so no separate pointer ``Load`` op is needed.
+                # The member ``shape`` (still rooted at the dereference) drives
+                # the static field layout at emission via the same helpers the
+                # ``ir.Access`` arrow-load path used; ``width`` / ``signed``
+                # carry emission-ignored placeholders (the IR builder has no
+                # struct layout).
+                base_value = place.base.pointer.name
+                address_temp = self._tmp()
+                result_temp = self._tmp()
+                out.extend([
+                    Address(base_value=base_value, destination=address_temp, index=None, shape=place),
+                    Load(address=address_temp, destination=result_temp, signed=False, width=0),
+                ])
+                return result_temp
+            case ast_nodes.PlaceLoad(place=place) if _is_static_member_load(expr):
+                # ``variable.member`` read — the simplest static ir.Access load
+                # (Stage 3b.1 slice 1).  Resolve the deref-free member ``place``
+                # to an address value, then load through it.  ``width`` /
+                # ``signed`` are derived at emission from ``Address.shape`` via
+                # the existing field-layout helpers (the IR builder has no
+                # struct layout), so they carry emission-ignored placeholders.
+                address_temp = self._tmp()
+                result_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, index=None, shape=place),
+                    Load(address=address_temp, destination=result_temp, signed=False, width=0),
+                ])
+                return result_temp
+            case ast_nodes.PlaceLoad(place=place) if _is_struct_array_member_load(expr):
+                # ``array[index].member`` read — the first DYNAMIC-index shape
+                # to ride the uniform ops (Stage 3b.1 slice 4).  The single
+                # subscript ``index`` is the segment's only dynamic leaf: it is
+                # pre-lowered to a :data:`Value` here and carried on
+                # ``Address.index``, proving the design's central mechanic.  For
+                # a simple-var / constant index ``_build_expr`` emits NO
+                # preceding instruction, so emission's ``_ir_value_to_ast``
+                # round-trip reconstructs the exact AST index node
+                # ``resolve_address`` walked inline today — byte-neutral.  A
+                # compound index (``a[i + 1].f``) pre-lowers to a temp that
+                # PR #587's register allocator keeps register-resident; the byte
+                # gate is the backstop.  The member ``shape`` (rooted at the
+                # SubscriptPlace) still drives the static field offset / element
+                # stride / width at emission via the same helpers the
+                # ``ir.Access`` struct-array load used; ``width`` / ``signed``
+                # carry emission-ignored placeholders (the IR builder has no
+                # struct layout).
+                index_value = self._build_expr(expr=place.base.index, out=out, strings=strings)
+                address_temp = self._tmp()
+                result_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, index=index_value, shape=place),
+                    Load(address=address_temp, destination=result_temp, signed=False, width=0),
+                ])
+                return result_temp
             case _ if _is_migrated_access(expr):
                 temp = self._tmp()
                 out.append(Access(node=ast_nodes.Assign(expr=expr, name=temp)))
@@ -765,6 +1214,93 @@ class Builder:
                     out=out,
                     strings=strings,
                 )
+            case ast_nodes.PlaceStore(place=place, value=value) if _is_arrow_member_member_store(stmt):
+                # ``pointer->outer.inner = leaf`` write — the multi-level store
+                # twin of the slice 6 load.  One chain-break at the plain-pointer
+                # dereference: ``base_value`` is the pointer var ``Value`` (the
+                # name ``"p"``); the two static member offsets ride the ``shape``
+                # and accumulate at emission.  The byte-safe leaf RHS emits no
+                # preceding instruction, so the RHS-vs-address ordering matches
+                # the legacy store byte-for-byte (``directory->entry.d_ino = ...``
+                # in ``dirent.c``).  ``width`` carries an emission-ignored
+                # placeholder (the field width is derived from the ``shape``).
+                store_value = self._build_expr(expr=value, out=out, strings=strings)
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=place.base.base.pointer.name, destination=address_temp, index=None, shape=place),
+                    Store(address=address_temp, value=store_value, width=0),
+                ])
+            case ast_nodes.PlaceStore(place=place, value=value) if _is_arrow_member_store(stmt):
+                # ``pointer->member = leaf`` write on a plain pointer variable
+                # (Stage 3b.1 slice 3).  The dereference breaks the chain: the
+                # segment's ``base_value`` is the pointer var ``Value`` (the
+                # name ``"p"``), mirroring the arrow LOAD slice.  The RHS is a
+                # byte-safe leaf, so ``_build_expr`` emits NO preceding
+                # instruction and returns the leaf ``Value`` directly; emission
+                # reconstructs the original RHS node via ``_ir_value_to_ast``
+                # and drives the EXISTING member-store path, which orders the
+                # RHS evaluation versus the base materialization exactly as the
+                # legacy arrow store did.  The member ``shape`` drives the
+                # static field layout (offset / width / bitfield) at emission;
+                # ``width`` carries an emission-ignored placeholder (the IR
+                # builder has no struct layout).
+                store_value = self._build_expr(expr=value, out=out, strings=strings)
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=place.base.pointer.name, destination=address_temp, index=None, shape=place),
+                    Store(address=address_temp, value=store_value, width=0),
+                ])
+            case ast_nodes.PlaceStore(place=place, value=value) if _is_static_member_store(stmt):
+                # ``variable.member = leaf`` write — the static store twin of
+                # the slice 1 dot-member load (Stage 3b.1 slice 3).  Resolve the
+                # deref-free member ``place`` to a (static) address value, then
+                # store the byte-safe leaf RHS through it.  ``_build_expr`` emits
+                # no preceding instruction for the leaf, so the RHS-vs-address
+                # ordering the legacy dot store used is preserved byte-for-byte;
+                # ``width`` is derived at emission from ``Address.shape`` and
+                # carries an emission-ignored placeholder here.
+                store_value = self._build_expr(expr=value, out=out, strings=strings)
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, index=None, shape=place),
+                    Store(address=address_temp, value=store_value, width=0),
+                ])
+            case ast_nodes.PlaceStore(place=place, value=value) if _is_deref_store(stmt):
+                # ``*pointer = leaf`` write on a plain pointer variable
+                # (Stage 3b.1 slice 5).  The dereference IS the whole place: the
+                # segment's ``base_value`` is the pointer var ``Value`` (the
+                # name ``"p"``), with no static member offset and no index.  The
+                # RHS is a byte-safe leaf, so ``_build_expr`` emits NO preceding
+                # instruction and emission reconstructs it via ``_ir_value_to_ast``
+                # and drives the EXISTING ``_emit_place_store`` deref path, which
+                # orders the RHS evaluation versus the base materialization
+                # exactly as the legacy deref store did.  ``width`` carries an
+                # emission-ignored placeholder (the pointee width is derived at
+                # emission from the ``DereferencePlace`` ``shape``).
+                store_value = self._build_expr(expr=value, out=out, strings=strings)
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=place.pointer.name, destination=address_temp, index=None, shape=place),
+                    Store(address=address_temp, value=store_value, width=0),
+                ])
+            case ast_nodes.PlaceStore(place=place, value=value) if _is_struct_array_member_store(stmt):
+                # ``array[index].member = leaf`` write — the dynamic-index store
+                # twin of slice 4's struct-array load (Stage 3b.1 slice 5).  The
+                # single subscript ``index`` is the segment's only dynamic leaf:
+                # pre-lowered to a :data:`Value` here and carried on
+                # ``Address.index``, re-seated into the ``shape`` at emission by
+                # ``_ir_address_with_index``.  The byte-safe leaf RHS emits no
+                # preceding instruction, so the RHS-vs-address ordering matches
+                # the legacy store byte-for-byte; the member ``shape`` (rooted at
+                # the SubscriptPlace) drives the static field offset / element
+                # stride / width at emission via the unchanged helpers.
+                index_value = self._build_expr(expr=place.base.index, out=out, strings=strings)
+                store_value = self._build_expr(expr=value, out=out, strings=strings)
+                address_temp = self._tmp()
+                out.extend([
+                    Address(base_value=None, destination=address_temp, index=index_value, shape=place),
+                    Store(address=address_temp, value=store_value, width=0),
+                ])
             case _ if _is_migrated_access(stmt):
                 out.append(Access(node=stmt))
             case _:

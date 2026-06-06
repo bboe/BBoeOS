@@ -35,7 +35,7 @@ _CALL_TYPES = (ir.Call, ir.TailCall, ir.CarryBranch)
 
 
 #: Instruction classes that define a destination name.
-_DESTINATION_TYPES = (ir.BinaryOperation, ir.Copy, ir.Index, ir.Call)
+_DESTINATION_TYPES = (ir.Address, ir.AddressOf, ir.BinaryOperation, ir.Copy, ir.Index, ir.Call, ir.Load)
 
 #: Instruction classes that carry no reads and no allocatable defs.
 _INERT_TYPES = (ir.Jump, ir.Label, ir.LoopBoundary, ir.InlineAsm)
@@ -43,14 +43,18 @@ _INERT_TYPES = (ir.Jump, ir.Label, ir.LoopBoundary, ir.InlineAsm)
 #: Instruction classes whose reads are fully covered by VALUE_FIELDS + the
 #: explicit name-string fields handled in ``_instruction_uses``.
 _MODELED_VALUE_TYPES = (
+    ir.Address,
+    ir.AddressOf,
     ir.BinaryOperation,
     ir.BranchFalse,
     ir.Call,
     ir.Copy,
     ir.Index,
     ir.IndexAssign,
+    ir.Load,
     ir.RepString,
     ir.Return,
+    ir.Store,
     ir.TailCall,
 )
 

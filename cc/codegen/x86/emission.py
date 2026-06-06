@@ -22,7 +22,7 @@ emitted.
 from __future__ import annotations
 
 import re
-from dataclasses import fields
+from dataclasses import fields, replace
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
@@ -1827,6 +1827,34 @@ class EmissionMixin:
             and self._is_tail_call_eligible(if_stmt.else_body[-1])
         )
 
+    def _ir_address_with_index(self, address: ir.Address, /) -> Node:
+        """Return the :class:`ir.Address` ``shape``, re-seating its pre-lowered dynamic index.
+
+        When ``address.index`` is ``None`` the segment is static (a dot member /
+        symbol-rooted base) and the immutable ``shape`` already carries the full
+        place — returned as-is, exactly as slices 1-3 drove it.
+
+        When ``address.index`` is a :data:`Value` (Stage 3b.1 slice 4's
+        struct-array ``array[index].member`` shape) the dynamic subscript index
+        was pre-lowered to that ``Value`` at IR-build time.  Re-seat it into the
+        ``shape``'s :class:`SubscriptPlace` via :meth:`_ir_value_to_ast` so the
+        existing ``resolve_address`` / ``_accumulate_subscript`` path
+        materializes and scales the index from the IR ``Value`` instead of
+        re-walking the original AST sub-expression.  For a simple-var / constant
+        index the round-trip reconstructs the exact node ``resolve_address``
+        walked inline today, so the materialize / scale / index-register choice
+        is byte-identical; a compound index arrives as a register-resident temp
+        ``Var`` (the byte gate is the backstop).  The static member offset /
+        element stride / width are still derived from the rebuilt ``shape`` by
+        the unchanged layout helpers.
+        """
+        shape = address.shape
+        if address.index is None:
+            return shape
+        subscript = shape.base
+        reindexed = replace(subscript, index=self._ir_value_to_ast(address.index))
+        return replace(shape, base=reindexed)
+
     def _ir_value_to_ast(self, value: ir.Value) -> Node:
         """Convert an :data:`ir.Value` to the equivalent simple AST leaf node."""
         if isinstance(value, int):
@@ -2017,6 +2045,51 @@ class EmissionMixin:
                     self._current_call_pinned_initialized = None
             case ir.Switch():
                 self._generate_ir_switch(instruction)
+            case ir.Address(destination=destination):
+                # Pure structured-reference value: emits no code on its own.
+                # Record it so the consuming Load / Store / AddressOf can
+                # recover its ``shape`` for the static-layout resolution.
+                self._ir_address_ops[destination] = instruction
+            case ir.Load(address=address, destination=destination):
+                # ``destination = *(shape)`` — drive ``resolve_address`` from
+                # the producing ``Address``'s deref-free ``shape`` so the
+                # static field layout (offset / width / decay / bitfield) and
+                # the width-aware ``mov`` / ``movzx`` terminal are derived by
+                # the EXACT helpers the ``ir.Access`` member-load path used.
+                # The value lands in the accumulator; the store-to-local tail
+                # is the same one ``emit_store_local`` runs after evaluating a
+                # ``PlaceLoad`` expression.
+                address_op = self._ir_address_ops[address]
+                shape = self._ir_address_with_index(address_op)
+                self.emit_store_local(expression=PlaceLoad(line=shape.line, place=shape), name=destination)
+            case ir.Store(address=address, value=value):
+                # ``*(shape) = value`` — drive the EXISTING member-store path
+                # from the producing ``Address``'s deref-free ``shape`` so the
+                # static field layout (offset / width / bitfield) and the
+                # RHS-vs-base evaluation ordering are produced by the EXACT
+                # helper the ``ir.Access`` member-store path used
+                # (``_emit_place_store``).  ``value`` is a byte-safe leaf
+                # (guaranteed by the ``_is_*_member_store`` lowering predicate),
+                # so ``_ir_value_to_ast`` round-trips it to the AST node the
+                # legacy store evaluated in place — no spill/reload, byte-neutral.
+                shape = self._ir_address_with_index(self._ir_address_ops[address])
+                self._emit_place_store(shape, self._ir_value_to_ast(value))
+                # The legacy statement-level ``PlaceStore`` path clears AX
+                # tracking after the store (the accumulator no longer holds a
+                # tracked local); mirror it so downstream codegen decisions
+                # match byte-for-byte.
+                self.ax_clear()
+            case ir.AddressOf(address=address, destination=destination):
+                # ``destination = &(shape)`` — drive the EXISTING address-of
+                # path from the producing ``Address``'s deref-free ``shape`` so
+                # the static field layout (offset) and the ``lea`` terminal are
+                # produced by the EXACT helper the legacy ``PlaceAddressOf``
+                # expression used (``_emit_place_address_of``).  The address
+                # lands in the accumulator and the store-to-local tail matches
+                # the one ``emit_store_local`` runs after a ``PlaceAddressOf``
+                # expression, so this is byte-neutral with the prior temp+Block.
+                shape = self._ir_address_with_index(self._ir_address_ops[address])
+                self.emit_store_local(expression=PlaceAddressOf(line=shape.line, place=shape), name=destination)
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
 
@@ -4855,5 +4928,10 @@ class EmissionMixin:
 
     def lower_ir_body(self, body: list[ir.Instruction]) -> None:
         """Generate x86 assembly from a flat IR instruction list."""
+        # ``Address`` ops emit no code; they name a resolved address that a
+        # later ``Load`` / ``Store`` / ``AddressOf`` consumes.  Record each by
+        # its destination temp so the consumer can recover its ``shape`` (the
+        # deref-free place driving the static layout in ``resolve_address``).
+        self._ir_address_ops: dict[str, ir.Address] = {}
         for instruction in body:
             self._lower_ir_instruction(instruction)
