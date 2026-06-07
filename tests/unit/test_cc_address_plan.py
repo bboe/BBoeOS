@@ -73,6 +73,15 @@ void write_through(int *target, int value) {
 }
 """
 
+DIVISION_FUSION_SOURCE = """
+int helper(int alpha, int beta, int gamma) {
+    return alpha + beta + gamma;
+}
+int provoke(int seed) {
+    return helper(seed / 1000 + seed % 1000, seed * 3, seed * 5);
+}
+"""
+
 DOT_MEMBER_SOURCE = """
 struct point { int x; int y; };
 struct point g;
@@ -491,6 +500,29 @@ def test_deref_store_consumes_native_plan() -> None:
     # pointer load (a push/pop pair here would be a +2-byte regression the
     # byte gate would also catch corpus-wide).
     assert "push eax" not in lines
+
+
+def test_division_remainder_fusion_survives_temp_allocation() -> None:
+    """A div-containing function never homes an IR temp in DX.
+
+    So the div/mod remainder fusion (division_remainder) and the
+    push/pop-free div sequence are preserved.  This is the gettimeofday
+    class-1 anatomy: a paired ``/ 1000`` + ``% 1000`` where the ``%``
+    reuses EDX from the single ``div`` — a temp homed in DX anywhere in
+    the function (even one dead long before the div; here the
+    ``seed * 3`` / ``seed * 5`` call-argument temps are defined AFTER
+    both divisions, so the per-instruction live-range constraint legally
+    leaves them unconstrained) flips the function-global ``dx_pinned``,
+    forcing ``push edx`` / ``pop edx`` around every div and a second
+    ``div`` for the ``%``.
+    """
+    generator = _generate(DIVISION_FUSION_SOURCE)
+    dx_register = generator.target.dx_register
+    assert dx_register not in generator.temp_pinned_registers.values()
+    body = generator.output.split("provoke:")[1]
+    lines = [line.strip() for line in body.splitlines()]
+    assert sum(1 for line in lines if line.startswith("div ")) == 1
+    assert "push edx" not in lines
 
 
 def test_dot_member_load_produces_pure_displacement_plan() -> None:

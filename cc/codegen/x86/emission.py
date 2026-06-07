@@ -649,6 +649,23 @@ class EmissionMixin:
         # those paths.
         if self._body_has_member_index_access(body):
             reserved_registers.add(self.target.bx_register)
+        # (e) DX, when the body contains a DX-writing BinaryOperation
+        # (``/``, ``%``, or ``*`` with a non-constant right operand): a
+        # DX-homed temp would be CORRECT — ``protect_dx`` in
+        # _generate_binary_operation_expression brackets every ``div``
+        # with a save — but COSTLY: ``dx_pinned`` consults every home in
+        # ``pinned_register`` for the WHOLE function, so a temp homed in
+        # DX anywhere (even one dead long before the division, which the
+        # per-instruction constraint loop below legally leaves
+        # unconstrained) forces ``push edx`` / ``pop edx`` around every
+        # ``div`` AND sets ``division_remainder = None``, killing the
+        # div→mod remainder-reuse fusion (a paired ``%`` re-divides
+        # instead of reading the remainder out of DX — the gettimeofday
+        # ``/ 1000`` + ``% 1000`` anatomy).  Reserving DX in
+        # div-containing functions keeps the fusion alive at the cost of
+        # one pool register, mirroring the BX member-index drop above.
+        if self._body_has_dx_writing_binary_operation(body):
+            reserved_registers.add(self.target.dx_register)
         temp_pool = tuple(register for register in self.target.register_pool if register not in reserved_registers)
         if not temp_pool:
             return
@@ -756,6 +773,30 @@ class EmissionMixin:
                 and all(parameter.out_register is None and parameter.in_register is None for parameter in function.params)
             ):
                 function.regparm_count = min(3, len(function.params))
+
+    def _body_has_dx_writing_binary_operation(self, body: list[ir.Instruction], /) -> bool:
+        """Return True if any IR instruction is a DX-writing :class:`ir.BinaryOperation`.
+
+        Reuses :meth:`_instruction_clobber_registers` as the single
+        operator oracle (``/`` / ``%`` / ``*``-with-non-constant-right —
+        the ``div`` / ``mul`` arms that write DX); the comparison is
+        against the canonical 16-bit ``"dx"`` that helper returns, before
+        any widening to the target's pool name.  Switch arms are walked
+        explicitly so the check stays scoped to BinaryOperation
+        instructions (the Switch instruction's own clobber union would
+        also fold in Load / Store materialization writes).
+        """
+        for instruction in body:
+            match instruction:
+                case ir.BinaryOperation():
+                    if "dx" in self._instruction_clobber_registers(instruction):
+                        return True
+                case ir.Switch(cases=cases):
+                    if any(self._body_has_dx_writing_binary_operation(switch_case.body) for switch_case in cases):
+                        return True
+                case _:
+                    pass
+        return False
 
     def _classify_switch_arms(self, statement: Switch, /, *, cases_override: list | None = None) -> tuple:
         """Split a switch's cases into ``(default_case, case_arms)`` and check enum exhaustiveness.
