@@ -267,12 +267,15 @@ def _is_deref_store(node: ast_nodes.Node, /) -> bool:
     pointer ``Value`` (the name ``"p"``) and there is no static member offset to
     derive.  Gated on a byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`) so
     the RHS-vs-address ordering stays byte-identical to the legacy deref store.
-    Emission drives the EXACT legacy ``_emit_place_store`` path off the
-    immutable ``DereferencePlace`` ``shape``; ``base_value`` is purely the
-    optimizer-visible dynamic leaf.  Stage 3b.1 slice 5 lowers exactly this
-    plain-pointer-var subset onto :class:`Address` + :class:`Store`; every
-    other deref store shape (``*(p + 1)``, ``*(T *)e``, ``*pp``) stays on
-    :class:`Access` unchanged.
+    Emission plans natively via :func:`~cc.codegen.x86.emission._plan_deref_store`
+    (``deref_store`` :class:`~cc.codegen.address_plan.AddressPlan`); the
+    :class:`Store` terminal drives :meth:`~cc.codegen.x86.emission.EmissionMixin._emit_planned_deref_store`
+    directly.  ``base_value`` is purely the optimizer-visible dynamic leaf.
+    Stage 3b.1 slice 5 lowers exactly this plain-pointer-var subset onto
+    :class:`Address` + :class:`Store`; every other deref store shape
+    (``*(p + 1)``, ``*(T *)e``, ``*pp``) stays on :class:`Access` unchanged.
+    The aliased-pointer and non-pointer-holder cases that fail the plan gate
+    fall back to the legacy ``_emit_place_store`` path for diagnostics.
     """
     return (
         isinstance(node, ast_nodes.PlaceStore)
@@ -362,12 +365,14 @@ def _is_nested_subscript_load(node: ast_nodes.Node, /) -> bool:
     (``g.cells[i][j]`` / ``p->field[i][j]``).  Each subscript index is carried
     as a distinct dynamic leaf in :attr:`Address.indices` (in
     outermost-dimension-first order); the per-position row-major strides stay
-    layout-derived at emission, where the reconstructed ``PlaceLoad`` reaches
-    the EXACT addresser the :class:`Access` escape hatch fed.  Gated on simple
-    (bare ``Var`` / ``Int``) indices so the re-seated index node round-trips to
-    the exact AST sub-expression the legacy access walked inline, keeping the
-    address computation byte-identical; a compound index stays on
-    :class:`Access` (the byte gate is the backstop).
+    layout-derived at emission.  Multidim and struct-field-array chains plan
+    natively via :func:`~cc.codegen.x86.emission._plan_subscript_chain` as
+    Horner :class:`~cc.codegen.address_plan.AddressPlan` objects.  Only the
+    array-of-pointers residual subfamily (mid-chain element-pointer load)
+    falls back to AST re-seat — those shapes decline planning in the phase-1
+    model.  Gated on simple (bare ``Var`` / ``Int``) indices so the
+    array-of-pointers residual path round-trips the index node byte-identically;
+    a compound index stays on :class:`Access` (the byte gate is the backstop).
     """
     return isinstance(node, ast_nodes.PlaceLoad) and _is_nested_named_subscript_chain(node.place)
 
@@ -456,10 +461,11 @@ def _is_struct_array_member_store(node: ast_nodes.Node, /) -> bool:
     SubscriptPlace base is a bare array variable (no dereference, no nested
     subscript), so the chain never breaks (``base_value`` stays ``None``) and
     the single subscript index is the segment's only dynamic leaf — pre-lowered
-    to a :data:`Value` carried on ``Address.indices`` and re-seated into the
-    ``shape`` at emission by :meth:`_ir_address_with_index`, exactly as the load
-    twin does.  Gated on a byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`)
-    so the RHS-vs-address ordering stays byte-identical to the legacy store.
+    to a :data:`Value` carried on ``Address.indices``; both load and store twins
+    plan natively as subscript-terminal :class:`~cc.codegen.address_plan.AddressPlan`
+    objects (via :func:`~cc.codegen.x86.emission._plan_subscript_terminal`).
+    Gated on a byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`) so the
+    RHS-vs-address ordering stays byte-identical to the legacy store.
     Stage 3b.1 slice 5 lowers exactly this shape onto :class:`Address` +
     :class:`Store`; every other subscript-member store shape stays on
     :class:`Access` unchanged.
@@ -481,10 +487,10 @@ def _is_subscript_call(node: ast_nodes.Node, /) -> bool:
     COMPOUND (the slice-4 precedent: an index temp is consumed IMMEDIATELY by
     the address scale, so the allocator keeps it register-resident —
     ``_atexit_fns[--_atexit_count]()`` in ``stdlib.c`` ``exit`` is the real
-    consumer and the byte gate the proof).  Emission re-seats the index into
-    the ``shape`` and drives the EXACT legacy function-pointer call statement
-    path, which folds the slot load and the call into one ``call [table +
-    reg*4]`` instruction — hence :class:`IndirectCall` consumes the SLOT
+    consumer and the byte gate the proof).  Emission plans the slot as a
+    ``call_slot`` AddressPlan and replays the EXACT legacy function-pointer
+    call statement walk from it, keeping the slot load and the call adjacent
+    — hence :class:`IndirectCall` consumes the SLOT
     :class:`Address`, not a pre-loaded pointer.  Gated on zero arguments and
     discarded result (statement position): argument evaluation ordering and
     the result store stay on :class:`Access` until a consumer surfaces.
@@ -684,8 +690,8 @@ class IndirectCall:
     """call [address] — discarded-result call through the function pointer stored at a resolved :class:`Address`.
 
     The statement-position ``place()`` no-argument call through a
-    function-pointer slot (``handlers[index]()``).  The single x86
-    instruction loads and calls through the slot in one step, so the op
+    function-pointer slot (``handlers[index]()``).  Emission loads the
+    pointer from the slot and calls through the accumulator, so the op
     consumes the SLOT address, not a pre-loaded pointer value.
     Side-effecting like :class:`Call`: never eliminated by DCE, and a memory
     barrier that :class:`Load` / :class:`AddressOf` must not be reordered or
@@ -1449,9 +1455,9 @@ class Builder:
                 # a function-pointer slot.  The index — compound allowed, the
                 # slice-4 immediate-consumption precedent — pre-lowers to the
                 # segment's only dynamic leaf on ``Address.indices``; emission
-                # re-seats it into the ``shape`` and drives the EXACT legacy
-                # function-pointer call path, which loads and calls through the
-                # slot in one ``call [table + reg*4]`` instruction
+                # plans the slot natively and replays the legacy indexed-call
+                # shape (scale into the SI base, slot load, ``call`` through
+                # the accumulator)
                 # (``_atexit_fns[--_atexit_count]()`` in ``stdlib.c`` ``exit``).
                 index_value = self._build_expr(expr=place.index, out=out, strings=strings)
                 address_temp = self._tmp()
@@ -1551,12 +1557,12 @@ class Builder:
                 # simple subscript index is a distinct dynamic leaf on
                 # ``Address.indices`` (source order); the static member
                 # offsets ride the ``shape`` and accumulate at emission, where
-                # ``_reseat_nested_subscript_indices`` rebuilds the chain and
-                # drives the EXACT legacy ``_emit_place_store`` path.  The
-                # byte-safe leaf RHS emits no preceding instruction, so the
-                # RHS-vs-address ordering matches the legacy store
-                # byte-for-byte (``symbol_table[index].name[n] = src`` in
-                # ``asm.c`` ``symbol_add``).
+                # ``_plan_mixed_subscript_chain`` builds a multi-term
+                # subscript-terminal ``AddressPlan`` that drives the native
+                # store path.  The byte-safe leaf RHS emits no preceding
+                # instruction, so the RHS-vs-address ordering matches the
+                # legacy store byte-for-byte (``symbol_table[index].name[n] =
+                # src`` in ``asm.c`` ``symbol_add``).
                 indices = self._lower_subscript_chain_indices(place=place, out=out, strings=strings)
                 store_value = self._build_expr(expr=value, out=out, strings=strings)
                 address_temp = self._tmp()

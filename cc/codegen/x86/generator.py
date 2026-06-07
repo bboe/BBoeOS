@@ -16,7 +16,10 @@ import dataclasses
 import os
 import re
 from dataclasses import dataclass, field, fields
-from typing import ClassVar, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from cc import ir, regalloc
 from cc.ast_nodes import (
@@ -693,6 +696,19 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         return 1
 
     @staticmethod
+    def _bitfield_write_literal_value(info: FieldInfo | None, value: Node, /) -> int | None:
+        """Return the 0/1 literal for a 1-bit bitfield store of an ``Int``, else None.
+
+        The pure eligibility core shared by the place-driven
+        :meth:`_member_bitfield_literal` wrapper and the plan-driven native
+        ``ir.Store`` path (which carries the member's bitfield
+        :class:`FieldInfo` on its ``AddressPlan`` rather than a place).
+        """
+        if info is not None and info.bit_width == 1 and isinstance(value, Int) and value.value in (0, 1):
+            return value.value
+        return None
+
+    @staticmethod
     def _build_address(base: str, offset: int, /, *, index: str = "") -> str:
         """Return ``[base+offset+index]``, collapsing zero ``offset``.
 
@@ -1247,6 +1263,46 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if pointee_type == "unsigned short" and self.target.int_size > 2:
             return 2
         return self.target.int_size
+
+    def _derive_dot_member_layout(self, place: MemberPlace, /) -> tuple[str, FieldInfo]:
+        """Pure layout derivation for ``obj.field`` (the VariablePlace arm).
+
+        Returns ``(base_operand, info)`` without emitting code — the pure half
+        of :meth:`_resolve_member_place_info`'s dot arm, shared by the legacy
+        resolver and the AddressPlan planner.
+        """
+        base = place.base
+        member_name = place.member_name
+        line = place.line
+        struct_type = self.variable_types.get(base.name)
+        if struct_type is None:
+            message = f"undefined variable '{base.name}'"
+            raise CompileError(message, line=line)
+        if struct_type.endswith("*") or not struct_type.startswith("struct "):
+            message = f"'.' requires a struct value, got type '{struct_type}'"
+            raise CompileError(message, line=line)
+        tag = struct_type[7:]
+        info = self._lookup_struct_field(tag, member_name, line)
+        base_operand = self._resolve_struct_value_base(base.name, line=line)
+        return base_operand, info
+
+    @staticmethod
+    def _derive_row_major_strides(dimension_counts: list[int], /, *, element_size: int) -> list[int]:
+        """Return the per-position byte strides for a row-major multidim array.
+
+        ``strides[p]`` is the product of the dimension counts after position
+        *p*, times the element size — the byte distance one step of index *p*
+        moves (the Horner expansion's per-position scale).  Pure; shared by
+        the three multidim layout halves and hence by both the legacy
+        ``resolve_address`` emitters and the AddressPlan planner.
+        """
+        strides: list[int] = []
+        running = element_size
+        for count in reversed(dimension_counts):
+            strides.append(running)
+            running *= count
+        strides.reverse()
+        return strides
 
     def _emit_bitfield_read(self, info: FieldInfo, /, *, addr: str) -> None:
         """Emit the load-shift-mask-extend sequence for a bitfield read.
@@ -2093,6 +2149,130 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for name in sorted(self.global_arrays):
             self._emit_global_array(name)
 
+    def _emit_horner_index_offsets(self, indices: list[Node], strides: list[int], /) -> tuple[int, str | None]:
+        """Emit the shared multidim Horner index walk; return ``(folded, index_register)``.
+
+        The emitting half common to all three row-major addressers
+        (:meth:`_emit_horner_static_base_operand`,
+        :meth:`_emit_horner_member_base_operand`,
+        :meth:`_emit_horner_pointer_base_operand`).  Constant indices fold
+        into the returned displacement delta; every dynamic index is
+        pre-evaluated into a scaled byte offset and stashed on the stack
+        before any BX accumulation (so an index variable pinned to BX is read
+        before BX is first clobbered), then the stashed offsets are summed
+        into BX (addition is commutative so pop order does not affect the
+        result).  ``protect_bx`` push/pops a pinned BX around each index
+        expression's evaluation.
+        """
+        bx = self.target.bx_register
+        displacement = 0
+        dynamic_index_count = 0
+        protect_bx = self._bx_holds_pinned_var()
+        for index_node, stride in zip(indices, strides, strict=True):
+            if isinstance(index_node, Int):
+                displacement += index_node.value * stride
+                continue
+            if protect_bx:
+                self.emit(f"        push {bx}")
+            self.generate_expression(index_node)  # AX = dynamic index
+            self._emit_scale_index(self.target.acc, scale=stride)  # AX = byte offset
+            if protect_bx:
+                self.emit(f"        pop {bx}")
+            self.emit(f"        push {self.target.acc}")  # stash scaled offset
+            dynamic_index_count += 1
+        index_register: str | None = None
+        for _ in range(dynamic_index_count):
+            if index_register is None:
+                self.emit(f"        pop {bx}")
+                index_register = bx
+            else:
+                self.emit(f"        pop {self.target.acc}")
+                self.emit(f"        add {bx}, {self.target.acc}")
+        return displacement, index_register
+
+    def _emit_horner_member_base_operand(
+        self, *, base: str, displacement: int, element_size: int, indices: list[Node], strides: list[int]
+    ) -> MemoryOperand:
+        """Emit the dot-member multidim tail: Horner walk, then the struct base ``lea``'d into SI.
+
+        The base address is materialized into SI unconditionally — even when
+        every index folded into the displacement — so ``[si+disp]`` stays
+        legal at 16-bit (where ``[bp+bx]`` is not).  The field offset arrives
+        pre-folded in *displacement* and rides the operand.
+        """
+        folded, index_register = self._emit_horner_index_offsets(indices, strides)
+        displacement += folded
+        si = self.target.si_register
+        self.emit(f"        lea {si}, [{base}]")
+        if index_register is not None:
+            self.emit(f"        add {si}, {index_register}")
+            index_register = None
+        return MemoryOperand(
+            base=si,
+            base_kind="register",
+            displacement=displacement,
+            element_size=element_size,
+            field_size=element_size,
+            index=index_register,
+        )
+
+    def _emit_horner_pointer_base_operand(
+        self, base_name: str, /, *, displacement: int, element_size: int, indices: list[Node], strides: list[int]
+    ) -> MemoryOperand:
+        """Emit the pointer-base multidim tail: Horner walk, then the pointer VALUE loaded into SI.
+
+        Shared by the arrow-member multidim shape (``p->field[i][j]``, where
+        the struct pointer's value seeds the base) and the pointer-to-array
+        shape (``p[i][j]`` over ``int (*p)[3]``, where the address stored in
+        ``p``'s slot seeds the base) — their emitting halves are
+        byte-identical.
+        """
+        folded, index_register = self._emit_horner_index_offsets(indices, strides)
+        displacement += folded
+        si = self.target.si_register
+        self._emit_load_var(base_name, register=si)
+        if index_register is not None:
+            self.emit(f"        add {si}, {index_register}")
+            index_register = None
+        return MemoryOperand(
+            base=si,
+            base_kind="register",
+            displacement=displacement,
+            element_size=element_size,
+            field_size=element_size,
+            index=index_register,
+        )
+
+    def _emit_horner_static_base_operand(
+        self, *, base: str, base_kind: str, displacement: int, element_size: int, indices: list[Node], strides: list[int]
+    ) -> MemoryOperand:
+        """Emit the bare-multidim tail: Horner walk over a static frame/label base.
+
+        The base stays a static operand string (with BX carrying the summed
+        dynamic offset) except for the frame-base dynamic-index case: a frame
+        base (BP-relative) cannot be combined with a BX index in a 16-bit
+        effective address ([BP+BX] is illegal — a 16-bit index must be
+        SI/DI), so the full address is materialized into SI (as the
+        double-index emitter does) and ``[si+disp]`` stays valid at both
+        widths.
+        """
+        folded, index_register = self._emit_horner_index_offsets(indices, strides)
+        displacement += folded
+        if index_register is not None and base_kind == "frame":
+            si = self.target.si_register
+            self.emit(f"        lea {si}, [{base}]")
+            self.emit(f"        add {si}, {index_register}")
+            base = si
+            index_register = None
+        return MemoryOperand(
+            base=base,
+            base_kind="register",
+            displacement=displacement,
+            element_size=element_size,
+            field_size=element_size,
+            index=index_register,
+        )
+
     def _emit_inline_body(self, name: str, /) -> None:
         """Emit the stored body for an ``always_inline`` function.
 
@@ -2424,80 +2604,23 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         legal at 16-bit, where ``[bp+bx]`` is not).  The terminal load/store
         uses the field's innermost element size (handles int / 4-byte
         elements, bypassing the bespoke member-index 1/2-byte gate).
-
-        Raises:
-            CompileError: if the subscript count does not match the field's
-            dimension count.
-
+        The pure layout half (:meth:`_multidim_member_horner_layout`) raises
+        ``CompileError`` if the subscript count does not match the field's
+        dimension count.
         """
-        info = self._resolve_member_index_layout(arrow=arrow, line=line, member_name=field_name, object_name=object_name)
-        field_offset = info.byte_offset
-        array_type = Type.from_string(info.type_name)
-        assert isinstance(array_type, ArrayType)
-        dimension_counts: list[int] = []
-        element_type: Type = array_type
-        while isinstance(element_type, ArrayType):
-            dimension_counts.append(element_type.count or 0)
-            element_type = element_type.pointee
-        if len(indices) != len(dimension_counts):
-            message = f"wrong number of subscripts for '{field_name}'"
-            raise CompileError(message, line=line)
-        element_size = self._type_size(element_type.to_string())
-        # Per-position byte stride: product of inner dimension counts after
-        # this position, times the element size (row-major Horner).
-        strides: list[int] = []
-        running = element_size
-        for count in reversed(dimension_counts):
-            strides.append(running)
-            running *= count
-        strides.reverse()
-        bx = self.target.bx_register
-        si = self.target.si_register
-        displacement = field_offset
-        # Pre-evaluate every dynamic index into a scaled byte offset, stashing
-        # each on the stack before any BX accumulation (so an index pinned to
-        # BX is read before BX is first clobbered) — same ordering as the
-        # contiguous-array emitter.
-        dynamic_index_count = 0
-        protect_bx = self._bx_holds_pinned_var()
-        for index_node, stride in zip(indices, strides, strict=True):
-            if isinstance(index_node, Int):
-                displacement += index_node.value * stride
-                continue
-            if protect_bx:
-                self.emit(f"        push {bx}")
-            self.generate_expression(index_node)  # AX = dynamic index
-            self._emit_scale_index(self.target.acc, scale=stride)  # AX = byte offset
-            if protect_bx:
-                self.emit(f"        pop {bx}")
-            self.emit(f"        push {self.target.acc}")
-            dynamic_index_count += 1
-        index_register: str | None = None
-        for _ in range(dynamic_index_count):
-            if index_register is None:
-                self.emit(f"        pop {bx}")
-                index_register = bx
-            else:
-                self.emit(f"        pop {self.target.acc}")
-                self.emit(f"        add {bx}, {self.target.acc}")
+        field_offset, element_size, strides = self._multidim_member_horner_layout(
+            object_name, arrow=arrow, field_name=field_name, index_count=len(indices), line=line
+        )
         # Materialize the struct base into SI.  Arrow: load the pointer value;
         # dot: lea the struct's frame/label address.  The field offset stays in
         # the displacement so ``[si+disp]`` carries it.
         if arrow:
-            self._emit_load_var(object_name, register=si)
-        else:
-            _base_kind, base = self._variable_base(object_name, line=line)
-            self.emit(f"        lea {si}, [{base}]")
-        if index_register is not None:
-            self.emit(f"        add {si}, {index_register}")
-            index_register = None
-        return MemoryOperand(
-            base=si,
-            base_kind="register",
-            displacement=displacement,
-            element_size=element_size,
-            field_size=element_size,
-            index=index_register,
+            return self._emit_horner_pointer_base_operand(
+                object_name, displacement=field_offset, element_size=element_size, indices=indices, strides=strides
+            )
+        _base_kind, base = self._variable_base(object_name, line=line)
+        return self._emit_horner_member_base_operand(
+            base=base, displacement=field_offset, element_size=element_size, indices=indices, strides=strides
         )
 
     def _emit_multidim_subscript_address(self, base_name: str, indices: list[Node], /, *, line: int) -> MemoryOperand:
@@ -2513,81 +2636,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         :class:`MemoryOperand` naming the resolved element address sized at
         the innermost element width, so the shared terminal load/store runs
         unchanged (this is the contiguous-multidim branch of
-        :meth:`resolve_address`).
-
-        Raises:
-            CompileError: if the subscript count does not match the array's
-            dimension count.
-
+        :meth:`resolve_address`).  The pure layout half
+        (:meth:`_multidim_subscript_horner_layout`) raises ``CompileError``
+        if the subscript count does not match the array's dimension count.
         """
-        array_type = self.array_types[base_name]
-        dimension_counts: list[int] = []
-        element_type: Type = array_type
-        while isinstance(element_type, ArrayType):
-            dimension_counts.append(element_type.count or 0)
-            element_type = element_type.pointee
-        if len(indices) != len(dimension_counts):
-            message = f"wrong number of subscripts for '{base_name}'"
-            raise CompileError(message, line=line)
-        element_size = self._type_size(element_type.to_string())
-        # Per-position byte stride: product of the inner dimension counts
-        # after this position, times the element size.
-        strides: list[int] = []
-        running = element_size
-        for count in reversed(dimension_counts):
-            strides.append(running)
-            running *= count
-        strides.reverse()
+        element_size, strides = self._multidim_subscript_horner_layout(base_name, index_count=len(indices), line=line)
         base_kind, base = self._variable_base(base_name, line=line)
-        displacement = 0
-        bx = self.target.bx_register
-        # Pre-evaluate every dynamic index: compute its scaled byte offset into AX
-        # and push it to the stack, protecting BX across each expression via
-        # push/pop when BX holds a pinned variable.  Evaluating all expressions
-        # before any BX accumulation ensures that an index variable pinned to BX
-        # (e.g. the innermost loop counter k in a triple-nested loop) is read from
-        # the correct register before BX is first overwritten by the accumulator.
-        dynamic_index_count = 0
-        protect_bx = self._bx_holds_pinned_var()
-        for index_node, stride in zip(indices, strides, strict=True):
-            if isinstance(index_node, Int):
-                displacement += index_node.value * stride
-                continue
-            if protect_bx:
-                self.emit(f"        push {bx}")
-            self.generate_expression(index_node)  # AX = dynamic index
-            self._emit_scale_index(self.target.acc, scale=stride)  # AX = byte offset
-            if protect_bx:
-                self.emit(f"        pop {bx}")
-            self.emit(f"        push {self.target.acc}")  # stash scaled offset
-            dynamic_index_count += 1
-        # Accumulate all stashed offsets into BX (sum; addition is commutative so
-        # pop order does not affect the result).
-        index_register: str | None = None
-        for _ in range(dynamic_index_count):
-            if index_register is None:
-                self.emit(f"        pop {bx}")
-                index_register = bx
-            else:
-                self.emit(f"        pop {self.target.acc}")
-                self.emit(f"        add {bx}, {self.target.acc}")
-        if index_register is not None and base_kind == "frame":
-            # A frame base (BP-relative) cannot be combined with a BX index in a
-            # 16-bit effective address ([BP+BX] is illegal — a 16-bit index must
-            # be SI/DI).  Materialize the full address into SI (as the
-            # double-index emitter does) so ``[si+disp]`` is valid at both widths.
-            si = self.target.si_register
-            self.emit(f"        lea {si}, [{base}]")
-            self.emit(f"        add {si}, {index_register}")
-            base = si
-            index_register = None
-        return MemoryOperand(
-            base=base,
-            base_kind="register",
-            displacement=displacement,
-            element_size=element_size,
-            field_size=element_size,
-            index=index_register,
+        return self._emit_horner_static_base_operand(
+            base=base, base_kind=base_kind, displacement=0, element_size=element_size, indices=indices, strides=strides
         )
 
     def _emit_place_address_of(self, place: Place, /) -> None:
@@ -2644,11 +2700,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if info.bit_width is not None:
                 message = f"cannot take address of bitfield '{place.member_name}'"
                 raise CompileError(message, line=place.line)
-            self.ax_clear()
-            self._emit_load_var(object_name, register=self.target.acc)
-            if info.byte_offset:
-                self.emit(f"        add {self.target.acc}, {info.byte_offset}")
-            self.ax_clear()
+            self._emit_pointer_member_address_of(object_name, byte_offset=info.byte_offset)
             return
         # Dot form: ``&obj.field`` (named struct value).
         if isinstance(base, VariablePlace):
@@ -2959,23 +3011,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         self.emit(f"        mov {register}, {source}")
                     self.ax_clear()
                     return
-                holder_type = self.variable_types.get(pointer_name)
-                if not holder_type or not holder_type.endswith("*"):
+                # NOTE: the byte/full width select (including the documented
+                # ``unsigned short *`` gap) lives in the shared
+                # ``_named_pointer_deref_store_width`` helper, which the
+                # AddressPlan planner also reads.
+                width = self._named_pointer_deref_store_width(pointer_name)
+                if width is None:
                     message = f"pointer dereference write to non-pointer variable '{pointer_name}'"
                     raise CompileError(message, line=place.line)
-                pointee_type = holder_type[:-1]
                 self.generate_expression(value)
                 self._emit_load_var(pointer_name, register=self.target.si_register)
-                # NOTE: this byte/full select reproduces the legacy bespoke
-                # emitter exactly and shares its latent gap — a 32-bit
-                # ``unsigned short *`` write stores the full accumulator
-                # instead of the low word.  Left byte-identical here; fixing
-                # it is a separate codegen change (own commit + width test)
-                # because it alters emitted bytes for that case.
-                if pointee_type in self.BYTE_TYPES:
-                    self.emit(f"        mov [{self.target.si_register}], {self.target.low_byte(self.target.acc)}")
-                else:
-                    self.emit(f"        mov [{self.target.si_register}], {self.target.acc}")
+                self._emit_store_accumulator_at_width(destination=f"[{self.target.si_register}]", width=width)
                 self.ax_clear()
                 return
             # Cast / arbitrary address expression: ``*(T *)e = value``.
@@ -3009,6 +3055,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # resolver and run the shared protect-BX terminal store.
         self._emit_subscript_resolved_store(place, value)
 
+    def _emit_pointer_member_address_of(self, object_name: str, /, *, byte_offset: int) -> None:
+        """Emit ``&ptr->field`` for a named pointer: pointer value plus field offset.
+
+        The emitting half of the legacy ``_emit_place_address_of`` arrow arm,
+        split out so the plan-driven native ``ir.AddressOf`` terminal and the
+        place-driven legacy arm (which keeps the type / bitfield diagnostics)
+        share one byte sequence: the pointer VALUE loads into the accumulator
+        and a nonzero field offset folds in with a single ``add``.
+        """
+        self.ax_clear()
+        self._emit_load_var(object_name, register=self.target.acc)
+        if byte_offset:
+            self.emit(f"        add {self.target.acc}, {byte_offset}")
+        self.ax_clear()
+
     def _emit_pointer_to_array_address(self, base_name: str, indices: list[Node], /, *, line: int) -> MemoryOperand:
         """Emit the row-major address of ``p[i0][i1]...`` for a pointer-to-array ``p``.
 
@@ -3024,69 +3085,14 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         Mirrors :meth:`_emit_multidim_subscript_address` (Horner over the
         strides) but loads the pointer value into a base register and
         materializes it into SI so ``[si+disp]`` stays legal at 16-bit.
-
-        Raises:
-            CompileError: on a partial subscript (fewer than ``n + 1`` indices).
-
+        The pure layout half (:meth:`_pointer_to_array_horner_layout`)
+        raises ``CompileError`` on a partial subscript (fewer than ``n + 1``
+        indices).
         """
-        pointer_type = self.pointer_array_types[base_name]
-        pointee_dimension_counts: list[int] = []
-        element_type: Type = pointer_type.pointee
-        while isinstance(element_type, ArrayType):
-            pointee_dimension_counts.append(element_type.count or 0)
-            element_type = element_type.pointee
-        expected = len(pointee_dimension_counts) + 1
-        if len(indices) != expected:
-            message = f"unsupported partial subscript of pointer-to-array '{base_name}'"
-            raise CompileError(message, line=line)
-        element_size = self._type_size(element_type.to_string())
-        # ``n + 1`` strides: the inner ``n`` strides come from the pointee
-        # dimension Horner; the outermost stride is the size of the whole
-        # pointee array (== element_size * product(d1..dn)).
-        strides: list[int] = []
-        running = element_size
-        for count in reversed(pointee_dimension_counts):
-            strides.append(running)
-            running *= count
-        strides.append(running)  # outermost index strides by sizeof(pointee array)
-        strides.reverse()
-        bx = self.target.bx_register
-        si = self.target.si_register
-        displacement = 0
-        dynamic_index_count = 0
-        protect_bx = self._bx_holds_pinned_var()
-        for index_node, stride in zip(indices, strides, strict=True):
-            if isinstance(index_node, Int):
-                displacement += index_node.value * stride
-                continue
-            if protect_bx:
-                self.emit(f"        push {bx}")
-            self.generate_expression(index_node)  # AX = dynamic index
-            self._emit_scale_index(self.target.acc, scale=stride)  # AX = byte offset
-            if protect_bx:
-                self.emit(f"        pop {bx}")
-            self.emit(f"        push {self.target.acc}")
-            dynamic_index_count += 1
-        index_register: str | None = None
-        for _ in range(dynamic_index_count):
-            if index_register is None:
-                self.emit(f"        pop {bx}")
-                index_register = bx
-            else:
-                self.emit(f"        pop {self.target.acc}")
-                self.emit(f"        add {bx}, {self.target.acc}")
+        element_size, strides = self._pointer_to_array_horner_layout(base_name, index_count=len(indices), line=line)
         # Load the POINTER VALUE (the address stored in p's slot) into SI.
-        self._emit_load_var(base_name, register=si)
-        if index_register is not None:
-            self.emit(f"        add {si}, {index_register}")
-            index_register = None
-        return MemoryOperand(
-            base=si,
-            base_kind="register",
-            displacement=displacement,
-            element_size=element_size,
-            field_size=element_size,
-            index=index_register,
+        return self._emit_horner_pointer_base_operand(
+            base_name, displacement=0, element_size=element_size, indices=indices, strides=strides
         )
 
     def _emit_push_arg(self, arg: Node, /) -> None:
@@ -3320,8 +3326,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         2-byte width on a 32-bit target stores the low-word alias with an
         explicit ``word`` size prefix; every other width stores the full
         accumulator.  Shared by the standalone-``DereferencePlace`` store
-        (cast fast path and general path) and the ``*p++ =`` increment
-        store, which all wrote this same byte/word/full triple inline.
+        (named-pointer arm, cast fast path, and general path; the
+        named-pointer width comes from ``_named_pointer_deref_store_width``),
+        the planned native deref store, and the ``*p++ =`` increment store,
+        which all wrote this same byte/word/full triple inline.
         """
         accumulator = self.target.acc
         if width == 1:
@@ -3331,23 +3339,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self.emit(f"        mov {destination}, {accumulator}")
 
-    def _emit_subscript_resolved_load(self, place: Place, /) -> None:
-        """Resolve *place* and load its value through the protect-BX terminal.
+    def _emit_subscript_operand_load(self, resolve_operand: Callable[[], MemoryOperand], /) -> None:
+        """Load an indexed operand's value through the protect-BX terminal.
 
-        Shared by every indexed lvalue whose address computation may clobber
-        BX as a scratch index register: struct-array members, contiguous
-        multidim arrays, pointer-to-array, and multidim array members.  The
-        resolver's first dynamic-index ``mov bx, ax`` does not itself guard a
-        pinned BX, so the outer push / pop guard is preserved here.  An
-        array-typed member (field_size != element_size) decays to its address
-        via ``lea`` over the full indexed operand (the resolved member-address
-        terminal drops the index register, so the lea is emitted directly).
+        Core of :meth:`_emit_subscript_resolved_load`, taking an
+        operand-producing thunk so the plan-driven native ``ir.Load`` path
+        (``_materialize_address_plan``) and the place-driven legacy path
+        (``resolve_address``) share one guard + terminal.  The thunk runs
+        INSIDE the BX guard because the operand resolution may clobber BX as
+        a scratch index register; its first dynamic-index ``mov bx, ax`` does
+        not itself guard a pinned BX.  An array-typed member (field_size !=
+        element_size) decays to its address via ``lea`` over the full indexed
+        operand (the resolved member-address terminal drops the index
+        register, so the lea is emitted directly).
         """
         self.ax_clear()
         protect_bx = self._bx_holds_pinned_var()
         if protect_bx:
             self.emit(f"        push {self.target.bx_register}")
-        operand = self.resolve_address(place)
+        operand = resolve_operand()
         addr = self._build_address(operand.base, operand.displacement, index=operand.index or "")
         if operand.decay_to_address:
             self.emit(f"        lea {self.target.acc}, {addr}")
@@ -3357,15 +3367,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        pop {self.target.bx_register}")
         self.ax_clear()
 
-    def _emit_subscript_resolved_store(self, place: Place, value: Node, /) -> None:
-        """Resolve *place* and store *value* through the protect-BX terminal.
+    def _emit_subscript_operand_store(self, resolve_operand: Callable[[], MemoryOperand], value: Node, /, *, line: int) -> None:
+        """Store *value* through an indexed operand via the protect-BX terminal.
 
-        Shared by every indexed lvalue whose address computation may clobber
-        BX as a scratch index register (struct-array members, contiguous
-        multidim arrays, pointer-to-array, and multidim array members).  The
-        value is evaluated and stashed before the address computation (which is
-        free to clobber the accumulator); the outer push / pop guard preserves
-        a pinned BX across the resolver's first dynamic-index ``mov bx, ax``.
+        Core of :meth:`_emit_subscript_resolved_store`, taking an
+        operand-producing thunk so the plan-driven native ``ir.Store`` path
+        (``_materialize_address_plan``) and the place-driven legacy path
+        (``resolve_address``) share one guard + terminal.  The value is
+        evaluated and stashed before the thunk runs (the address computation
+        is free to clobber the accumulator — and the spill is unconditional,
+        even for a fully-folded constant index); the outer push / pop guard
+        preserves a pinned BX across the resolution's first dynamic-index
+        ``mov bx, ax``.
         """
         allowed = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
         self.ax_clear()
@@ -3374,16 +3387,34 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        push {self.target.bx_register}")
         self.generate_expression(value)  # AX = value
         self.emit(f"        push {self.target.acc}")  # save value on top of stack
-        operand = self.resolve_address(place)  # may use BX/AX as scratch
+        operand = resolve_operand()  # may use BX/AX as scratch
         if operand.field_size not in allowed:
             message = f"writing field (size {operand.field_size}) not yet supported; use asm()"
-            raise CompileError(message, line=place.line)
+            raise CompileError(message, line=line)
         self.emit(f"        pop {self.target.acc}")  # AX = value
         self.ax_clear()
         addr = self._build_address(operand.base, operand.displacement, index=operand.index or "")
         self._emit_field_store(addr=addr, field_size=operand.field_size)
         if protect_bx:
             self.emit(f"        pop {self.target.bx_register}")
+
+    def _emit_subscript_resolved_load(self, place: Place, /) -> None:
+        """Resolve *place* and load its value through the protect-BX terminal.
+
+        Shared by every indexed lvalue whose address computation may clobber
+        BX as a scratch index register: struct-array members, contiguous
+        multidim arrays, pointer-to-array, and multidim array members.
+        """
+        self._emit_subscript_operand_load(lambda: self.resolve_address(place))
+
+    def _emit_subscript_resolved_store(self, place: Place, value: Node, /) -> None:
+        """Resolve *place* and store *value* through the protect-BX terminal.
+
+        Shared by every indexed lvalue whose address computation may clobber
+        BX as a scratch index register (struct-array members, contiguous
+        multidim arrays, pointer-to-array, and multidim array members).
+        """
+        self._emit_subscript_operand_store(lambda: self.resolve_address(place), value, line=place.line)
 
     def _emit_syscall(self, name: str, /) -> None:
         """Emit the invocation sequence for a named kernel syscall.
@@ -3934,9 +3965,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         register-base member.
         """
         info = self._member_field_info(place)
-        if info.bit_width == 1 and isinstance(value, Int) and value.value in (0, 1):
-            return value.value
-        return None
+        return self._bitfield_write_literal_value(info, value)
 
     def _member_dot_targets_global(self, place: MemberPlace, /) -> bool:
         """Return True if *place* is ``global.field`` on a file-scope struct global.
@@ -4059,6 +4088,80 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return info.byte_offset, info.field_size, info.element_size
         message = f"unsupported base shape for member '{member_name}' in _member_layout_on"
         raise CompileError(message, line=line)
+
+    def _multidim_member_horner_layout(
+        self, object_name: str, /, *, arrow: bool, field_name: str, index_count: int, line: int
+    ) -> tuple[int, int, list[int]]:
+        """Pure layout half of the member-multidim addresser: ``(field_offset, element_size, strides)``.
+
+        Walks the FIELD's declared multidim type (parsed from its
+        :class:`FieldInfo`) into dimension counts and derives the row-major
+        byte strides; shared by :meth:`_emit_multidim_member_address` and the
+        AddressPlan planner.
+
+        Raises:
+            CompileError: if *index_count* does not match the field's
+            dimension count.
+
+        """
+        info = self._resolve_member_index_layout(arrow=arrow, line=line, member_name=field_name, object_name=object_name)
+        array_type = Type.from_string(info.type_name)
+        assert isinstance(array_type, ArrayType)
+        dimension_counts: list[int] = []
+        element_type: Type = array_type
+        while isinstance(element_type, ArrayType):
+            dimension_counts.append(element_type.count or 0)
+            element_type = element_type.pointee
+        if index_count != len(dimension_counts):
+            message = f"wrong number of subscripts for '{field_name}'"
+            raise CompileError(message, line=line)
+        element_size = self._type_size(element_type.to_string())
+        return info.byte_offset, element_size, self._derive_row_major_strides(dimension_counts, element_size=element_size)
+
+    def _multidim_subscript_horner_layout(self, base_name: str, /, *, index_count: int, line: int) -> tuple[int, list[int]]:
+        """Pure layout half of the bare-multidim addresser: ``(element_size, strides)``.
+
+        Walks the registered :class:`ArrayType` into dimension counts and
+        derives the row-major byte strides; shared by
+        :meth:`_emit_multidim_subscript_address` and the AddressPlan planner.
+
+        Raises:
+            CompileError: if *index_count* does not match the array's
+            dimension count.
+
+        """
+        array_type = self.array_types[base_name]
+        dimension_counts: list[int] = []
+        element_type: Type = array_type
+        while isinstance(element_type, ArrayType):
+            dimension_counts.append(element_type.count or 0)
+            element_type = element_type.pointee
+        if index_count != len(dimension_counts):
+            message = f"wrong number of subscripts for '{base_name}'"
+            raise CompileError(message, line=line)
+        element_size = self._type_size(element_type.to_string())
+        return element_size, self._derive_row_major_strides(dimension_counts, element_size=element_size)
+
+    def _named_pointer_deref_store_width(self, pointer_name: str, /) -> int | None:
+        """Byte width of a ``*pointer = value`` store through a named pointer.
+
+        The pure width half of the legacy named-pointer deref-store arm,
+        shared by that arm and the AddressPlan planner.  Byte pointee types
+        store one byte; everything else stores the full ``int_size``
+        accumulator.  Returns None when the holder is not a pointer type
+        (the legacy arm raises its diagnostic; the planner declines).
+
+        NOTE: this byte/full select reproduces the legacy bespoke emitter
+        exactly and shares its latent gap — a 32-bit ``unsigned short *``
+        write stores the full accumulator instead of the low word.  Left
+        byte-identical here; fixing it is a separate codegen change (own
+        commit + width test) because it alters emitted bytes for that case.
+        """
+        holder_type = self.variable_types.get(pointer_name)
+        if not holder_type or not holder_type.endswith("*"):
+            return None
+        pointee_type = holder_type[:-1]
+        return 1 if pointee_type in self.BYTE_TYPES else self.target.int_size
 
     @staticmethod
     def _parse_local_byte_addr(addr: str) -> int | None:
@@ -4248,6 +4351,35 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return info.type_name
         message = f"sizeof: cannot determine type of {type(place).__name__}"
         raise CompileError(message, line=place.line)
+
+    def _pointer_to_array_horner_layout(self, base_name: str, /, *, index_count: int, line: int) -> tuple[int, list[int]]:
+        """Pure layout half of the pointer-to-array addresser: ``(element_size, strides)``.
+
+        ``n + 1`` strides: the inner ``n`` strides come from the pointee
+        dimension Horner; the outermost stride is the size of the whole
+        pointee array (== element_size * product(d1..dn)).  Shared by
+        :meth:`_emit_pointer_to_array_address` and the AddressPlan planner.
+
+        Raises:
+            CompileError: on a partial subscript (fewer than ``n + 1``
+            indices).
+
+        """
+        pointer_type = self.pointer_array_types[base_name]
+        pointee_dimension_counts: list[int] = []
+        element_type: Type = pointer_type.pointee
+        while isinstance(element_type, ArrayType):
+            pointee_dimension_counts.append(element_type.count or 0)
+            element_type = element_type.pointee
+        if index_count != len(pointee_dimension_counts) + 1:
+            message = f"unsupported partial subscript of pointer-to-array '{base_name}'"
+            raise CompileError(message, line=line)
+        element_size = self._type_size(element_type.to_string())
+        inner_strides = self._derive_row_major_strides(pointee_dimension_counts, element_size=element_size)
+        pointee_array_size = element_size
+        for count in pointee_dimension_counts:
+            pointee_array_size *= count
+        return element_size, [pointee_array_size, *inner_strides]
 
     def _prologue_initialized_pinned_registers(self) -> set[str]:
         """Return the set of pinned registers whose value is meaningful at function entry.
@@ -4809,16 +4941,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         line = place.line
         # Dot access on a named struct value: ``obj.field``.
         if isinstance(base, VariablePlace):
-            struct_type = self.variable_types.get(base.name)
-            if struct_type is None:
-                message = f"undefined variable '{base.name}'"
-                raise CompileError(message, line=line)
-            if struct_type.endswith("*") or not struct_type.startswith("struct "):
-                message = f"'.' requires a struct value, got type '{struct_type}'"
-                raise CompileError(message, line=line)
-            tag = struct_type[7:]
-            info = self._lookup_struct_field(tag, member_name, line)
-            base_operand = self._resolve_struct_value_base(base.name, line=line)
+            base_operand, info = self._derive_dot_member_layout(place)
             return base_operand, False, info
         # Arrow access on a named pointer: ``ptr->field``.
         if isinstance(base, DereferencePlace) and isinstance(base.pointer, VariablePlace):
@@ -5065,6 +5188,50 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """Pair with :meth:`_si_scratch_guard_begin` — emit ``pop si``."""
         if guarded:
             self.emit(f"        pop {self.target.si_register}")
+
+    def _store_accumulator_to_local(self, name: str, /, *, direct_register: str | None) -> None:
+        """Store the accumulator into local *name* (pinned register / byte / word tail).
+
+        The shared tail of :meth:`emit_store_local`, extracted so the native
+        ``ir.Load`` terminal can run the byte-identical store + AX-tracking
+        sequence after materializing an AddressPlan load.
+        """
+        if direct_register is not None:
+            if direct_register != self.target.acc:
+                # When storing into a 16-bit register from a 32-bit acc,
+                # use the low-word of acc to avoid an invalid operand mix.
+                source = self.target.low_word(self.target.acc) if len(direct_register) < len(self.target.acc) else self.target.acc
+                self.emit(f"        mov {direct_register}, {source}")
+            self.ax_is_byte = False
+        elif self._is_byte_scalar(name):
+            # Byte-scalar locals and globals store as a single byte;
+            # the source value is either already byte-valued
+            # (``ax_is_byte``) or sits in AX's low byte (wider
+            # operands truncate to 8 bits on store).  Either way,
+            # writing AL alone leaves the neighbouring byte untouched.
+            self.emit(f"        mov [{self._local_address(name)}], al")
+            # AL still holds the stored byte but AH may be stale: the
+            # store is itself an AL-only consumer, which lets
+            # :meth:`peephole_dead_ah` drop the zero-extend emitted by a
+            # preceding byte load.  Mark AX as byte-valued so downstream
+            # compare / test paths emit ``cmp al`` / ``test al`` and
+            # don't read the high byte.  Any promotion to a full word
+            # goes through the Var-load path which re-issues the load.
+            self.ax_is_byte = True
+        else:
+            self.emit(f"        mov [{self._local_address(name)}], {self.target.acc}")
+            self.ax_is_byte = False
+        self.ax_local = name
+        # ``mov ax, D / <operation> ax, ... / mov D, ax`` sequences are fused
+        # by the late peephole passes into a single ``<operation> D, ...`` (or
+        # into a compute-into-pinned-register form), neither of which
+        # leaves AX holding the new value.  When that fusion applies,
+        # the ``ax_local`` tracking we just set would let a downstream
+        # read of ``name`` skip its reload and pick up the pre-sequence
+        # AX contents instead.  Invalidate the tracking here so the
+        # reload happens naturally.
+        if self._peephole_will_strand_ax():
+            self.ax_local = None
 
     def _tally_auto_pin_counts(self, node: Node, /, *, role: str = "other", state: AutoPinTallyState) -> None:
         """Tally per-var reference counts for :meth:`_select_auto_pin_candidates`.
@@ -6438,42 +6605,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.store_target_register = direct_register
         self.generate_expression(expression)
         self.store_target_register = previous_store_target
-        if direct_register is not None:
-            if direct_register != self.target.acc:
-                # When storing into a 16-bit register from a 32-bit acc,
-                # use the low-word of acc to avoid an invalid operand mix.
-                source = self.target.low_word(self.target.acc) if len(direct_register) < len(self.target.acc) else self.target.acc
-                self.emit(f"        mov {direct_register}, {source}")
-            self.ax_is_byte = False
-        elif self._is_byte_scalar(name):
-            # Byte-scalar locals and globals store as a single byte;
-            # the source value is either already byte-valued
-            # (``ax_is_byte``) or sits in AX's low byte (wider
-            # operands truncate to 8 bits on store).  Either way,
-            # writing AL alone leaves the neighbouring byte untouched.
-            self.emit(f"        mov [{self._local_address(name)}], al")
-            # AL still holds the stored byte but AH may be stale: the
-            # store is itself an AL-only consumer, which lets
-            # :meth:`peephole_dead_ah` drop the zero-extend emitted by a
-            # preceding byte load.  Mark AX as byte-valued so downstream
-            # compare / test paths emit ``cmp al`` / ``test al`` and
-            # don't read the high byte.  Any promotion to a full word
-            # goes through the Var-load path which re-issues the load.
-            self.ax_is_byte = True
-        else:
-            self.emit(f"        mov [{self._local_address(name)}], {self.target.acc}")
-            self.ax_is_byte = False
-        self.ax_local = name
-        # ``mov ax, D / <operation> ax, ... / mov D, ax`` sequences are fused
-        # by the late peephole passes into a single ``<operation> D, ...`` (or
-        # into a compute-into-pinned-register form), neither of which
-        # leaves AX holding the new value.  When that fusion applies,
-        # the ``ax_local`` tracking we just set would let a downstream
-        # read of ``name`` skip its reload and pick up the pre-sequence
-        # AX contents instead.  Invalidate the tracking here so the
-        # reload happens naturally.
-        if self._peephole_will_strand_ax():
-            self.ax_local = None
+        self._store_accumulator_to_local(name, direct_register=direct_register)
 
     def resolve_address(self, place: Place, /) -> MemoryOperand:
         """Resolve *place* to a MemoryOperand, emitting side-effect code as needed.

@@ -38,6 +38,14 @@ time.
 
 ### Changed
 
+- **cc.py native-Address emission flip-over (phase 1).** Every lowered
+  member-access, array-subscript, and pointer-deref access now flows through a
+  unified `AddressPlan` planner and materializer instead of re-seating AST
+  shapes at emit time.  Output is byte-for-byte identical to the previous
+  emitter (verified by the per-function byte gate across 361 functions in 49
+  files, 0-delta); the planner's declared per-plan clobber facts are in place
+  for the phase-2 register-allocator integration.
+
 - **`ioctl` is now variadic (`int ioctl(int fd, int cmd, ...)`).** A command
   takes up to two unsigned-int arguments (ECX then EDX), matching POSIX's
   request-dependent argument shape.  bboeos's own callers keep passing both
