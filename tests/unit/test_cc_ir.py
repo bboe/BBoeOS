@@ -121,6 +121,29 @@ def test_increment_decrement_op_uses_and_side_effects() -> None:
     assert _has_side_effects(increment)
 
 
+def test_index_rhs_member_store_lowers_to_store() -> None:
+    """``p->member = arr[i]`` lowers onto Address + Store with an Index RHS temp.
+
+    No ir.Access producer remains for the shape (ledger class 3 re-admitted in
+    phase 2).
+    """
+    body = _build_function_body(
+        "struct s { int value; };\nint arr[8];\nvoid f(struct s *pointer, int i) { pointer->value = arr[i]; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    index_ops = [op for op in body if isinstance(op, ir.Index)]
+    addresses = [op for op in body if isinstance(op, ir.Address)]
+    stores = [op for op in body if isinstance(op, ir.Store)]
+    assert len(index_ops) == 1, f"expected exactly one ir.Index (the RHS load), got {kinds}"
+    assert len(addresses) == 1, f"expected exactly one ir.Address (the store target), got {kinds}"
+    assert len(stores) == 1, f"expected exactly one ir.Store, got {kinds}"
+    assert stores[0].value == index_ops[0].destination, (
+        f"the Store must consume the Index temp, got store.value={stores[0].value!r} vs index.destination={index_ops[0].destination!r}"
+    )
+    assert not any(isinstance(op, ir.Access) for op in body), f"Index RHS store must not ride Access, got {kinds}"
+
+
 def test_load_store_uses_and_side_effects() -> None:
     """Load reads its address; Store reads address+value and is side-effecting."""
     from cc.ir_optimize import _has_side_effects  # noqa: PLC0415, PLC2701

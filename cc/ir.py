@@ -1571,8 +1571,12 @@ def _is_byte_safe_store_rhs(node: ast_nodes.Node, /) -> bool:
     native-Address emission refactor lands.  The class-by-class ledger — each
     with its re-admit-and-gate verification check — lives on ``design-specs``:
     ``2026-06-06-cc-native-address-emission-expected-byte-reductions.md``.
+
+    ``Index`` (ledger class 3) is re-admitted in phase 2: the store-terminal
+    RHS sink replays the def at the legacy post-materialization slot, so the
+    pre-lowered temp no longer pays the spill/bounce measured above.
     """
-    return isinstance(node, (ast_nodes.Int, ast_nodes.PlaceLoad, ast_nodes.String, ast_nodes.Var)) or (
+    return isinstance(node, (ast_nodes.Index, ast_nodes.Int, ast_nodes.PlaceLoad, ast_nodes.String, ast_nodes.Var)) or (
         isinstance(node, ast_nodes.PlaceAddressOf) and isinstance(node.place, ast_nodes.VariablePlace)
     )
 

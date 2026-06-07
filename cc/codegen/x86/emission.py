@@ -648,7 +648,16 @@ class EmissionMixin:
         # test_indexed_in_place_increment_fuses_to_inc_dword_sib guards
         # it), so exclude index-operand temps from the candidate set.
         sib_index_temps = self._collect_ir_index_operand_temps(body)
-        pure_temps = frozenset(temp for temp in candidate_temps if temp not in escape_hatch_temps and temp not in sib_index_temps)
+        # Sunk store-RHS temps (Task 6a): their defs are suppressed and
+        # replayed inside the consuming store terminal, so the temp never
+        # materializes as a stored value — exclude it from allocation (and
+        # from the frame-slot pre-allocation in ``generate_function``) like
+        # the escape-hatch temps.
+        pure_temps = frozenset(
+            temp
+            for temp in candidate_temps
+            if temp not in escape_hatch_temps and temp not in sib_index_temps and temp not in self._ir_sunk_store_values
+        )
         if not pure_temps:
             return
 
@@ -1001,6 +1010,90 @@ class EmissionMixin:
                 ):
                     continue
             result.add(temp)
+        return result
+
+    def _collect_ir_sunk_store_values(self, body: list[ir.Instruction], /) -> dict[str, ir.BinaryOperation | ir.Index]:
+        """Return store-RHS temp defs to sink into their AX-clobbering store terminals.
+
+        The missing half of the evaluation-order contract whose
+        accumulator-preserving side lives in
+        :meth:`_collect_ir_deferred_single_use_temps`'s def+2-phantom skip:
+        a single-use store-RHS temp in the triple ``[temp = def;
+        ir.Address; ir.Store(address, temp)]`` whose consuming store's
+        materialization CLOBBERS the accumulator before the RHS read
+        (:meth:`_plan_preserves_accumulator_for_store_rhs` is False — the
+        chained ``base_kind == "plan"`` ordering) cannot ride ``ax_local``
+        into the store; pre-lowering it to a temp pays a register bounce
+        or a frame spill/reload the legacy inline walk never paid (the
+        ``readdir`` +6 anatomy).  Instead the def is SUNK: its standalone
+        emission is suppressed (the ``case ir.Index`` /
+        ``case ir.BinaryOperation`` arms skip it) and
+        :meth:`_emit_sunk_store_value` replays it at the terminal's
+        post-materialization RHS slot, reproducing the legacy byte
+        sequence exactly.
+
+        Gates, mirroring the phantom skip's shape checks:
+
+        * The def is a pure, accumulator-producing :class:`ir.Index` or
+          :class:`ir.BinaryOperation`.  :class:`ir.Load` is deliberately
+          NOT included — the PlaceLoad RHS class is already byte-neutral
+          via the allocator's accumulator ride and must not change.
+        * The def's destination is a single-use ``_ir_*`` temp whose lone
+          use is the store's VALUE operand.  A temp also read by the
+          ``ir.Address`` indices has 2+ uses (``instruction_uses`` counts
+          the Address read), so it is excluded by the count alone.
+        * The intervening instruction is the store's address-producing
+          ``ir.Address`` (emits nothing; the consume-only arm touches no
+          tracking state).
+        * The store's recorded plan exists and does NOT preserve the
+          accumulator up to the RHS read — for preserving plans Task 5's
+          unpinned accumulator ride already wins.
+        * Replay safety for the def's own operands: sinking reorders the
+          def AFTER the base materialization, which may clobber pool
+          registers (AX/BX), so an operand temp homed in one of them
+          would read stale.  An :class:`ir.Index` index temp is always
+          memory-resident (:meth:`_collect_ir_index_operand_temps`
+          excludes it from allocation; its frame slot is never reused),
+          so it replays safely.  A :class:`ir.BinaryOperation` reading
+          any ``_ir_*`` temp is rejected conservatively — this pre-scan
+          runs BEFORE :meth:`_allocate_ir_temps`, so the operand's home
+          is unknowable here.  Named locals/params need no gate: the
+          replayed bytes are exactly the legacy inline walk's, so their
+          pinned-register interactions match the established behavior.
+
+        Conservative: only the flat top-level instruction order is
+        considered (Switch-arm triples are never sunk), matching the
+        phantom skip.  Runs after the eager ``_plan_ir_addresses``
+        pre-pass (verified call order in ``generate_function``) so the
+        plan lookup is fully populated.
+        """
+        use_counts: dict[str, int] = {}
+        for instruction in body:
+            for name in regalloc.instruction_uses(instruction=instruction):
+                use_counts[name] = use_counts.get(name, 0) + 1
+        result: dict[str, ir.Instruction] = {}
+        for position, instruction in enumerate(body):
+            if not isinstance(instruction, (ir.BinaryOperation, ir.Index)):
+                continue
+            destination = instruction.destination
+            if not destination.startswith("_ir_") or use_counts.get(destination, 0) != 1:
+                continue
+            if isinstance(instruction, ir.BinaryOperation) and any(
+                isinstance(operand, str) and operand.startswith("_ir_") for operand in (instruction.left, instruction.right)
+            ):
+                continue
+            if position + 2 >= len(body):
+                continue
+            address_instruction = body[position + 1]
+            store = body[position + 2]
+            if not (isinstance(address_instruction, ir.Address) and isinstance(store, ir.Store)):
+                continue
+            if store.address != address_instruction.destination or store.value != destination:
+                continue
+            plan = self._ir_address_plans.get(address_instruction.destination)
+            if plan is None or self._plan_preserves_accumulator_for_store_rhs(plan):
+                continue
+            result[destination] = instruction
         return result
 
     def _emit_function_pointer_call(
@@ -1374,7 +1467,16 @@ class EmissionMixin:
                     return
                 if self._try_fold_bitfield_int_store(operand, value):
                     return
-            self.generate_expression(value)
+            # Sunk-RHS replay slot (Task 6a hardening): today's static-base
+            # plans declare no AX clobber, so the sink gate
+            # (``_plan_preserves_accumulator_for_store_rhs`` False) only
+            # routes here for a future terms-bearing static plan whose
+            # materialization accumulates through AX — the same
+            # post-materialization slot the legacy walk used.
+            if isinstance(value, Var) and (sunk_definition := self._ir_sunk_store_values.get(value.name)) is not None:
+                self._emit_sunk_store_value(sunk_definition)
+            else:
+                self.generate_expression(value)
             self._emit_resolved_field_store(operand, value)
             return
         literal = self._bitfield_write_literal_value(plan.bitfield, value)
@@ -1384,12 +1486,39 @@ class EmissionMixin:
             self._emit_bitfield_write_literal(operand.bitfield, addr=address, value=literal)
             return
         if plan.base_preserves_accumulator:
-            self.generate_expression(value)
-            operand = self._materialize_address_plan(plan)
-            self._emit_resolved_field_store(operand, value)
+            # Ordering 3 (accumulator-preserving base): in the common case the
+            # sink gate excludes this path (``_plan_preserves_accumulator_for_store_rhs``
+            # returns True), so ``value`` is evaluated first and rides the
+            # preserved accumulator across the base materialization — Task 5's
+            # unpinned accumulator ride.
+            #
+            # Sunk-RHS replay slot (Task 6a hardening): a preserving plan
+            # normally declares no AX clobber, but if future drift produced
+            # one that declares "ax" in plan.clobbers, the sink gate would
+            # admit the temp and route here.  Mirroring ordering 1's defensive
+            # slot: the base materializes first (so the sunk replay sees the
+            # same post-materialization state ordering 4 provides), and the
+            # replay or generate_expression follows exactly as ordering 1.
+            # Today this inner branch is statically unreachable under the
+            # current gate.
+            if isinstance(value, Var) and (sunk_definition := self._ir_sunk_store_values.get(value.name)) is not None:
+                operand = self._materialize_address_plan(plan)
+                self._emit_sunk_store_value(sunk_definition)
+                self._emit_resolved_field_store(operand, value)
+            else:
+                self.generate_expression(value)
+                operand = self._materialize_address_plan(plan)
+                self._emit_resolved_field_store(operand, value)
             return
         operand = self._materialize_address_plan(plan)
-        self.generate_expression(value)
+        # Sunk-RHS replay slot (Task 6a): the chained base materialization
+        # above ran THROUGH the accumulator, so a pre-lowered RHS temp would
+        # reload here — replaying the suppressed def instead reproduces the
+        # legacy base-first-then-RHS byte sequence with no bounce or slot.
+        if isinstance(value, Var) and (sunk_definition := self._ir_sunk_store_values.get(value.name)) is not None:
+            self._emit_sunk_store_value(sunk_definition)
+        else:
+            self.generate_expression(value)
         self._emit_resolved_field_store(operand, value)
 
     def _emit_pointer_bump(self, *, delta: int, line: int, name: str) -> None:
@@ -1514,6 +1643,43 @@ class EmissionMixin:
                 member_name=field_name,
             )
             self._emit_place_store(place, value_node)
+
+    def _emit_sunk_store_value(self, definition: ir.BinaryOperation | ir.Index, /) -> None:
+        """Replay a sunk store-RHS *definition* into the accumulator (Task 6a).
+
+        Called by the store terminal at the exact point its legacy
+        ordering evaluated the RHS inline — AFTER the base
+        materialization for AX-clobbering plans.  Reconstructs the same
+        AST node the suppressed ``case ir.Index`` /
+        ``case ir.BinaryOperation`` arms build and runs it through
+        ``generate_expression``, the EXACT walk the legacy inline RHS
+        took, so the bytes match.  Tracking-state parity with the legacy
+        inline walk: between the suppressed def site and this replay
+        only the folded ``ir.Address`` (emits nothing, mutates nothing)
+        and the base materialization ran; the chained materialization
+        (``_emit_resolved_load`` + ``mov bx, acc`` + ``ax_clear``) never
+        writes SI or ``si_local``, so the replayed expression sees the
+        same generator state the legacy post-materialization RHS saw.
+        Replay is reads-only reordering: the def reads memory
+        (``ir.Index``) or temps/locals (``ir.BinaryOperation``) and the
+        base materialization reads pointer slots — the legacy compiler
+        used exactly this base-first-then-RHS order, so observable
+        semantics match the established behavior.
+        """
+        match definition:
+            case ir.BinaryOperation(operation=operation, left=left, right=right):
+                self.generate_expression(
+                    BinaryOperation(left=self._ir_value_to_ast(left), operation=operation, right=self._ir_value_to_ast(right))
+                )
+            case ir.Index(base=base, index=index):
+                self.generate_expression(Index(array=Var(name=base), index=self._ir_value_to_ast(index)))
+            case _:
+                # Statically unreachable under the narrowed type
+                # (``ir.BinaryOperation | ir.Index``): the union covers every
+                # value ``_collect_ir_sunk_store_values`` can return.  Kept as
+                # a runtime guard against future type drift.
+                message = f"cannot replay sunk store-RHS definition {type(definition).__name__}"
+                raise NotImplementedError(message)
 
     def _emit_switch_interleaved_arms(
         self,
@@ -2501,7 +2667,20 @@ class EmissionMixin:
 
     def _lower_ir_instruction(self, instruction: ir.Instruction) -> None:
         match instruction:
-            case ir.BinaryOperation(destination=destination, operation=operation, left=left, right=right):
+            case ir.BinaryOperation(destination=destination, operation=operation, left=left, right=right) as binary_operation_instruction:
+                if self._ir_sunk_store_values.get(destination) is binary_operation_instruction:
+                    # Sunk single-use store RHS: the consuming store terminal
+                    # replays this definition at its legacy post-materialization
+                    # RHS slot (``_emit_sunk_store_value``).  Skipping the
+                    # ``emit_store_local`` here loses only its ax-tracking
+                    # update, which nothing reads before the terminal: the
+                    # folded ``ir.Address`` in between emits nothing and the
+                    # store terminal begins with its own ``ax_clear``.
+                    # Identity check (not name): a multi-def temp (e.g. from
+                    # LogicalOr/LogicalAnd lowering with sibling defs) would
+                    # have ALL defs suppressed under a name check while only
+                    # the matched one replays; sibling defs must emit normally.
+                    return
                 expression = BinaryOperation(left=self._ir_value_to_ast(left), operation=operation, right=self._ir_value_to_ast(right))
                 self.emit_store_local(expression=expression, name=destination)
             case ir.Copy(destination=destination, source=source):
@@ -2521,7 +2700,13 @@ class EmissionMixin:
                     self.emit_store_local(expression=call, name=destination)
                 finally:
                     self._current_call_pinned_initialized = None
-            case ir.Index(destination=destination, base=base, index=index):
+            case ir.Index(destination=destination, base=base, index=index) as index_instruction:
+                if self._ir_sunk_store_values.get(destination) is index_instruction:
+                    # Sunk single-use store RHS — replayed by the consuming
+                    # store terminal; see the ``ir.BinaryOperation`` arm.
+                    # Identity check (not name): sibling defs of a multi-def
+                    # temp must emit normally.
+                    return
                 expression = Index(array=Var(name=base), index=self._ir_value_to_ast(index))
                 self.emit_store_local(expression=expression, name=destination)
             case ir.IndexAssign(base=base, index=index, source=source):
@@ -2694,6 +2879,14 @@ class EmissionMixin:
                         # declared base facts, calling the SAME sub-emitters.
                         self._emit_planned_member_store(plan, self._ir_value_to_ast(value))
                 else:
+                    # Sunk temps exist only for PLANNED stores (the sink gate
+                    # requires a recorded plan with a non-preserving
+                    # materialization), so this legacy re-seat path can never
+                    # see one — its ``_ir_value_to_ast`` round-trip would
+                    # otherwise read a slotless temp.
+                    assert not (isinstance(value, str) and value in self._ir_sunk_store_values), (
+                        f"sunk store-RHS temp {value!r} reached the unplanned store path"
+                    )
                     # ``*(shape) = value`` — drive the EXISTING member-store path
                     # from the producing ``Address``'s deref-free ``shape`` so the
                     # static field layout (offset / width / bitfield) and the
@@ -5026,10 +5219,18 @@ class EmissionMixin:
             self._ir_address_ops = {}
             self._ir_address_plans = {}
             self._plan_ir_addresses(ir_function.body)
+            # Sunk store-RHS defs (Task 6a) are decided here: AFTER the
+            # plans exist (the sink verdict consults
+            # ``_plan_preserves_accumulator_for_store_rhs`` on the recorded
+            # plan) and BEFORE ``_allocate_ir_temps`` / the frame-slot
+            # pre-allocation below, both of which must skip sunk temps (no
+            # register home, no frame slot — the def replays inside the
+            # store terminal).
+            self._ir_sunk_store_values: dict[str, ir.BinaryOperation | ir.Index] = self._collect_ir_sunk_store_values(ir_function.body)
             self._allocate_ir_temps(ir_function=ir_function)
         if ir_body is not None:
             for temp in self._collect_ir_temps(ir_body):
-                if temp not in self.locals and temp not in self.pinned_register:
+                if temp not in self.locals and temp not in self.pinned_register and temp not in self._ir_sunk_store_values:
                     self.allocate_local(temp)
 
         # Seed visible_vars with parameters and pinned variables.
@@ -5039,6 +5240,10 @@ class EmissionMixin:
             self.visible_vars.add(param.name)
         self.visible_vars.update(self.pinned_register)
         # IR temps are visible throughout the function and typed as int.
+        # Deliberate asymmetry: sunk temps enter visible_vars and variable_types
+        # here (so name-lookup helpers see them) but are excluded from locals
+        # allocation and slot pre-allocation above — their name is never
+        # evaluated as a stored value; only allocation and frame slots are skipped.
         if ir_body is not None:
             for temp in self._collect_ir_temps(ir_body):
                 self.visible_vars.add(temp)
