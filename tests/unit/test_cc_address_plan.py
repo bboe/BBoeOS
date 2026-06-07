@@ -124,6 +124,16 @@ int read_constant(void) {
 }
 """
 
+MULTIDIM_FRAME_BASE_SOURCE = """
+int read_local(int i, int j) {
+    int m[4][3];
+    int out;
+    m[0][0] = 7;
+    out = m[i][j];
+    return out;
+}
+"""
+
 MULTIDIM_MEMBER_ARROW_SOURCE = """
 struct grid { int pad; int cells[4][3]; };
 int read_cell(struct grid *p, int i, int j) {
@@ -364,6 +374,10 @@ def test_arrow_member_load_plans_pointer_base() -> None:
     assert plan.base == "n"
     assert plan.base_preserves_accumulator is True
     assert plan.base_is_static is False
+    # ``_load_member_base`` either returns SI without emitting (the
+    # si_local alias) or WRITES only BX; SI is read, never written, so
+    # the declared materialization clobbers are exactly {"bx"}.
+    assert plan.clobbers == frozenset({"bx"})
 
 
 def test_arrow_member_store_consumes_native_plan() -> None:
@@ -453,6 +467,10 @@ def test_deref_store_consumes_native_plan() -> None:
     assert plan.base_preserves_accumulator is True
     assert plan.deref_store is True
     assert plan.field_size == 4
+    # Materialization is the bare pointer-VALUE load into SI
+    # (``_emit_load_var(..., register=si)``); the rhs evaluation and the
+    # store itself are the ``ir.Store`` terminal's business.
+    assert plan.clobbers == frozenset({"si"})
     body = generator.output.split("write_through:")[1]
     lines = [line.strip() for line in body.splitlines()]
     pointer_loads = [line for line in lines if line.startswith("mov esi, [")]
@@ -475,6 +493,7 @@ def test_dot_member_load_produces_pure_displacement_plan() -> None:
     assert plan.displacement == 4  # offset of y
     assert plan.terms == ()
     assert plan.field_size == 4
+    assert plan.clobbers == frozenset()  # static base, no terms: nothing emitted
 
 
 def test_mixed_chain_store_plans_member_offset_and_two_terms() -> None:
@@ -495,6 +514,10 @@ def test_mixed_chain_store_plans_member_offset_and_two_terms() -> None:
     assert [term.scale for term in plan.terms] == [12, 1]  # struct stride, char element
     assert plan.displacement == 4  # offset of name within struct symbol
     assert plan.field_size == 1
+    # Each ``_accumulate_subscript`` term evaluates through AX and seeds /
+    # sums BX (the second term's push/pop BX restores around the index
+    # evaluation; BX is still written by the trailing ``add``).
+    assert plan.clobbers == frozenset({"ax", "bx"})
 
 
 def test_multi_level_arrow_load_plans_nested_plan_base() -> None:
@@ -512,12 +535,17 @@ def test_multi_level_arrow_load_plans_nested_plan_base() -> None:
     assert plan.base_is_static is False
     assert plan.base_preserves_accumulator is False
     assert plan.displacement == 4  # offset of b within struct inner
+    # The chained base materializes the inner plan (its clobbers), loads
+    # the decayed inner address through the accumulator
+    # (``_emit_resolved_load``), then seeds BX — inner | {"ax", "bx"}.
+    assert plan.clobbers == frozenset({"ax", "bx"})
     inner = plan.base
     assert isinstance(inner, AddressPlan)
     assert inner.base_kind == "pointer"
     assert inner.base == "p"
     assert inner.displacement == 4  # offset of mid within struct outer
     assert inner.decay_to_address is True  # struct-value member decays via lea
+    assert inner.clobbers == frozenset({"bx"})  # the SI-or-BX base load writes only BX
 
 
 def test_multidim_constant_indices_fold_into_displacement() -> None:
@@ -536,6 +564,32 @@ def test_multidim_constant_indices_fold_into_displacement() -> None:
     assert plan.terms == ()
     assert plan.displacement == 28  # 2 * 12 + 1 * 4
     assert plan.subscript_terminal is True
+    # Term-less static-base Horner: the walk and the SI tail both emit
+    # nothing (the static-tail SI seed needs a dynamic index over a frame
+    # base), so the materialization clobbers nothing.
+    assert plan.clobbers == frozenset()
+
+
+def test_multidim_frame_base_dynamic_index_declares_si_clobber() -> None:
+    """A local ``m[i][j]`` declares {"ax", "bx", "si"}; its folded sibling declares nothing.
+
+    The static-tail SI materialization (``[bp+bx]`` is illegal at 16-bit, so
+    the frame base ``lea``'s into SI) fires exactly when the plan has a
+    dynamic term over a frame base — both plan-time facts, so the clobber
+    set is derived precisely rather than as a conservative union.  The
+    constant-index store on the same array folds every term and emits
+    nothing.
+    """
+    generator = _generate(MULTIDIM_FRAME_BASE_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 2
+    folded_plan, dynamic_plan = plans
+    assert folded_plan.base_kind == "frame"
+    assert folded_plan.terms == ()
+    assert folded_plan.clobbers == frozenset()
+    assert dynamic_plan.base_kind == "frame"
+    assert len(dynamic_plan.terms) == 2
+    assert dynamic_plan.clobbers == frozenset({"ax", "bx", "si"})
 
 
 def test_multidim_load_plans_horner_terms() -> None:
@@ -551,6 +605,9 @@ def test_multidim_load_plans_horner_terms() -> None:
     assert plan.subscript_terminal is True
     assert plan.element_size == 4
     assert plan.field_size == 4
+    # Label-base static tail: the Horner walk uses AX + BX; no SI seed
+    # (only a frame base with a dynamic index materializes into SI).
+    assert plan.clobbers == frozenset({"ax", "bx"})
 
 
 def test_multidim_member_arrow_load_plans_pointer_horner_base() -> None:
@@ -566,6 +623,9 @@ def test_multidim_member_arrow_load_plans_pointer_horner_base() -> None:
     assert plan.base_is_static is False
     assert [term.scale for term in plan.terms] == [12, 4]
     assert plan.displacement == 4  # offset of cells within struct grid
+    # Pointer-base Horner tail: the walk (AX + BX) plus the unconditional
+    # pointer-VALUE load into SI.
+    assert plan.clobbers == frozenset({"ax", "bx", "si"})
 
 
 def test_multidim_member_dot_load_plans_register_seeded_base() -> None:
@@ -579,6 +639,9 @@ def test_multidim_member_dot_load_plans_register_seeded_base() -> None:
     assert plan.base_always_in_register is True
     assert [term.scale for term in plan.terms] == [12, 4]
     assert plan.displacement == 4  # offset of cells within struct grid
+    # Member-base Horner tail: the walk (AX + BX) plus the unconditional
+    # ``lea si, [base]`` seed.
+    assert plan.clobbers == frozenset({"ax", "bx", "si"})
 
 
 def test_multidim_store_consumes_horner_plan() -> None:
@@ -628,6 +691,7 @@ def test_pointer_to_array_load_plans_outer_row_stride() -> None:
     assert plan.base == "p"
     assert plan.base_always_in_register is True
     assert [term.scale for term in plan.terms] == [12, 4]
+    assert plan.clobbers == frozenset({"ax", "bx", "si"})  # walk + SI pointer-value load
 
 
 def test_residual_address_census_matches_allowlist() -> None:
@@ -691,6 +755,10 @@ def test_struct_array_constant_index_folds_into_displacement() -> None:
     assert plan.terms == ()
     assert plan.displacement == 28  # 3 * sizeof(struct entry) + offset of payload
     assert plan.subscript_terminal is True
+    # Term-less static plan: the materialization emits nothing — the
+    # protect-BX guard the subscript terminal wraps around it is the
+    # TERMINAL's emission, not the materialization's.
+    assert plan.clobbers == frozenset()
 
 
 def test_struct_array_member_load_plans_one_term() -> None:
@@ -702,6 +770,8 @@ def test_struct_array_member_load_plans_one_term() -> None:
     assert len(plan.terms) == 1
     assert plan.terms[0].scale == 8  # sizeof(struct entry)
     assert plan.displacement == 4  # offset of payload
+    # One ``_accumulate_subscript`` term: index through AX, seed BX.
+    assert plan.clobbers == frozenset({"ax", "bx"})
 
 
 def test_struct_array_member_store_plans_term_and_emits_indexed_store() -> None:
@@ -751,6 +821,11 @@ def test_subscript_call_slot_plans_and_calls_natively() -> None:
     assert plan.base_kind == "label"
     assert plan.base == "_g_handlers"
     assert [term.scale for term in plan.terms] == [4]  # pointer-size slot stride
+    # Documented choice: call-slot plans declare NO materialization
+    # clobbers — the IndirectCall terminal interleaves the slot walk with
+    # the call and already saves under the conservative full-register-pool
+    # call default, which governs the whole sequence.
+    assert plan.clobbers == frozenset()
     body = generator.output.split("run_last:")[1]
     lines = [line.strip() for line in body.splitlines()]
     assert lines.count("lea esi, [_g_handlers]") == 1

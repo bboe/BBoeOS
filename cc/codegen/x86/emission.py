@@ -85,7 +85,7 @@ from cc.ast_nodes import (
     While,
     address_of_variable_name,
 )
-from cc.codegen.address_plan import AddressPlan, AddressTerm
+from cc.codegen.address_plan import AddressPlan, AddressTerm, dynamic_term_clobbers
 from cc.codegen.x86.jumps import (
     CMOV_WHEN_FALSE,
     CMOV_WHEN_TRUE,
@@ -2757,6 +2757,11 @@ class EmissionMixin:
             base_is_static=False,
             base_kind="pointer",
             base_preserves_accumulator=True,
+            # Materialization is the bare pointer-VALUE load into SI
+            # (``_emit_load_var(..., register=si)`` writes only its
+            # destination register); the rhs and the store are the
+            # terminal's.
+            clobbers=frozenset({"si"}),
             deref_store=True,
             field_size=width,
             line=shape.line,
@@ -2840,6 +2845,7 @@ class EmissionMixin:
             plan_base_kind = self._member_base_kind(shape)
             base_is_static = True
             base_preserves_accumulator = False
+            clobbers: frozenset[str] = frozenset()  # pure displacement: materialization emits nothing
         elif isinstance(base, DereferencePlace) and isinstance(base.pointer, VariablePlace):
             # ``ptr->field`` arrow access on a named pointer.  The layout
             # lookup is the pure half of the legacy arrow arm; the deferred
@@ -2856,6 +2862,11 @@ class EmissionMixin:
             plan_base_kind = "pointer"
             base_is_static = False
             base_preserves_accumulator = True
+            # ``_load_member_base`` either returns SI without emitting (the
+            # emission-time ``si_local`` alias fast path reads SI, never
+            # writes it) or loads into BX — so the union of what the
+            # materialization CAN write is exactly BX.
+            clobbers = frozenset({"bx"})
         elif isinstance(base, MemberPlace):
             # Chained member (``p->mid.b``): the inner member's decayed
             # struct-value address seeds the outer base register.  Plan the
@@ -2873,6 +2884,10 @@ class EmissionMixin:
             plan_base_kind = "plan"
             base_is_static = False
             base_preserves_accumulator = False
+            # The chained base runs the inner materialization (its declared
+            # clobbers), loads the decayed inner address through the
+            # accumulator (``_emit_resolved_load``), then seeds BX.
+            clobbers = inner_plan.clobbers | frozenset({"ax", "bx"})
         else:
             return None
         is_struct_value = info.type_name.startswith("struct ") and not info.type_name.endswith("*")
@@ -2882,6 +2897,7 @@ class EmissionMixin:
             base_kind=plan_base_kind,
             base_preserves_accumulator=base_preserves_accumulator,
             bitfield=info if info.bit_width is not None else None,
+            clobbers=clobbers,
             decay_to_address=info.field_size != info.element_size or is_struct_value,
             displacement=info.byte_offset,
             element_size=info.element_size,
@@ -2930,6 +2946,7 @@ class EmissionMixin:
         return AddressPlan(
             base=base,
             base_kind=base_kind,
+            clobbers=dynamic_term_clobbers(terms),
             displacement=displacement,
             element_size=element_size,
             field_size=element_size,
@@ -2988,6 +3005,7 @@ class EmissionMixin:
         return AddressPlan(
             base=base,
             base_kind=base_kind,
+            clobbers=dynamic_term_clobbers(terms),
             decay_to_address=field_size != element_size,
             displacement=displacement,
             element_size=element_size,
@@ -3013,6 +3031,13 @@ class EmissionMixin:
         ``_accumulate_subscript`` walk) is owned exclusively by the
         ``ir.IndirectCall`` terminal.  An undefined name returns None so the
         legacy path raises its ``_check_defined`` diagnostic unchanged.
+
+        ``clobbers`` stays EMPTY by documented choice: the terminal
+        interleaves the slot walk with the indirect ``call`` under the
+        conservative full-register-pool call-site save default
+        (``_emit_planned_indirect_call`` saves / ``pusha``s every pinned
+        register), so the call convention — not a materialization-only set —
+        governs the whole sequence.
         """
         shape = address.shape
         if not (isinstance(shape, SubscriptPlace) and isinstance(shape.base, VariablePlace)):
@@ -3096,6 +3121,11 @@ class EmissionMixin:
                 base_always_in_register=True,
                 base_is_static=base_is_static,
                 base_kind=base_kind,
+                # The Horner walk (AX + BX when any term survives folding)
+                # plus the unconditional SI base seed — the dot tail's
+                # ``lea si`` and the arrow tail's pointer-VALUE load both
+                # always run (``base_always_in_register``).
+                clobbers=dynamic_term_clobbers(terms) | frozenset({"si"}),
                 displacement=displacement,
                 element_size=element_size,
                 field_size=element_size,
@@ -3114,6 +3144,9 @@ class EmissionMixin:
                     base_always_in_register=True,
                     base_is_static=False,
                     base_kind="pointer",
+                    # Horner walk plus the unconditional pointer-VALUE load
+                    # into SI (``_emit_horner_pointer_base_operand``).
+                    clobbers=dynamic_term_clobbers(terms) | frozenset({"si"}),
                     displacement=displacement,
                     element_size=element_size,
                     field_size=element_size,
@@ -3126,9 +3159,15 @@ class EmissionMixin:
                 element_size, strides = self._multidim_subscript_horner_layout(base_name, index_count=index_count, line=line)
                 base_kind, base = self._variable_base(base_name, line=line)
                 displacement, terms = self._fold_horner_terms(displacement=0, indices=address.indices, strides=strides)
+                # The static tail materializes the base into SI exactly when
+                # a dynamic index rides a frame base ([bp+bx] is illegal at
+                # 16-bit) — both plan-time facts, so the SI clobber is
+                # derived precisely rather than as a conservative union.
+                static_tail_si = frozenset({"si"}) if terms and base_kind == "frame" else frozenset()
                 return AddressPlan(
                     base=base,
                     base_kind=base_kind,
+                    clobbers=dynamic_term_clobbers(terms) | static_tail_si,
                     displacement=displacement,
                     element_size=element_size,
                     field_size=element_size,

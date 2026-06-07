@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from cc import ast_nodes
     from cc.codegen.x86.generator import FieldInfo
 
 
@@ -73,6 +74,22 @@ class AddressPlan:
     ``_load_member_base``) and the store width is the plan's ``field_size``
     (the legacy byte-vs-full-accumulator select, including its documented
     ``unsigned short *`` gap); the generic materializer refuses it loudly.
+
+    ``clobbers`` declares the registers the plan's MATERIALIZATION writes —
+    and only the materialization: the terminal load / store / call and any
+    rhs evaluation are the consuming terminal's business and are NOT
+    included.  Names are canonical 16-bit register names (``"ax"`` /
+    ``"bx"`` / ``"si"``), matching the ``BUILTIN_CLOBBERS`` /
+    ``REP_STRING_CLOBBERS`` convention.  The planner derives each set from
+    the emitting helpers the materializer calls (term accumulation through
+    AX + BX; the arrow base load writes only BX — SI is read, never
+    written, on its alias fast path; Horner tails add their SI seed
+    exactly when it is a plan-time fact).  ``call_slot`` plans declare an
+    EMPTY set by documented choice: the ``ir.IndirectCall`` terminal
+    interleaves the slot walk with the call under the conservative
+    full-register-pool call-site save default, which governs the whole
+    sequence.  Declared facts only — unconsumed until phase 2 feeds them
+    into the register allocator.
     """
 
     base: AddressPlan | str
@@ -97,10 +114,31 @@ class AddressPlan:
 
 @dataclass(kw_only=True, slots=True)
 class AddressTerm:
-    """One dynamic subscript: ``index_value`` scaled by ``scale`` bytes."""
+    """One dynamic subscript: ``index_value`` scaled by ``scale`` bytes.
 
-    index_value: int | str
+    ``index_value`` is an :data:`cc.ir.Value` leaf — in practice a variable
+    or ``_ir_*`` temp name (planners pre-fold ``int`` constants into the
+    plan displacement, and the exotic ``PlaceAddressOf`` leaf the ungated
+    struct-array index path admits still evaluates through the accumulator
+    only, so the declared clobber facts hold for every leaf kind).
+    """
+
+    index_value: int | str | ast_nodes.PlaceAddressOf
     scale: int
+
+
+def dynamic_term_clobbers(terms: tuple[AddressTerm, ...], /) -> frozenset[str]:
+    """Return the registers the term accumulation writes: AX + BX, or nothing.
+
+    Every plan term is dynamic (the planner pre-folds constant indices into
+    the displacement), so a non-empty ``terms`` always evaluates each index
+    through the accumulator (``generate_expression`` + ``_emit_scale_index``
+    — the ``imul reg, imm`` fallback never touches DX) and seeds / sums the
+    BX index register (``_accumulate_subscript`` and the Horner walk
+    ``_emit_horner_index_offsets`` share this AX + BX footprint).  A
+    term-less plan's accumulation emits nothing.
+    """
+    return frozenset({"ax", "bx"}) if terms else frozenset()
 
 
 def scale_encodes_in_operand(*, bits: int, scale: int) -> bool:
