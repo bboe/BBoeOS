@@ -362,12 +362,14 @@ def _is_nested_subscript_load(node: ast_nodes.Node, /) -> bool:
     (``g.cells[i][j]`` / ``p->field[i][j]``).  Each subscript index is carried
     as a distinct dynamic leaf in :attr:`Address.indices` (in
     outermost-dimension-first order); the per-position row-major strides stay
-    layout-derived at emission, where the reconstructed ``PlaceLoad`` reaches
-    the EXACT addresser the :class:`Access` escape hatch fed.  Gated on simple
-    (bare ``Var`` / ``Int``) indices so the re-seated index node round-trips to
-    the exact AST sub-expression the legacy access walked inline, keeping the
-    address computation byte-identical; a compound index stays on
-    :class:`Access` (the byte gate is the backstop).
+    layout-derived at emission.  Multidim and struct-field-array chains plan
+    natively via :func:`~cc.codegen.x86.emission._plan_subscript_chain` as
+    Horner :class:`~cc.codegen.address_plan.AddressPlan` objects.  Only the
+    array-of-pointers residual subfamily (mid-chain element-pointer load)
+    falls back to AST re-seat — those shapes decline planning in the phase-1
+    model.  Gated on simple (bare ``Var`` / ``Int``) indices so the
+    array-of-pointers residual path round-trips the index node byte-identically;
+    a compound index stays on :class:`Access` (the byte gate is the backstop).
     """
     return isinstance(node, ast_nodes.PlaceLoad) and _is_nested_named_subscript_chain(node.place)
 
@@ -1552,12 +1554,12 @@ class Builder:
                 # simple subscript index is a distinct dynamic leaf on
                 # ``Address.indices`` (source order); the static member
                 # offsets ride the ``shape`` and accumulate at emission, where
-                # ``_reseat_nested_subscript_indices`` rebuilds the chain and
-                # drives the EXACT legacy ``_emit_place_store`` path.  The
-                # byte-safe leaf RHS emits no preceding instruction, so the
-                # RHS-vs-address ordering matches the legacy store
-                # byte-for-byte (``symbol_table[index].name[n] = src`` in
-                # ``asm.c`` ``symbol_add``).
+                # ``_plan_mixed_subscript_chain`` builds a multi-term
+                # subscript-terminal ``AddressPlan`` that drives the native
+                # store path.  The byte-safe leaf RHS emits no preceding
+                # instruction, so the RHS-vs-address ordering matches the
+                # legacy store byte-for-byte (``symbol_table[index].name[n] =
+                # src`` in ``asm.c`` ``symbol_add``).
                 indices = self._lower_subscript_chain_indices(place=place, out=out, strings=strings)
                 store_value = self._build_expr(expr=value, out=out, strings=strings)
                 address_temp = self._tmp()

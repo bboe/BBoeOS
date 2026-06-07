@@ -61,6 +61,67 @@ int main() {
 }
 """
 
+MIXED_CHAIN_STORE_SOURCE = """
+struct symbol { int value; char name[8]; };
+struct symbol table[4];
+void write_name(int i, int j, int c) {
+    table[i].name[j] = c;
+}
+"""
+
+MULTIDIM_CONSTANT_SOURCE = """
+int m[4][3];
+int read_constant(void) {
+    int out;
+    out = m[2][1];
+    return out;
+}
+"""
+
+MULTIDIM_MEMBER_ARROW_SOURCE = """
+struct grid { int pad; int cells[4][3]; };
+int read_cell(struct grid *p, int i, int j) {
+    int out;
+    out = p->cells[i][j];
+    return out;
+}
+"""
+
+MULTIDIM_MEMBER_DOT_SOURCE = """
+struct grid { int pad; int cells[4][3]; };
+struct grid g;
+int read_cell(int i, int j) {
+    int out;
+    out = g.cells[i][j];
+    return out;
+}
+"""
+
+MULTIDIM_SOURCE = """
+int m[4][3];
+int read_cell(int i, int j) {
+    int out;
+    out = m[i][j];
+    return out;
+}
+"""
+
+MULTIDIM_STORE_SOURCE = """
+int m[4][3];
+void write_cell(int i, int j, int leaf) {
+    m[i][j] = leaf;
+}
+"""
+
+MULTIDIM_THREE_DIMENSIONAL_SOURCE = """
+int m[2][4][3];
+int read_cell(int i, int j, int k) {
+    int out;
+    out = m[i][j][k];
+    return out;
+}
+"""
+
 MULTI_LEVEL_ARROW_SOURCE = """
 struct inner { int a; int b; };
 struct outer { int pad; struct inner mid; };
@@ -71,6 +132,14 @@ int reader(struct outer *p) {
 }
 """
 
+
+POINTER_TO_ARRAY_SOURCE = """
+int read_cell(int (*p)[3], int i, int j) {
+    int out;
+    out = p[i][j];
+    return out;
+}
+"""
 
 STRUCT_ARRAY_CONSTANT_SOURCE = """
 struct entry { int key; int payload; };
@@ -197,6 +266,26 @@ def test_dot_member_load_produces_pure_displacement_plan() -> None:
     assert plan.field_size == 4
 
 
+def test_mixed_chain_store_plans_member_offset_and_two_terms() -> None:
+    """``table[i].name[j] = c`` plans two accumulate terms with the member offset folded.
+
+    The mixed chain is NOT a Horner plan: the legacy path runs the
+    ``resolve_address`` recursion (struct-array arm + subscript arm), which
+    accumulates each dynamic subscript via ``_accumulate_subscript`` (the
+    second term's push/pop-add pattern).  The plan mirrors that as a
+    multi-term ``subscript_terminal`` plan over the static array base.
+    """
+    generator = _generate(MIXED_CHAIN_STORE_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.horner is False
+    assert plan.subscript_terminal is True
+    assert [term.scale for term in plan.terms] == [12, 1]  # struct stride, char element
+    assert plan.displacement == 4  # offset of name within struct symbol
+    assert plan.field_size == 1
+
+
 def test_multi_level_arrow_load_plans_nested_plan_base() -> None:
     """``p->mid.b`` plans a "plan" base nesting the arrow plan for ``p->mid``.
 
@@ -218,6 +307,116 @@ def test_multi_level_arrow_load_plans_nested_plan_base() -> None:
     assert inner.base == "p"
     assert inner.displacement == 4  # offset of mid within struct outer
     assert inner.decay_to_address is True  # struct-value member decays via lea
+
+
+def test_multidim_constant_indices_fold_into_displacement() -> None:
+    """``m[2][1]`` folds every index into the displacement — Horner plan, no terms.
+
+    The legacy Horner walk folds ``Int`` indices into the static displacement
+    (``2 * 12 + 1 * 4``), so the plan must pre-fold them identically; the
+    plan stays ``subscript_terminal`` because the legacy dispatch still
+    routed the fully-folded shape through the protect-BX terminals.
+    """
+    generator = _generate(MULTIDIM_CONSTANT_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.horner is True
+    assert plan.terms == ()
+    assert plan.displacement == 28  # 2 * 12 + 1 * 4
+    assert plan.subscript_terminal is True
+
+
+def test_multidim_load_plans_horner_terms() -> None:
+    """``m[i][j]`` plans a Horner plan with byte strides per dimension."""
+    generator = _generate(MULTIDIM_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.horner is True
+    assert [term.scale for term in plan.terms] == [12, 4]  # row stride, element
+    assert plan.base_kind == "label"
+    assert plan.base_always_in_register is False
+    assert plan.subscript_terminal is True
+    assert plan.element_size == 4
+    assert plan.field_size == 4
+
+
+def test_multidim_member_arrow_load_plans_pointer_horner_base() -> None:
+    """``p->cells[i][j]`` plans a Horner plan whose pointer base loads into SI."""
+    generator = _generate(MULTIDIM_MEMBER_ARROW_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.horner is True
+    assert plan.base_kind == "pointer"
+    assert plan.base == "p"
+    assert plan.base_always_in_register is True
+    assert plan.base_is_static is False
+    assert [term.scale for term in plan.terms] == [12, 4]
+    assert plan.displacement == 4  # offset of cells within struct grid
+
+
+def test_multidim_member_dot_load_plans_register_seeded_base() -> None:
+    """``g.cells[i][j]`` plans a Horner plan whose static base always seeds SI."""
+    generator = _generate(MULTIDIM_MEMBER_DOT_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.horner is True
+    assert plan.base_kind == "label"
+    assert plan.base_always_in_register is True
+    assert [term.scale for term in plan.terms] == [12, 4]
+    assert plan.displacement == 4  # offset of cells within struct grid
+
+
+def test_multidim_store_consumes_horner_plan() -> None:
+    """``m[i][j] = leaf`` plans the same Horner terms and stores through the plan.
+
+    The asm-shape assertions pin the native materialization to the legacy
+    ``_emit_subscript_resolved_store`` sequence: the rhs spill before the
+    Horner walk, the two scaled index pushes, and the indexed store through
+    ``[_g_m+ebx]``.  Byte-for-byte parity is enforced by the byte gate and
+    the BASE-vs-HEAD asm diff.
+    """
+    generator = _generate(MULTIDIM_STORE_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.horner is True
+    assert [term.scale for term in plan.terms] == [12, 4]
+    assert plan.subscript_terminal is True
+    body = generator.output.split("write_cell:")[1]
+    lines = [line.strip() for line in body.splitlines()]
+    assert lines.count("mov [_g_m+ebx], eax") == 1  # indexed store terminal
+
+
+def test_multidim_three_dimensional_load_plans_three_terms() -> None:
+    """``m[i][j][k]`` over ``int m[2][4][3]`` plans three byte strides 48/12/4."""
+    generator = _generate(MULTIDIM_THREE_DIMENSIONAL_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.horner is True
+    assert [term.scale for term in plan.terms] == [48, 12, 4]
+
+
+def test_pointer_to_array_load_plans_outer_row_stride() -> None:
+    """``p[i][j]`` over ``int (*p)[3]`` plans a pointer-base Horner plan.
+
+    The outermost index strides by ``sizeof(int[3])`` (the whole pointee
+    array); the base is the POINTER VALUE, loaded into SI by the
+    materialization (``base_kind="pointer"`` + ``base_always_in_register``).
+    """
+    generator = _generate(POINTER_TO_ARRAY_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.horner is True
+    assert plan.base_kind == "pointer"
+    assert plan.base == "p"
+    assert plan.base_always_in_register is True
+    assert [term.scale for term in plan.terms] == [12, 4]
 
 
 def test_scale_encodes_in_operand_16_bit_only_unscaled() -> None:

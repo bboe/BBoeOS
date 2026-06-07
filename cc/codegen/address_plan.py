@@ -37,8 +37,22 @@ class AddressPlan:
 
     ``base_is_static`` / ``base_preserves_accumulator`` capture the store
     orderings of ``_emit_member_scalar_resolved_store``; ``horner`` marks a
-    multi-term plan whose legacy materialization is the row-major Horner walk
-    rather than per-term scale-and-sum.
+    row-major multidim plan whose materialization is the legacy Horner walk
+    (``_emit_horner_index_offsets`` over the term strides) rather than the
+    per-term ``_accumulate_subscript`` scale-and-sum.  Each
+    :class:`AddressTerm` ``scale`` is the BYTE stride of one step of that
+    index (outermost dimension first); constant indices are pre-folded into
+    ``displacement`` exactly where the legacy walk folded them.  On a Horner
+    plan ``base_kind="pointer"`` means the base register is seeded by loading
+    the named pointer's VALUE into SI (the arrow-member / pointer-to-array
+    walks), not by the SI-or-BX member-base load the scalar pointer arm uses.
+
+    ``base_always_in_register`` marks a Horner plan whose base address is
+    materialized into the SI base register unconditionally — even when every
+    index folded into the displacement (the member-multidim ``lea`` and the
+    pointer-value load both always run).  Bare-multidim plans leave it False:
+    their base stays a static frame/label operand unless a dynamic index over
+    a frame base forces the SI materialization at 16-bit.
 
     ``subscript_terminal`` marks a plan whose shape the legacy dispatch
     routed through the protect-BX subscript terminals
@@ -49,6 +63,7 @@ class AddressPlan:
 
     base: AddressPlan | str
     base_kind: str  # "frame" | "label" | "plan" | "pointer"
+    base_always_in_register: bool = False
     base_is_static: bool = True
     base_preserves_accumulator: bool = False
     bitfield: FieldInfo | None = None

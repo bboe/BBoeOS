@@ -1159,6 +1159,24 @@ class EmissionMixin:
             self.ax_clear()
             emit_body(default_case.body)
 
+    @staticmethod
+    def _fold_horner_terms(*, displacement: int, indices: tuple[ir.Value, ...], strides: list[int]) -> tuple[int, tuple[AddressTerm, ...]]:
+        """Fold constant indices into *displacement*; return ``(displacement, dynamic terms)``.
+
+        Mirrors the constant fold inside the legacy Horner walk
+        (``_emit_horner_index_offsets``): an ``int`` index contributes
+        ``index * stride`` to the static displacement, so the plan carries
+        only the dynamic indices as :class:`AddressTerm` entries (in the
+        same outermost-dimension-first order the walk consumes them).
+        """
+        terms: list[AddressTerm] = []
+        for index_value, stride in zip(indices, strides, strict=True):
+            if isinstance(index_value, int):
+                displacement += index_value * stride
+            else:
+                terms.append(AddressTerm(index_value=index_value, scale=stride))
+        return displacement, tuple(terms)
+
     def _generate_assign_expr(self, expression: AssignExpr, /) -> None:
         """Lower an :class:'AssignExpr' (parenthesised assignment as an rvalue).
 
@@ -2242,13 +2260,18 @@ class EmissionMixin:
         static base through the legacy ``_accumulate_subscript`` emitter,
         seeding the operand's BX index register.
         """
+        # Horner plans (row-major multidim / pointer-to-array) materialize
+        # through the legacy Horner tail emitters, dispatched on the plan's
+        # declared base facts.
+        if plan.horner:
+            return self._materialize_horner_plan(plan)
         # Guard against plan shapes the materializer does not yet support.
         # Future tasks extend the materializer in lockstep with the planner;
         # failing loudly here prevents a silent garbage operand if that
-        # invariant is violated.  Terms are supported on the static
-        # (frame / label) bases only — the planner never produces a term over
-        # a pointer / nested-plan base today.
-        if plan.horner or (plan.terms and plan.base_kind not in ("frame", "label")):
+        # invariant is violated.  Non-Horner terms are supported on the
+        # static (frame / label) bases only — the planner never produces an
+        # accumulate term over a pointer / nested-plan base today.
+        if plan.terms and plan.base_kind not in ("frame", "label"):
             message = f"unmaterializable AddressPlan shape (base_kind={plan.base_kind!r}, terms={len(plan.terms)})"
             raise NotImplementedError(message)
 
@@ -2296,6 +2319,43 @@ class EmissionMixin:
             # Int fold would be a harmless no-op regardless.
             self._accumulate_subscript(operand, index=self._ir_value_to_ast(term.index_value), element_size=term.scale)
         return operand
+
+    def _materialize_horner_plan(self, plan: AddressPlan, /) -> MemoryOperand:
+        """Emit a Horner plan through the legacy row-major tail emitters.
+
+        Converts each term's index :data:`Value` back to its AST leaf and
+        runs the SAME emitting half the legacy ``resolve_address`` Horner
+        arms run, so the byte sequences match.  The planner pre-folded
+        constant indices into the displacement, so every term here is
+        dynamic.  Dispatch mirrors the legacy emitters' base
+        materializations:
+
+        - ``base_kind="pointer"`` — the named pointer's VALUE loads into SI
+          (arrow-member multidim and pointer-to-array, whose emitting halves
+          are byte-identical).
+        - ``base_always_in_register`` — the static struct base ``lea``'s into
+          SI unconditionally (dot-member multidim).
+        - otherwise — the bare-multidim static base, with the frame-base
+          dynamic-index SI materialization handled by the tail itself.
+        """
+        indices = [self._ir_value_to_ast(term.index_value) for term in plan.terms]
+        strides = [term.scale for term in plan.terms]
+        if plan.base_kind == "pointer":
+            return self._emit_horner_pointer_base_operand(
+                plan.base, displacement=plan.displacement, element_size=plan.element_size, indices=indices, strides=strides
+            )
+        if plan.base_always_in_register:
+            return self._emit_horner_member_base_operand(
+                base=plan.base, displacement=plan.displacement, element_size=plan.element_size, indices=indices, strides=strides
+            )
+        return self._emit_horner_static_base_operand(
+            base=plan.base,
+            base_kind=plan.base_kind,
+            displacement=plan.displacement,
+            element_size=plan.element_size,
+            indices=indices,
+            strides=strides,
+        )
 
     @staticmethod
     def _merge_pinned_save_filters(
@@ -2448,7 +2508,7 @@ class EmissionMixin:
         if address.indices:
             if len(address.indices) == 1:
                 return self._plan_struct_array_member(address)
-            return None  # multidim / mixed-chain shapes arrive in a later task
+            return self._plan_subscript_chain(address)
         # Arrow shapes carry the pointer name in ``base_value``; the shape
         # itself roots at the same ``DereferencePlace(VariablePlace)``, so the
         # member-place planner derives the base from the shape directly.
@@ -2537,6 +2597,55 @@ class EmissionMixin:
             line=shape.line,
         )
 
+    def _plan_mixed_subscript_chain(self, address: ir.Address, /) -> AddressPlan | None:
+        """Plan the mixed chain ``array[i].member[j]`` (pure; no emission).
+
+        NOT a Horner plan: the legacy path runs the ``resolve_address``
+        recursion — the struct-array stride from
+        ``_arithmetic_element_size`` accumulates the outer element index, the
+        member offset / sizes fold from ``_member_layout_on``, and the inner
+        subscript accumulates at the member's element stride — all via
+        repeated ``_accumulate_subscript`` (the second dynamic term's
+        push/pop-add pattern).  The multi-term arm of
+        ``_materialize_address_plan`` loops the SAME emitter per term over
+        the same static base operand, so the bytes match.  Constant indices
+        fold into the displacement exactly where ``_accumulate_subscript``
+        folded them.
+
+        Only the exact two-subscript, one-member shape
+        ``SubscriptPlace(MemberPlace(SubscriptPlace(VariablePlace)))`` is
+        planned — the only mixed shape whose legacy recursion takes purely
+        layout-derived arms (deeper chains route through the chained-member
+        resolver, which emits its base materialization).  Anything else
+        returns None and stays on the legacy re-seat path.
+        """
+        shape = address.shape
+        if not isinstance(shape, SubscriptPlace):
+            return None
+        member = shape.base
+        if not isinstance(member, MemberPlace):
+            return None
+        inner = member.base
+        if not (isinstance(inner, SubscriptPlace) and isinstance(inner.base, VariablePlace)):
+            return None
+        line = shape.line
+        base_kind, base = self._variable_base(inner.base.name, line=line)
+        struct_stride = self._arithmetic_element_size(inner.base.name)
+        field_offset, _field_size, element_size = self._member_layout_on(inner, member.member_name, line=line)
+        displacement, terms = self._fold_horner_terms(
+            displacement=field_offset, indices=address.indices, strides=[struct_stride, element_size]
+        )
+        return AddressPlan(
+            base=base,
+            base_kind=base_kind,
+            displacement=displacement,
+            element_size=element_size,
+            field_size=element_size,
+            line=line,
+            subscript_terminal=True,
+            terms=terms,
+        )
+
     def _plan_struct_array_member(self, address: ir.Address, /) -> AddressPlan | None:
         """Plan the single-index struct-array member shape ``array[index].member`` (pure; no emission).
 
@@ -2595,6 +2704,97 @@ class EmissionMixin:
             subscript_terminal=True,
             terms=terms,
         )
+
+    def _plan_subscript_chain(self, address: ir.Address, /) -> AddressPlan | None:
+        """Plan one N-index (N >= 2) subscript chain (pure; no emission).
+
+        Dispatches on the ``shape`` exactly as the legacy
+        ``resolve_address`` SubscriptPlace arm does, deriving each plan from
+        the matching emitter's pure layout half:
+
+        - ``g.field[i][j]`` / ``p->field[i][j]`` (multidim member chain) —
+          Horner plan rooted at the struct base + field offset; the dot base
+          always seeds SI (``base_always_in_register``), the arrow base is a
+          deferred pointer-value load.
+        - ``name[i][j]...`` (uniform chain): pointer-to-array (Horner over
+          ``n + 1`` strides, pointer-value base) or contiguous multidim
+          (Horner over the registered dimensions, static base).  An
+          array-of-pointers chain returns None — its legacy path breaks the
+          chain at the element-pointer dereference, which has no plan model
+          yet.
+        - ``array[i].member[j]`` (mixed chain) — multi-term accumulate plan
+          (:meth:`_plan_mixed_subscript_chain`).
+
+        Every planned shape routed through the protect-BX subscript
+        terminals in the legacy dispatch, so all plans carry
+        ``subscript_terminal``.
+        Constant indices fold into the displacement exactly where the legacy
+        walk folded them (:meth:`_fold_horner_terms`).
+        """
+        shape = address.shape
+        line = shape.line
+        index_count = len(address.indices)
+        if (multidim_member := self._match_multidim_member_chain(shape)) is not None:
+            object_name, arrow, field_name, _index_nodes = multidim_member
+            field_offset, element_size, strides = self._multidim_member_horner_layout(
+                object_name, arrow=arrow, field_name=field_name, index_count=index_count, line=line
+            )
+            if arrow:
+                base: str = object_name
+                base_kind = "pointer"
+                base_is_static = False
+            else:
+                base_kind, base = self._variable_base(object_name, line=line)
+                base_is_static = True
+            displacement, terms = self._fold_horner_terms(displacement=field_offset, indices=address.indices, strides=strides)
+            return AddressPlan(
+                base=base,
+                base_always_in_register=True,
+                base_is_static=base_is_static,
+                base_kind=base_kind,
+                displacement=displacement,
+                element_size=element_size,
+                field_size=element_size,
+                horner=True,
+                line=line,
+                subscript_terminal=True,
+                terms=terms,
+            )
+        if (chain := self._uniform_subscript_chain(shape)) is not None:
+            base_name, _index_nodes = chain
+            if base_name in self.pointer_array_types:
+                element_size, strides = self._pointer_to_array_horner_layout(base_name, index_count=index_count, line=line)
+                displacement, terms = self._fold_horner_terms(displacement=0, indices=address.indices, strides=strides)
+                return AddressPlan(
+                    base=base_name,
+                    base_always_in_register=True,
+                    base_is_static=False,
+                    base_kind="pointer",
+                    displacement=displacement,
+                    element_size=element_size,
+                    field_size=element_size,
+                    horner=True,
+                    line=line,
+                    subscript_terminal=True,
+                    terms=terms,
+                )
+            if self._is_multidim_array(base_name):
+                element_size, strides = self._multidim_subscript_horner_layout(base_name, index_count=index_count, line=line)
+                base_kind, base = self._variable_base(base_name, line=line)
+                displacement, terms = self._fold_horner_terms(displacement=0, indices=address.indices, strides=strides)
+                return AddressPlan(
+                    base=base,
+                    base_kind=base_kind,
+                    displacement=displacement,
+                    element_size=element_size,
+                    field_size=element_size,
+                    horner=True,
+                    line=line,
+                    subscript_terminal=True,
+                    terms=terms,
+                )
+            return None  # array-of-pointers: legacy deref-rooted path
+        return self._plan_mixed_subscript_chain(address)
 
     @staticmethod
     def _rep_width_suffix(element_size: int, /) -> str:
