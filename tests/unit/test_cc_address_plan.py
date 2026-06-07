@@ -72,6 +72,35 @@ int reader(struct outer *p) {
 """
 
 
+STRUCT_ARRAY_CONSTANT_SOURCE = """
+struct entry { int key; int payload; };
+struct entry table[8];
+int read_constant(void) {
+    int out;
+    out = table[3].payload;
+    return out;
+}
+"""
+
+STRUCT_ARRAY_SOURCE = """
+struct entry { int key; int payload; };
+struct entry table[8];
+int read_payload(int index) {
+    int out;
+    out = table[index].payload;
+    return out;
+}
+"""
+
+STRUCT_ARRAY_STORE_SOURCE = """
+struct entry { int key; int payload; };
+struct entry table[8];
+void write_payload(int index, int leaf) {
+    table[index].payload = leaf;
+}
+"""
+
+
 def _generate(source_text: str, /, *, bits: int = 32) -> X86CodeGenerator:
     """Compile *source_text* and return the generator (plans inspectable)."""
     with tempfile.TemporaryDirectory(prefix="test_address_plan_") as work:
@@ -205,3 +234,59 @@ def test_scale_encodes_in_operand_32_bit() -> None:
     assert scale_encodes_in_operand(bits=32, scale=8)
     assert not scale_encodes_in_operand(bits=32, scale=3)
     assert not scale_encodes_in_operand(bits=32, scale=32)
+
+
+def test_struct_array_constant_index_folds_into_displacement() -> None:
+    """``table[3].payload`` folds ``index * stride`` into the displacement — no term.
+
+    A constant subscript still rides ``Address.indices`` (the IR builder
+    pre-lowers every index leaf), so the planner must fold it exactly where
+    the legacy ``_accumulate_subscript`` did: ``3 * sizeof(struct entry) +
+    offsetof(payload)`` lands in ``displacement`` and ``terms`` stays empty.
+    The plan keeps ``subscript_terminal`` so the constant-index store/load
+    bytes (including the legacy unconditional rhs spill on stores) match.
+    """
+    generator = _generate(STRUCT_ARRAY_CONSTANT_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.terms == ()
+    assert plan.displacement == 28  # 3 * sizeof(struct entry) + offset of payload
+    assert plan.subscript_terminal is True
+
+
+def test_struct_array_member_load_plans_one_term() -> None:
+    """``table[index].payload`` plans one dynamic term scaled by the struct size."""
+    generator = _generate(STRUCT_ARRAY_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert len(plan.terms) == 1
+    assert plan.terms[0].scale == 8  # sizeof(struct entry)
+    assert plan.displacement == 4  # offset of payload
+
+
+def test_struct_array_member_store_plans_term_and_emits_indexed_store() -> None:
+    """``table[index].payload = leaf`` plans one term and stores through ``[base+disp+ebx]``.
+
+    The asm-shape assertions pin the native materialization to the legacy
+    ``_emit_subscript_resolved_store`` sequence: the rhs is spilled before the
+    index evaluation, exactly one ``mov ebx, eax`` seeds the index register,
+    and the store goes through the indexed operand.  No ``push ebx`` guard is
+    emitted (no variable is pinned to EBX here).  Byte-for-byte parity with
+    the legacy path is enforced by ``tests/test_cc_function_sizes.py``.
+    """
+    generator = _generate(STRUCT_ARRAY_STORE_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert len(plan.terms) == 1
+    assert plan.terms[0].scale == 8  # sizeof(struct entry)
+    assert plan.displacement == 4  # offset of payload
+    assert plan.subscript_terminal is True
+    body = generator.output.split("write_payload:")[1]
+    lines = [line.strip() for line in body.splitlines()]
+    assert lines.count("mov ebx, eax") == 1  # exactly one index seed
+    assert lines.count("mov [_g_table+4+ebx], eax") == 1  # indexed store terminal
+    assert lines.count("push eax") == 1  # the rhs spill across the index eval
+    assert "push ebx" not in lines  # no pinned-EBX guard needed here

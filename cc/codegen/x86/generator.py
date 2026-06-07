@@ -16,7 +16,10 @@ import dataclasses
 import os
 import re
 from dataclasses import dataclass, field, fields
-from typing import ClassVar, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from cc import ir, regalloc
 from cc.ast_nodes import (
@@ -3366,23 +3369,25 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         else:
             self.emit(f"        mov {destination}, {accumulator}")
 
-    def _emit_subscript_resolved_load(self, place: Place, /) -> None:
-        """Resolve *place* and load its value through the protect-BX terminal.
+    def _emit_subscript_operand_load(self, resolve_operand: Callable[[], MemoryOperand], /) -> None:
+        """Load an indexed operand's value through the protect-BX terminal.
 
-        Shared by every indexed lvalue whose address computation may clobber
-        BX as a scratch index register: struct-array members, contiguous
-        multidim arrays, pointer-to-array, and multidim array members.  The
-        resolver's first dynamic-index ``mov bx, ax`` does not itself guard a
-        pinned BX, so the outer push / pop guard is preserved here.  An
-        array-typed member (field_size != element_size) decays to its address
-        via ``lea`` over the full indexed operand (the resolved member-address
-        terminal drops the index register, so the lea is emitted directly).
+        Core of :meth:`_emit_subscript_resolved_load`, taking an
+        operand-producing thunk so the plan-driven native ``ir.Load`` path
+        (``_materialize_address_plan``) and the place-driven legacy path
+        (``resolve_address``) share one guard + terminal.  The thunk runs
+        INSIDE the BX guard because the operand resolution may clobber BX as
+        a scratch index register; its first dynamic-index ``mov bx, ax`` does
+        not itself guard a pinned BX.  An array-typed member (field_size !=
+        element_size) decays to its address via ``lea`` over the full indexed
+        operand (the resolved member-address terminal drops the index
+        register, so the lea is emitted directly).
         """
         self.ax_clear()
         protect_bx = self._bx_holds_pinned_var()
         if protect_bx:
             self.emit(f"        push {self.target.bx_register}")
-        operand = self.resolve_address(place)
+        operand = resolve_operand()
         addr = self._build_address(operand.base, operand.displacement, index=operand.index or "")
         if operand.decay_to_address:
             self.emit(f"        lea {self.target.acc}, {addr}")
@@ -3392,15 +3397,18 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        pop {self.target.bx_register}")
         self.ax_clear()
 
-    def _emit_subscript_resolved_store(self, place: Place, value: Node, /) -> None:
-        """Resolve *place* and store *value* through the protect-BX terminal.
+    def _emit_subscript_operand_store(self, resolve_operand: Callable[[], MemoryOperand], value: Node, /, *, line: int) -> None:
+        """Store *value* through an indexed operand via the protect-BX terminal.
 
-        Shared by every indexed lvalue whose address computation may clobber
-        BX as a scratch index register (struct-array members, contiguous
-        multidim arrays, pointer-to-array, and multidim array members).  The
-        value is evaluated and stashed before the address computation (which is
-        free to clobber the accumulator); the outer push / pop guard preserves
-        a pinned BX across the resolver's first dynamic-index ``mov bx, ax``.
+        Core of :meth:`_emit_subscript_resolved_store`, taking an
+        operand-producing thunk so the plan-driven native ``ir.Store`` path
+        (``_materialize_address_plan``) and the place-driven legacy path
+        (``resolve_address``) share one guard + terminal.  The value is
+        evaluated and stashed before the thunk runs (the address computation
+        is free to clobber the accumulator — and the spill is unconditional,
+        even for a fully-folded constant index); the outer push / pop guard
+        preserves a pinned BX across the resolution's first dynamic-index
+        ``mov bx, ax``.
         """
         allowed = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
         self.ax_clear()
@@ -3409,16 +3417,34 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             self.emit(f"        push {self.target.bx_register}")
         self.generate_expression(value)  # AX = value
         self.emit(f"        push {self.target.acc}")  # save value on top of stack
-        operand = self.resolve_address(place)  # may use BX/AX as scratch
+        operand = resolve_operand()  # may use BX/AX as scratch
         if operand.field_size not in allowed:
             message = f"writing field (size {operand.field_size}) not yet supported; use asm()"
-            raise CompileError(message, line=place.line)
+            raise CompileError(message, line=line)
         self.emit(f"        pop {self.target.acc}")  # AX = value
         self.ax_clear()
         addr = self._build_address(operand.base, operand.displacement, index=operand.index or "")
         self._emit_field_store(addr=addr, field_size=operand.field_size)
         if protect_bx:
             self.emit(f"        pop {self.target.bx_register}")
+
+    def _emit_subscript_resolved_load(self, place: Place, /) -> None:
+        """Resolve *place* and load its value through the protect-BX terminal.
+
+        Shared by every indexed lvalue whose address computation may clobber
+        BX as a scratch index register: struct-array members, contiguous
+        multidim arrays, pointer-to-array, and multidim array members.
+        """
+        self._emit_subscript_operand_load(lambda: self.resolve_address(place))
+
+    def _emit_subscript_resolved_store(self, place: Place, value: Node, /) -> None:
+        """Resolve *place* and store *value* through the protect-BX terminal.
+
+        Shared by every indexed lvalue whose address computation may clobber
+        BX as a scratch index register (struct-array members, contiguous
+        multidim arrays, pointer-to-array, and multidim array members).
+        """
+        self._emit_subscript_operand_store(lambda: self.resolve_address(place), value, line=place.line)
 
     def _emit_syscall(self, name: str, /) -> None:
         """Emit the invocation sequence for a named kernel syscall.

@@ -85,7 +85,7 @@ from cc.ast_nodes import (
     While,
     address_of_variable_name,
 )
-from cc.codegen.address_plan import AddressPlan
+from cc.codegen.address_plan import AddressPlan, AddressTerm
 from cc.codegen.x86.jumps import (
     CMOV_WHEN_FALSE,
     CMOV_WHEN_TRUE,
@@ -2131,9 +2131,16 @@ class EmissionMixin:
                     # False for it), and the ``store_target_register`` wrap is
                     # unread on this path (its only readers live in
                     # ``_generate_binary_operation_expression``).
-                    self.ax_clear()
-                    operand = self._materialize_address_plan(plan)
-                    self._emit_resolved_load(operand)
+                    if plan.subscript_terminal:
+                        # Indexed shape (struct-array member): the legacy
+                        # dispatch routed it through the protect-BX subscript
+                        # terminal — the operand materialization (the index
+                        # eval + scale) runs INSIDE the BX guard.
+                        self._emit_subscript_operand_load(lambda: self._materialize_address_plan(plan))
+                    else:
+                        self.ax_clear()
+                        operand = self._materialize_address_plan(plan)
+                        self._emit_resolved_load(operand)
                     direct_register = self.pinned_register.get(destination)
                     if direct_register is None:
                         direct_register = self.register_aliased_globals.get(destination)
@@ -2153,15 +2160,25 @@ class EmissionMixin:
             case ir.Store(address=address, value=value):
                 plan = self._ir_address_plans.get(address)
                 if plan is not None:
-                    # Native path: every planned shape is a bare ``MemberPlace``
-                    # (dot / arrow / multi-level arrow), which the legacy
-                    # ``_emit_place_store`` dispatch routes unconditionally to
-                    # ``_emit_member_scalar_resolved_store`` (the subscript /
-                    # struct-array arms all require a ``SubscriptPlace``
-                    # somewhere in the chain).  ``_emit_planned_member_store``
-                    # mirrors that emitter's four orderings from the plan's
-                    # declared base facts, calling the SAME sub-emitters.
-                    self._emit_planned_member_store(plan, self._ir_value_to_ast(value))
+                    if plan.subscript_terminal:
+                        # Indexed shape (struct-array member): the legacy
+                        # ``_emit_place_store`` dispatch fell through to the
+                        # protect-BX subscript terminal, which spills the rhs
+                        # across the operand materialization unconditionally
+                        # (even for a fully-folded constant index).
+                        self._emit_subscript_operand_store(
+                            lambda: self._materialize_address_plan(plan), self._ir_value_to_ast(value), line=plan.line
+                        )
+                    else:
+                        # Every other planned shape is a bare ``MemberPlace``
+                        # (dot / arrow / multi-level arrow), which the legacy
+                        # ``_emit_place_store`` dispatch routes unconditionally to
+                        # ``_emit_member_scalar_resolved_store`` (the subscript /
+                        # struct-array arms all require a ``SubscriptPlace``
+                        # somewhere in the chain).  ``_emit_planned_member_store``
+                        # mirrors that emitter's four orderings from the plan's
+                        # declared base facts, calling the SAME sub-emitters.
+                        self._emit_planned_member_store(plan, self._ir_value_to_ast(value))
                 else:
                     # ``*(shape) = value`` — drive the EXISTING member-store path
                     # from the producing ``Address``'s deref-free ``shape`` so the
@@ -2221,12 +2238,17 @@ class EmissionMixin:
         "plan" base materializes the nested plan, loads its decayed
         struct-value address, and seeds BX — both call the SAME legacy
         emitting helpers the AST resolver used, so the byte sequences match.
+        A dynamic-index term (the struct-array shape) accumulates onto the
+        static base through the legacy ``_accumulate_subscript`` emitter,
+        seeding the operand's BX index register.
         """
         # Guard against plan shapes the materializer does not yet support.
         # Future tasks extend the materializer in lockstep with the planner;
         # failing loudly here prevents a silent garbage operand if that
-        # invariant is violated.
-        if plan.terms or plan.horner:
+        # invariant is violated.  Terms are supported on the static
+        # (frame / label) bases only — the planner never produces a term over
+        # a pointer / nested-plan base today.
+        if plan.horner or (plan.terms and plan.base_kind not in ("frame", "label")):
             message = f"unmaterializable AddressPlan shape (base_kind={plan.base_kind!r}, terms={len(plan.terms)})"
             raise NotImplementedError(message)
 
@@ -2263,7 +2285,17 @@ class EmissionMixin:
             self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
             self.ax_clear()
             return build_operand(base=self.target.bx_register, base_kind="register")
-        return build_operand(base=plan.base, base_kind=plan.base_kind)
+        operand = build_operand(base=plan.base, base_kind=plan.base_kind)
+        for term in plan.terms:
+            # Dynamic subscript term: reuse the legacy scale-and-accumulate
+            # emitter (index into the accumulator, scaled, seeded into /
+            # summed onto BX) so the byte sequence — including the 16-bit
+            # shl / imul scale forms — stays single-source-of-truth.  The
+            # planner pre-folds constant indices into the displacement, so
+            # every term here is dynamic; ``_accumulate_subscript``'s own
+            # Int fold would be a harmless no-op regardless.
+            self._accumulate_subscript(operand, index=self._ir_value_to_ast(term.index_value), element_size=term.scale)
+        return operand
 
     @staticmethod
     def _merge_pinned_save_filters(
@@ -2414,7 +2446,9 @@ class EmissionMixin:
         materializes it).
         """
         if address.indices:
-            return None  # dynamic-index shapes arrive in a later task
+            if len(address.indices) == 1:
+                return self._plan_struct_array_member(address)
+            return None  # multidim / mixed-chain shapes arrive in a later task
         # Arrow shapes carry the pointer name in ``base_value``; the shape
         # itself roots at the same ``DereferencePlace(VariablePlace)``, so the
         # member-place planner derives the base from the shape directly.
@@ -2501,6 +2535,65 @@ class EmissionMixin:
             element_size=info.element_size,
             field_size=info.field_size,
             line=shape.line,
+        )
+
+    def _plan_struct_array_member(self, address: ir.Address, /) -> AddressPlan | None:
+        """Plan the single-index struct-array member shape ``array[index].member`` (pure; no emission).
+
+        Mirrors the legacy resolution exactly, from its pure halves: the base
+        operand comes from ``_variable_base`` (the ``VariablePlace`` seed of
+        ``resolve_address``), the subscript stride from
+        ``_arithmetic_element_size`` (the bare-seed stride the
+        ``SubscriptPlace`` arm derives), and the member offset / widths from
+        ``_member_layout_on`` (the struct-array ``MemberPlace`` arm).  A
+        constant index folds ``index * stride`` into the displacement exactly
+        where ``_accumulate_subscript`` did — no term; a dynamic index becomes
+        one :class:`AddressTerm` whose materialization reuses
+        ``_accumulate_subscript`` itself.  ``decay_to_address`` follows the
+        struct-array arm (``field_size != element_size``; no struct-value
+        special case, and no bitfield ride-along — that arm never set one).
+
+        ``subscript_terminal`` routes the consuming Load / Store through the
+        protect-BX subscript terminals even for a fully-folded constant index
+        (the legacy dispatch reached them for every struct-array shape, and
+        they emit the BX guard / rhs spill unconditionally).
+
+        The only other single-index ``Address`` producer today is the
+        ``name[index]()`` function-pointer slot (consumed by
+        ``ir.IndirectCall``, which reads ``_ir_address_ops``, not plans) —
+        its non-``MemberPlace`` shape returns None here.  The member-index
+        shape ``base.field[i]`` has no IR lowering predicate yet, so it never
+        reaches the planner; when it does, its plan must carry ``raw_width``
+        and the member-index store orderings.
+        """
+        shape = address.shape
+        if not isinstance(shape, MemberPlace):
+            return None
+        if self._match_struct_array_member(shape) is None:
+            return None
+        array_base = shape.base
+        assert isinstance(array_base, SubscriptPlace)
+        assert isinstance(array_base.base, VariablePlace)
+        base_kind, base = self._variable_base(array_base.base.name, line=shape.line)
+        stride = self._arithmetic_element_size(array_base.base.name)
+        field_offset, field_size, element_size = self._member_layout_on(array_base, shape.member_name, line=shape.line)
+        index_value = address.indices[0]
+        if isinstance(index_value, int):
+            displacement = index_value * stride + field_offset
+            terms: tuple[AddressTerm, ...] = ()
+        else:
+            displacement = field_offset
+            terms = (AddressTerm(index_value=index_value, scale=stride),)
+        return AddressPlan(
+            base=base,
+            base_kind=base_kind,
+            decay_to_address=field_size != element_size,
+            displacement=displacement,
+            element_size=element_size,
+            field_size=field_size,
+            line=shape.line,
+            subscript_terminal=True,
+            terms=terms,
         )
 
     @staticmethod

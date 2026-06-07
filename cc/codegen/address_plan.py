@@ -39,6 +39,12 @@ class AddressPlan:
     orderings of ``_emit_member_scalar_resolved_store``; ``horner`` marks a
     multi-term plan whose legacy materialization is the row-major Horner walk
     rather than per-term scale-and-sum.
+
+    ``subscript_terminal`` marks a plan whose shape the legacy dispatch
+    routed through the protect-BX subscript terminals
+    (``_emit_subscript_resolved_load`` / ``_emit_subscript_resolved_store``)
+    — even when every index folded to a constant (``terms`` empty), because
+    those terminals emit the BX guard and the rhs spill unconditionally.
     """
 
     base: AddressPlan | str
@@ -54,6 +60,7 @@ class AddressPlan:
     horner: bool = False
     line: int = 0
     raw_width: bool = False
+    subscript_terminal: bool = False
     terms: tuple[AddressTerm, ...] = ()
 
 

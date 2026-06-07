@@ -456,10 +456,11 @@ def _is_struct_array_member_store(node: ast_nodes.Node, /) -> bool:
     SubscriptPlace base is a bare array variable (no dereference, no nested
     subscript), so the chain never breaks (``base_value`` stays ``None``) and
     the single subscript index is the segment's only dynamic leaf — pre-lowered
-    to a :data:`Value` carried on ``Address.indices`` and re-seated into the
-    ``shape`` at emission by :meth:`_ir_address_with_index`, exactly as the load
-    twin does.  Gated on a byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`)
-    so the RHS-vs-address ordering stays byte-identical to the legacy store.
+    to a :data:`Value` carried on ``Address.indices``; both load and store twins
+    plan natively as subscript-terminal :class:`~cc.codegen.address_plan.AddressPlan`
+    objects (via :func:`~cc.codegen.x86.emission._plan_subscript_terminal`).
+    Gated on a byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`) so the
+    RHS-vs-address ordering stays byte-identical to the legacy store.
     Stage 3b.1 slice 5 lowers exactly this shape onto :class:`Address` +
     :class:`Store`; every other subscript-member store shape stays on
     :class:`Access` unchanged.
