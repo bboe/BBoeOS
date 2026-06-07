@@ -7,6 +7,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from cc import ir
@@ -145,6 +147,13 @@ void (*handlers[4])(void);
 int next;
 void run_last(void) {
     handlers[--next]();
+}
+"""
+
+MEMBER_INDEX_CONSTANT_STORE_SOURCE = """
+struct sink { char *buffer; };
+void write_first(struct sink *state, char character) {
+    state->buffer[0] = character;
 }
 """
 
@@ -671,6 +680,68 @@ def test_chained_dot_member_load_records_no_address_op() -> None:
     assert generator._ir_address_plans == {}  # noqa: SLF001
 
 
+def test_compound_conditional_index_store_sinks_block_def() -> None:
+    """A member-index store's Block-wrapped conditional index def sinks into the term slot.
+
+    The vsnprintf terminator write ``state->buffer[length < capacity ?
+    length : capacity - 1] = 0`` pre-lowers its conditional index to an
+    ``ir.Block(Assign(expr=Conditional, name=temp))`` def — the
+    escape-hatch class, not a planned ``ir.Load``.  The term sink
+    suppresses the Block and replays ``generate_expression(expr)`` at the
+    resolver's index slot — the exact inline walk the legacy
+    ``_resolve_member_index`` ran — so the temp never pays a frame-slot
+    round-trip (the vsnprintf +12 anatomy).
+    """
+    generator, _bodies = _generate_with_ir_bodies(COMPOUND_CONDITIONAL_INDEX_STORE_SOURCE)
+    (sunk_temp,) = generator._ir_sunk_index_terms  # noqa: SLF001
+    assert isinstance(generator._ir_sunk_index_terms[sunk_temp], ir.Block)  # noqa: SLF001
+    assert sunk_temp not in generator.locals  # never slot-allocated
+    body_text = generator.output.split("terminate:")[1].split("\n\n")[0]
+    lines = [line.strip() for line in body_text.splitlines()]
+    # The conditional evaluates inline inside the resolver bracket: rhs
+    # (xor) first, push, the branchy index eval, index push, base, pop/add,
+    # rhs pop, byte store — and no slot write anywhere in the body.
+    store_position = lines.index("mov byte [ebx], al")
+    assert lines[store_position - 4 : store_position] == ["mov ebx, [ebx]", "pop eax", "add ebx, eax", "pop eax"]
+    rhs_position = lines.index("xor eax, eax")
+    assert lines[rhs_position + 1] == "push eax"
+    assert any(".cond_end" in line for line in lines[rhs_position:store_position])  # conditional inside the bracket
+    # Only the regparm prologue spill writes a frame slot — the sunk temp
+    # never pays the ``mov [slot], eax`` / ``mov eax, [slot]`` round-trip.
+    slot_writes = [line for line in lines if line.startswith("mov [ebp-")]
+    assert slot_writes == ["mov [ebp-4], eax"]
+
+
+def test_compound_index_store_sinks_term_temp() -> None:
+    """A member-index store's compound index temp sinks into the resolver's term slot.
+
+    ``state->buffer[state->length] = character`` pre-lowers the compound
+    index ``state->length`` to a single-use ``ir.Load`` temp carried as the
+    store Address's only dynamic index leaf.  Emitted standalone, the def
+    pays a frame-slot round-trip (``mov [slot], eax`` at the def, ``mov
+    eax, [slot]`` at the resolver's index evaluation — the stdio.c
+    ``_emit`` +6 anatomy); the term sink suppresses the def and replays the
+    planned member load at the index slot inside
+    ``_materialize_member_index_plan``, reproducing the legacy inline walk
+    byte-for-byte.
+    """
+    generator, _bodies = _generate_with_ir_bodies(COMPOUND_INDEX_STORE_SOURCE)
+    (sunk_temp,) = generator._ir_sunk_index_terms  # noqa: SLF001
+    assert isinstance(generator._ir_sunk_index_terms[sunk_temp], ir.Load)  # noqa: SLF001
+    assert sunk_temp not in generator.locals  # never slot-allocated
+    assert sunk_temp not in generator.temp_pinned_registers  # never register-homed
+    body_text = generator.output.split("write_at_length:")[1].split("\n\n")[0]
+    lines = [line.strip() for line in body_text.splitlines()]
+    # Legacy resolver-bracket shape: rhs push, the replayed index member
+    # load (straight off the struct base — no frame-slot reload), index
+    # push, buffer pointer-field re-root, pop/add, rhs pop, byte store.
+    store_position = lines.index("mov byte [ebx], al")
+    assert lines[store_position - 4 : store_position] == ["mov ebx, [ebx]", "pop eax", "add ebx, eax", "pop eax"]
+    assert lines[store_position - 5] == "push eax"
+    assert "+8]" in lines[store_position - 6]  # the replayed length load
+    assert "ebp-" not in lines[store_position - 6]  # ... not a slot reload
+
+
 def test_deref_store_byte_pointer_plans_field_size_one() -> None:
     """``*target = value`` through a ``char *`` plans field_size 1 and stores one byte.
 
@@ -765,6 +836,89 @@ def test_dot_member_load_produces_pure_displacement_plan() -> None:
     assert plan.terms == ()
     assert plan.field_size == 4
     assert plan.clobbers == frozenset()  # static base, no terms: nothing emitted
+
+
+def test_member_index_plan_refused_by_generic_materializer() -> None:
+    """``_materialize_address_plan`` raises ``NotImplementedError`` for a member_index plan.
+
+    Member-index plans (``base.field[index]``) are owned exclusively by the
+    ``ir.Store`` terminal's ``_emit_planned_member_index_store`` /
+    ``_materialize_member_index_plan`` pair; the generic materializer does
+    not implement the push/pop bracket ordering and must refuse loudly rather
+    than silently emit a mis-ordered or incomplete sequence.
+    """
+    generator = _generate(COMPOUND_INDEX_STORE_SOURCE)
+    (plan,) = (
+        plan
+        for plan in generator._ir_address_plans.values()  # noqa: SLF001
+        if plan.member_index
+    )
+    with pytest.raises(NotImplementedError, match="member-index"):
+        generator._materialize_address_plan(plan)  # noqa: SLF001
+
+
+def test_member_index_store_emits_legal_sixteen_bit_addresses() -> None:
+    """A member-index store compiled at 16-bit emits no illegal ``[bp+bx]``-style EAs.
+
+    At 16-bit, ``[bp+bx]`` is not a valid effective address (``bp`` is only
+    legal as a base with ``si``/``di``, not ``bx``); the materializer must
+    load the frame base into SI or use only ``bx`` as the index register.
+    The assertion guards against future regressions where a frame-base
+    member-index plan accidentally pairs ``bp`` with ``bx``.
+    """
+    generator = _generate(COMPOUND_INDEX_STORE_SOURCE, bits=16)
+    body_text = generator.output.split("write_at_length:")[1].split("\n\n")[0]
+    lines = [line.strip() for line in body_text.splitlines()]
+    illegal_ea_patterns = [line for line in lines if "[bp+bx]" in line or "[bp+ax]" in line]
+    assert illegal_ea_patterns == [], f"illegal 16-bit effective address(es): {illegal_ea_patterns}"
+    # The resolver's push/pop bracket shape uses bx as the operand register
+    # and emits an ``add bx, ax`` or direct ``add bx`` to accumulate the
+    # index — confirm at least one add-to-bx is present (the materialization
+    # ran rather than silently producing nothing).
+    add_bx_lines = [line for line in lines if line.startswith("add bx,") or line == "add bx"]
+    assert add_bx_lines, "expected at least one bx accumulation in the resolver bracket"
+
+
+def test_member_index_store_plans_clobber_facts() -> None:
+    """``_plan_member_index`` declares clobber facts for both dynamic and constant index forms.
+
+    Dynamic index (``state->buffer[state->length]``): the walk evaluates
+    the index through the accumulator and seeds / re-roots BX, so clobbers
+    == {``"ax"``, ``"bx"``}.  The single term keeps the index value as a
+    string (the IR temp name), unfolded on the plan.
+
+    Constant index (``state->buffer[0]``): only the base load and the
+    optional pointer-field re-root touch BX; no accumulator traffic, so
+    clobbers == {``"bx"``}.  The single term keeps the integer index value
+    unfolded on the plan (the legacy resolver branches on the constant form
+    itself — no pre-folding into displacement).
+
+    Both flavors carry ``member_index=True`` to route them to the
+    ``_emit_planned_member_index_store`` terminal exclusively.
+    """
+    dynamic_generator = _generate(COMPOUND_INDEX_STORE_SOURCE)
+    dynamic_plans = [
+        plan
+        for plan in dynamic_generator._ir_address_plans.values()  # noqa: SLF001
+        if plan.member_index
+    ]
+    assert len(dynamic_plans) == 1
+    dynamic_plan = dynamic_plans[0]
+    assert dynamic_plan.clobbers == frozenset({"ax", "bx"})
+    assert len(dynamic_plan.terms) == 1
+    assert isinstance(dynamic_plan.terms[0].index_value, str)  # unfolded IR temp
+
+    constant_generator = _generate(MEMBER_INDEX_CONSTANT_STORE_SOURCE)
+    constant_plans = [
+        plan
+        for plan in constant_generator._ir_address_plans.values()  # noqa: SLF001
+        if plan.member_index
+    ]
+    assert len(constant_plans) == 1
+    constant_plan = constant_plans[0]
+    assert constant_plan.clobbers == frozenset({"bx"})
+    assert len(constant_plan.terms) == 1
+    assert isinstance(constant_plan.terms[0].index_value, int)  # unfolded constant
 
 
 def test_mixed_chain_store_plans_member_offset_and_two_terms() -> None:
@@ -944,6 +1098,42 @@ def test_multidim_three_dimensional_load_plans_three_terms() -> None:
     plan = plans[0]
     assert plan.horner is True
     assert [term.scale for term in plan.terms] == [48, 12, 4]
+
+
+def test_non_adjacent_index_term_def_keeps_slot_path() -> None:
+    """An index-term def separated from its Address+Store by one unrelated instruction is not sunk.
+
+    The term sink requires strict adjacency: the Load def (plus its own
+    ``ir.Address``) must sit at exactly ``position - 2`` (``position - 3``
+    for the Load class) relative to the ``ir.Store``.  A single intervening
+    instruction — even an unrelated one that touches none of the same
+    operands — breaks the adjacency gate and keeps the def on the slot
+    path (``mov [slot], eax`` at the def, ``mov eax, [slot]`` at the
+    resolver's index evaluation).
+    """
+    generator, bodies = _generate_with_ir_bodies(COMPOUND_INDEX_STORE_SOURCE)
+    (body,) = bodies
+    (store,) = (instruction for instruction in body if isinstance(instruction, ir.Store))
+    store_position = body.index(store)
+    store_address = body[store_position - 1]
+    assert isinstance(store_address, ir.Address)
+    load_def = body[store_position - 2]
+    assert isinstance(load_def, ir.Load)
+    load_address = body[store_position - 3]
+    assert isinstance(load_address, ir.Address)
+    # Insert one unrelated instruction between the Load def and the store Address.
+    # The intervening instruction does not read or write the index temp, so it
+    # is alias-safe — the sink declines on adjacency grounds alone.
+    intervening = ir.BinaryOperation(destination="_ir_999", left="character", operation="+", right=0)
+    non_adjacent_body: list[ir.Instruction] = [
+        load_address,
+        load_def,
+        intervening,
+        store_address,
+        store,
+    ]
+    sunk = generator._collect_ir_sunk_index_terms(non_adjacent_body)  # noqa: SLF001
+    assert load_def.destination not in sunk  # non-adjacent: the slot path is kept
 
 
 def test_plans_recorded_before_emission() -> None:

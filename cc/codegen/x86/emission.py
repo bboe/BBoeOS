@@ -589,15 +589,19 @@ class EmissionMixin:
         # test_indexed_in_place_increment_fuses_to_inc_dword_sib guards
         # it), so exclude index-operand temps from the candidate set.
         sib_index_temps = self._collect_ir_index_operand_temps(body)
-        # Sunk store-RHS temps (Task 6a): their defs are suppressed and
-        # replayed inside the consuming store terminal, so the temp never
+        # Sunk store-RHS temps (Task 6a) and sunk index-term temps (ledger
+        # class 4): their defs are suppressed and replayed inside the
+        # consuming store terminal / resolver, so the temp never
         # materializes as a stored value — exclude it from allocation (and
         # from the frame-slot pre-allocation in ``generate_function``) like
         # the escape-hatch temps.
         pure_temps = frozenset(
             temp
             for temp in candidate_temps
-            if temp not in escape_hatch_temps and temp not in sib_index_temps and temp not in self._ir_sunk_store_values
+            if temp not in escape_hatch_temps
+            and temp not in sib_index_temps
+            and temp not in self._ir_sunk_store_values
+            and temp not in self._ir_sunk_index_terms
         )
         if not pure_temps:
             return
@@ -951,6 +955,113 @@ class EmissionMixin:
                 ):
                     continue
             result.add(temp)
+        return result
+
+    def _collect_ir_sunk_index_terms(self, body: list[ir.Instruction], /) -> dict[str, ir.Block | ir.Load]:
+        """Return index-term defs to sink into their member-index store resolvers.
+
+        The TERM-side twin of :meth:`_collect_ir_sunk_store_values` (which
+        sinks store VALUES): a member-index store with a compound index
+        (``s->buffer[s->length] = character`` — stdio.c ``_emit``, ledger
+        class 4) pre-lowers the index to a single-use temp.  Emitted
+        standalone, the def pays a frame-slot round-trip (``mov [slot],
+        acc`` at the def, ``mov acc, [slot]`` at the resolver's index
+        evaluation) that the legacy inline walk never paid; sinking
+        suppresses the def's arm and replays it at the index slot inside
+        :meth:`_materialize_member_index_plan` — the exact point the legacy
+        ``_resolve_member_index`` ran ``generate_expression(index)``.
+
+        Two def classes sink:
+
+        * a planned member ``ir.Load`` (the ``s->length`` shape), preceded
+          by its own ``ir.Address``; the replay runs the plain native-Load
+          core (``ax_clear`` + materialize + ``_emit_resolved_load``), so
+          the def's plan must exist (no legacy-fallback op recorded), carry
+          no bitfield, and not be ``subscript_terminal``.
+        * an ``ir.Block`` wrapping ``Assign(expr, name=temp)`` — the
+          escape-hatch lowering of a complex index (the vsnprintf
+          terminator's conditional ``len < cap ? len : cap - 1``); the
+          replay runs ``generate_expression(expr)``, the exact inline walk
+          the legacy resolver ran.  Rejected conservatively when the
+          expression reads any ``_ir_*`` temp (its home is unknowable in
+          this pre-allocation scan).
+
+        Gates shared by both classes, deliberately narrower than the value
+        sink:
+
+        * The consuming triple/quadruple is strictly consecutive: ``[def
+          (+ its Address for the Load class); ir.Address (the store's);
+          ir.Store]``.  Adjacency makes the reorder trivially alias-safe —
+          nothing can write the index's operands between def and replay
+          (the byte-safe leaf RHS emits no instruction).  The lowering
+          emits exactly this shape for a leaf-RHS compound-index store; a
+          non-leaf RHS interposes its own defs and simply keeps the slot
+          path.
+        * The store's plan is ``member_index`` with the temp as its single
+          dynamic term — the only consumer whose materializer owns the
+          replay slot.
+        * The temp is a single-use ``_ir_*`` name (the Address indices
+          read), so suppressing the def can orphan no other reader.
+
+        ``ir.Load`` stays excluded from VALUE sinking (the PlaceLoad RHS
+        class rides the allocator's accumulator); TERM sinking is this
+        separately-gated admission.  Only the flat top-level instruction
+        order is considered (Switch-arm shapes keep the slot path),
+        matching the value sink.  Runs after the eager
+        ``_plan_ir_addresses`` pre-pass so both plan lookups are populated.
+        """
+
+        def reads_ir_temp(node: Node, /) -> bool:
+            # Conservative operand scan for the Block class: any str field
+            # (or descendant) spelled like an IR temp counts as a read.
+            for node_field in fields(node):
+                value = getattr(node, node_field.name)
+                if isinstance(value, str) and value.startswith("_ir_"):
+                    return True
+                if isinstance(value, Node) and reads_ir_temp(value):
+                    return True
+                if isinstance(value, list) and any(isinstance(item, Node) and reads_ir_temp(item) for item in value):
+                    return True
+            return False
+
+        use_counts: dict[str, int] = {}
+        for instruction in body:
+            for name in regalloc.instruction_uses(instruction=instruction):
+                use_counts[name] = use_counts.get(name, 0) + 1
+        result: dict[str, ir.Block | ir.Load] = {}
+        for position, instruction in enumerate(body):
+            if not isinstance(instruction, ir.Store) or position < 2:
+                continue
+            store_address = body[position - 1]
+            if not isinstance(store_address, ir.Address) or instruction.address != store_address.destination:
+                continue
+            store_plan = self._ir_address_plans.get(store_address.destination)
+            if store_plan is None or not store_plan.member_index:
+                continue
+            definition = body[position - 2]
+            if isinstance(definition, ir.Load):
+                temp = definition.destination
+                if position < 3:
+                    continue
+                definition_address = body[position - 3]
+                if not isinstance(definition_address, ir.Address) or definition.address != definition_address.destination:
+                    continue
+                definition_plan = self._ir_address_plans.get(definition.address)
+                if definition_plan is None or definition_plan.bitfield is not None or definition_plan.subscript_terminal:
+                    continue
+                if definition.address in self._ir_address_ops:
+                    continue
+            elif isinstance(definition, ir.Block) and isinstance(definition.node, Assign):
+                temp = definition.node.name
+                if reads_ir_temp(definition.node.expr):
+                    continue
+            else:
+                continue
+            if not (temp.startswith("_ir_") and use_counts.get(temp, 0) == 1):
+                continue
+            if store_address.indices != (temp,):
+                continue
+            result[temp] = definition
         return result
 
     def _collect_ir_sunk_store_values(self, body: list[ir.Instruction], /) -> dict[str, ir.BinaryOperation | ir.Index]:
@@ -1444,6 +1555,43 @@ class EmissionMixin:
         else:
             for register in reversed(saved):
                 self.emit(f"        pop {register}")
+        self.ax_clear()
+
+    def _emit_planned_member_index_store(self, plan: AddressPlan, value: Node, /) -> None:
+        """Store *value* through a planned member-index address (native ``ir.Store`` path).
+
+        Mirrors
+        :meth:`~cc.codegen.x86.generator.X86CodeGenerator._emit_member_index_resolved_store`
+        exactly: a constant index resolves the address without touching the
+        accumulator, so the rhs is evaluated into the accumulator first and
+        stored directly (no spill); a variable index evaluates and scales the
+        index through the accumulator, so the rhs is pushed first and
+        recovered after the address is live in the base register.  The rhs
+        evaluation point is also the sunk store-RHS replay slot (the rhs
+        evaluates FIRST in both orderings, like the subscript terminal's
+        head), so a sunk chain RHS replays here instead of paying a slot
+        round-trip.
+        """
+        self.ax_clear()
+        if isinstance(plan.terms[0].index_value, int):
+            if isinstance(value, Var) and (sunk_definition := self._ir_sunk_store_values.get(value.name)) is not None:
+                self._emit_sunk_store_value(sunk_definition)  # rhs in the accumulator
+            else:
+                self.generate_expression(value)  # rhs in the accumulator
+            operand = self._materialize_member_index_plan(plan)
+            destination = self._build_address(operand.base, operand.displacement)
+            self._emit_field_store(addr=destination, field_size=operand.field_size)
+            self.ax_clear()
+            return
+        if isinstance(value, Var) and (sunk_definition := self._ir_sunk_store_values.get(value.name)) is not None:
+            self._emit_sunk_store_value(sunk_definition)
+        else:
+            self.generate_expression(value)
+        self.emit(f"        push {self.target.acc}")  # save rhs across the index eval
+        operand = self._materialize_member_index_plan(plan)
+        self.emit(f"        pop {self.target.acc}")
+        destination = self._build_address(operand.base, operand.displacement)
+        self._emit_field_store(addr=destination, field_size=operand.field_size)
         self.ax_clear()
 
     def _emit_planned_member_store(self, plan: AddressPlan, value: Node, /) -> None:
@@ -2856,6 +3004,14 @@ class EmissionMixin:
                     )
                     raise NotImplementedError(message)
             case ir.Load(address=address, destination=destination):
+                if self._ir_sunk_index_terms.get(destination) is instruction:
+                    # Sunk index-term def (ledger class 4): its standalone
+                    # emission is suppressed here and replayed at the
+                    # consuming member-index resolver's index slot
+                    # (``_materialize_member_index_plan``) — no register
+                    # home, no frame slot, no slot round-trip.  Identity
+                    # check, mirroring the value-sink suppression below.
+                    return
                 plan = self._ir_address_plans.get(address)
                 if plan is not None:
                     # Native path: materialize the plan and run the shared
@@ -2905,6 +3061,14 @@ class EmissionMixin:
                         # width-selected ordering; see
                         # ``_emit_planned_deref_store``).
                         self._emit_planned_deref_store(plan, self._ir_value_to_ast(value))
+                    elif plan.member_index:
+                        # Member-index shape (``base.field[index]``): the
+                        # legacy ``_emit_place_store`` dispatch routed it to
+                        # ``_emit_member_index_resolved_store``, whose
+                        # rhs-first / index-before-base ordering (and the
+                        # resolver's OWN push/pop bracket — no protect-BX
+                        # guard) the planned twin mirrors.
+                        self._emit_planned_member_index_store(plan, self._ir_value_to_ast(value))
                     elif plan.subscript_terminal:
                         # Indexed shape (struct-array member): the legacy
                         # ``_emit_place_store`` dispatch fell through to the
@@ -2963,6 +3127,15 @@ class EmissionMixin:
                     # case (int-typed destination, non-constant expression).
                     # A bitfield member routes to the legacy path so its
                     # CompileError diagnostic fires unchanged.
+                    # Guard: a member_index plan or a plan with dynamic index
+                    # terms would pass the pointer/bitfield gate above but the
+                    # native emitter below only handles a pure
+                    # displacement — silently dropping the index term would
+                    # miscompile.  Fail loudly if the plan shape is not yet
+                    # supported here (mirrors ir.Load's loud failure).
+                    if plan.member_index or plan.terms:
+                        message = f"AddressOf native gate does not handle a plan with terms or member_index (plan={plan!r})"
+                        raise NotImplementedError(message)
                     assert isinstance(plan.base, str)
                     self._emit_pointer_member_address_of(plan.base, byte_offset=plan.displacement)
                     direct_register = self.pinned_register.get(destination)
@@ -2996,6 +3169,15 @@ class EmissionMixin:
                     # ran after the expression-form codegen.  A bitfield
                     # member routes to the legacy path, whose resolved store /
                     # load terminals own the mask/shift sequences.
+                    # Guard: a member_index plan or a plan with dynamic index
+                    # terms would pass the pointer/bitfield gate above but the
+                    # native emitter below only handles a pure
+                    # displacement — silently dropping the index term would
+                    # miscompile.  Fail loudly if the plan shape is not yet
+                    # supported here (mirrors ir.Load's loud failure).
+                    if plan.member_index or plan.terms:
+                        message = f"IncrementDecrement native gate does not handle a plan with terms or member_index (plan={plan!r})"
+                        raise NotImplementedError(message)
                     self._emit_planned_increment_decrement(plan, delta=delta, is_postfix=is_postfix)
                     self.ax_clear()
                 else:
@@ -3034,6 +3216,15 @@ class EmissionMixin:
                         raise CompileError(message)
                     shape = self._ir_address_with_index(address_op)
                     self.generate_statement(PlaceCall(args=[], line=shape.line, place=shape))
+            case ir.Block(node=Assign(name=name)) if self._ir_sunk_index_terms.get(name) is instruction:
+                # Sunk index-term def (ledger class 4, Block class): the
+                # escape-hatch Assign of a complex index expression is
+                # suppressed here and its expression replays at the
+                # consuming member-index resolver's index slot
+                # (``_materialize_member_index_plan``) — no frame slot, no
+                # slot round-trip.  Identity check, mirroring the
+                # value-sink suppression.
+                pass
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
 
@@ -3063,6 +3254,14 @@ class EmissionMixin:
         # SI-or-BX ``_load_member_base`` the generic path below would run.
         if plan.deref_store:
             message = "deref-store AddressPlan is materialized by the Store terminal only"
+            raise NotImplementedError(message)
+        # Member-index plans (the ``base.field[index]`` store) are owned
+        # exclusively by the ``ir.Store`` terminal: their legacy resolution
+        # evaluates the index BEFORE the base load, inside its own push/pop
+        # bracket (``_resolve_member_index``), which the generic per-term
+        # accumulate below would mis-order.
+        if plan.member_index:
+            message = "member-index AddressPlan is materialized by the Store terminal only"
             raise NotImplementedError(message)
         # Horner plans (row-major multidim / pointer-to-array) materialize
         # through the legacy Horner tail emitters, dispatched on the plan's
@@ -3160,6 +3359,91 @@ class EmissionMixin:
             indices=indices,
             strides=strides,
         )
+
+    def _materialize_member_index_plan(self, plan: AddressPlan, /) -> MemoryOperand:
+        """Emit the member-index ``base.field[index]`` resolution; return its register-base operand.
+
+        Mirrors the legacy ``_resolve_member_index`` emitting walk
+        line-for-line from the plan's declared facts: a constant index folds
+        offset + index*element_size into the displacement around the base
+        load (no accumulator traffic); a dynamic index evaluates and scales
+        through the accumulator FIRST, rides the resolver's own push/pop
+        bracket across the base load (and the pointer-field VALUE re-root),
+        then sums onto BX.  The arrow SI alias fast path and the
+        ``_emit_member_index_base`` arrow/dot dispatch are the same
+        emission-time decisions the legacy resolver made.
+        """
+        # Local import: ``MemoryOperand`` lives in generator.py, which imports
+        # this mixin module — a module-level import here would be circular.
+        from cc.codegen.x86.generator import MemoryOperand  # noqa: PLC0415
+
+        assert isinstance(plan.base, str)
+        arrow = plan.member_index_arrow
+        object_name = plan.base
+        element_size = plan.element_size
+        field_offset = plan.displacement
+        index_value = plan.terms[0].index_value
+
+        def operand_at(base_register: str, displacement: int) -> MemoryOperand:
+            return MemoryOperand(
+                base=base_register,
+                base_kind="register",
+                displacement=displacement,
+                element_size=element_size,
+                field_size=element_size,
+                raw_width=True,
+            )
+
+        # Constant index: fold offset + index*element_size into a displacement.
+        if isinstance(index_value, int):
+            self.ax_clear()
+            if arrow and self.si_local == object_name:
+                base_register = self.target.si_register
+            else:
+                self._emit_member_index_base(arrow=arrow, object_name=object_name, register=self.target.bx_register)
+                base_register = self.target.bx_register
+            if plan.pointer_field:
+                pointer_address = self._build_address(base_register, field_offset)
+                self.emit(f"        mov {self.target.bx_register}, {pointer_address}")
+                return operand_at(self.target.bx_register, index_value * element_size)
+            return operand_at(base_register, field_offset + index_value * element_size)
+        # Variable index: AX = index, scale, add base+offset.
+        self.ax_clear()
+        if isinstance(index_value, str) and (sunk_definition := self._ir_sunk_index_terms.get(index_value)) is not None:
+            # Sunk index-term replay slot (ledger class 4): the compound
+            # index's suppressed def replays here — the exact point the
+            # legacy ``_resolve_member_index`` evaluated the index
+            # expression inline.  A planned ``ir.Load`` def runs the same
+            # native-Load core its standalone arm runs (materialize +
+            # shared resolved load), minus the dead store-to-local tail;
+            # an escape-hatch ``ir.Block(Assign)`` def replays its
+            # expression directly.
+            if isinstance(sunk_definition, ir.Load):
+                sunk_operand = self._materialize_address_plan(self._ir_address_plans[sunk_definition.address])
+                self._emit_resolved_load(sunk_operand)
+            else:
+                assert isinstance(sunk_definition.node, Assign)
+                self.generate_expression(sunk_definition.node.expr)
+        else:
+            self.generate_expression(self._ir_value_to_ast(index_value))
+        if element_size in (2, 4):
+            shift = 1 if element_size == 2 else 2
+            self.emit(f"        shl {self.target.acc}, {shift}")
+        elif element_size != 1:
+            self.emit(f"        imul {self.target.acc}, {element_size}")
+        self.emit(f"        push {self.target.acc}")
+        if arrow and self.si_local == object_name:
+            self.emit(f"        mov {self.target.bx_register}, {self.target.si_register}")
+        else:
+            self._emit_member_index_base(arrow=arrow, object_name=object_name, register=self.target.bx_register)
+        if plan.pointer_field:
+            pointer_address = self._build_address(self.target.bx_register, field_offset)
+            self.emit(f"        mov {self.target.bx_register}, {pointer_address}")
+        self.emit(f"        pop {self.target.acc}")
+        self.emit(f"        add {self.target.bx_register}, {self.target.acc}")
+        if plan.pointer_field:
+            return operand_at(self.target.bx_register, 0)
+        return operand_at(self.target.bx_register, field_offset)
 
     def _node_contains_var(self, node: Node, name: str, /) -> bool:
         """Return True if node or any descendant is Var(name).
@@ -3328,6 +3612,15 @@ class EmissionMixin:
         - bitfield AddressOf / IncrementDecrement — legacy diagnostic /
           mask-shift RMW; the plan is recorded too (the ride-along) so Load
           and Store stay native.
+        - bitfield member-index (``s->bits[i]`` over a bitfield ``bits``
+          member) — ``_plan_member_index`` returns None so the legacy arm
+          owns the bitfield-indexing CompileError.
+        - unsupported-element-size member-index (element sizes outside the
+          allowed set per ``_member_index_element_size``) — ``_plan_member_index``
+          returns None so the legacy arm owns the CompileError.
+        - ``_member_index_arrow_object``-declined bases — shapes whose
+          member base is not a ``VariablePlace`` (arrow or dot) root;
+          ``_plan_member_index`` returns None and the legacy arm handles them.
         - undefined-name call slots — the legacy arm owns the
           ``_check_defined`` diagnostic.
         - chained dot (``g.mid.b``) never lowers to ``ir.Address`` at all —
@@ -3335,11 +3628,15 @@ class EmissionMixin:
         """
         if address.indices:
             if len(address.indices) == 1:
-                # The two single-index producers split on the shape root: the
+                # The single-index producers split on the shape root: the
                 # ``name[index]()`` function-pointer slot is a bare
-                # ``SubscriptPlace``; the struct-array member shape roots at a
+                # ``SubscriptPlace`` over a ``VariablePlace``; the member-index
+                # store ``base.field[index]`` is a ``SubscriptPlace`` over a
+                # ``MemberPlace``; the struct-array member shape roots at a
                 # ``MemberPlace``.
                 if isinstance(address.shape, SubscriptPlace):
+                    if isinstance(address.shape.base, MemberPlace):
+                        return self._plan_member_index(address)
                     return self._plan_subscript_call_slot(address)
                 return self._plan_struct_array_member(address)
             return self._plan_subscript_chain(address)
@@ -3377,6 +3674,78 @@ class EmissionMixin:
                 self._ir_address_plans[destination] = plan
             if plan is None or plan.bitfield is not None:
                 self._ir_address_ops[destination] = instruction
+
+    def _plan_member_index(self, address: ir.Address, /) -> AddressPlan | None:
+        """Plan the single-index member-index shape ``base.field[index]`` (pure; no emission).
+
+        Mirrors the legacy ``_resolve_member_index`` resolution from its pure
+        halves: the arrow-vs-dot base form from ``_member_index_arrow_object``,
+        the field layout from ``_resolve_member_index_layout``, and the
+        element stride / pointer-field split from
+        ``_member_index_element_size``.  The index stays UNFOLDED on the
+        plan's single term — the legacy resolver branches on the constant
+        form itself (the constant path emits no accumulator traffic at all),
+        so the materializer needs the distinction, not a pre-folded
+        displacement.  ``displacement`` carries the raw field byte offset.
+
+        The plan is marked ``member_index``: its materialization is owned
+        exclusively by the ``ir.Store`` terminal
+        (``_emit_planned_member_index_store``), whose rhs-first /
+        index-before-base ordering differs from both the protect-BX
+        subscript terminals and the member-store orderings.  Bitfield
+        indexing and unsupported element sizes return None so the legacy
+        re-seat path raises its CompileError diagnostics unchanged.
+
+        ``clobbers``: the dynamic-index walk evaluates and scales the index
+        through the accumulator and seeds / re-roots BX ({"ax", "bx"}); the
+        constant path touches only BX (the base load and the optional
+        pointer-field re-root) — and not even BX on the arrow SI alias fast
+        path, an emission-time fact the declared set conservatively ignores.
+        """
+        shape = address.shape
+        if not isinstance(shape, SubscriptPlace):
+            return None
+        member = shape.base
+        if not isinstance(member, MemberPlace):
+            return None
+        resolved = self._member_index_arrow_object(member)
+        if resolved is None:
+            return None
+        arrow, object_name = resolved
+        info = self._resolve_member_index_layout(
+            arrow=arrow,
+            line=shape.line,
+            member_name=member.member_name,
+            object_name=object_name,
+        )
+        if info.bit_width is not None:
+            return None  # the legacy arm owns the bitfield-indexing CompileError
+        element_size, is_pointer_field = self._member_index_element_size(info)
+        allowed_sizes = (1, 2, 4) if is_pointer_field else (1, 2)
+        if element_size not in allowed_sizes:
+            return None  # the legacy arm owns the unsupported-element-size CompileError
+        index_value = address.indices[0]
+        if arrow:
+            base_kind = "pointer"
+        elif object_name in self.locals:
+            base_kind = "frame"
+        else:
+            base_kind = "label"
+        return AddressPlan(
+            base=object_name,
+            base_is_static=not arrow,
+            base_kind=base_kind,
+            clobbers=frozenset({"bx"}) if isinstance(index_value, int) else frozenset({"ax", "bx"}),
+            displacement=info.byte_offset,
+            element_size=element_size,
+            field_size=element_size,
+            line=shape.line,
+            member_index=True,
+            member_index_arrow=arrow,
+            pointer_field=is_pointer_field,
+            raw_width=True,
+            terms=(AddressTerm(index_value=index_value, scale=element_size),),
+        )
 
     def _plan_member_place(self, shape: Place, /) -> AddressPlan | None:
         """Plan one deref-free / arrow-rooted member ``shape`` (pure; no emission).
@@ -3544,6 +3913,11 @@ class EmissionMixin:
           clobbers AX runs entirely inside the ``push acc`` / ``pop acc``
           bracket, AFTER the rhs read.  Preserves in the relevant sense:
           the rhs read precedes every AX-clobbering materialization step.
+        - ``member_index`` (``_emit_planned_member_index_store``): the rhs
+          evaluates FIRST in both index orderings (the dynamic-index walk
+          brackets its AX traffic inside the rhs push/pop, the constant
+          walk never touches AX).  Preserves in the same relevant sense as
+          the subscript terminal.
         - member store, ``base_is_static`` (ordering 1 of
           ``_emit_planned_member_store``): the materialization emits
           NOTHING (pure label/frame displacement), then the rhs evaluates.
@@ -3566,7 +3940,7 @@ class EmissionMixin:
         """
         if plan.call_slot:
             return False
-        if plan.deref_store or plan.subscript_terminal:
+        if plan.deref_store or plan.member_index or plan.subscript_terminal:
             return True
         if plan.base_kind == "plan":
             return False
@@ -5330,6 +5704,7 @@ class EmissionMixin:
         # guarantees no stale cross-function entry can ever be read should a
         # future AST-path consumer be added.
         self._ir_sunk_store_values = {}
+        self._ir_sunk_index_terms = {}
         if ir_function is not None:
             self._ir_address_ops = {}
             self._ir_address_plans = {}
@@ -5340,12 +5715,19 @@ class EmissionMixin:
             # plan) and BEFORE ``_allocate_ir_temps`` / the frame-slot
             # pre-allocation below, both of which must skip sunk temps (no
             # register home, no frame slot — the def replays inside the
-            # store terminal).
+            # store terminal).  Sunk index TERMS (the member-index compound
+            # index — ledger class 4) follow the same lifecycle.
             self._ir_sunk_store_values = self._collect_ir_sunk_store_values(ir_function.body)
+            self._ir_sunk_index_terms = self._collect_ir_sunk_index_terms(ir_function.body)
             self._allocate_ir_temps(ir_function=ir_function)
         if ir_body is not None:
             for temp in self._collect_ir_temps(ir_body):
-                if temp not in self.locals and temp not in self.pinned_register and temp not in self._ir_sunk_store_values:
+                if (
+                    temp not in self.locals
+                    and temp not in self.pinned_register
+                    and temp not in self._ir_sunk_store_values
+                    and temp not in self._ir_sunk_index_terms
+                ):
                     self.allocate_local(temp)
 
         # Seed visible_vars with parameters and pinned variables.

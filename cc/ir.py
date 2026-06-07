@@ -1674,22 +1674,26 @@ def _is_migrated_access(node: ast_nodes.Node, /) -> bool:
 
 
 def _is_mixed_subscript_chain_store(node: ast_nodes.Node, /) -> bool:
-    """Return True for ``name[i].member[j]... = leaf`` writes over a mixed subscript/member chain.
+    """Return True for subscript-terminated ``= leaf`` writes over a subscript/member chain.
 
     ``PlaceStore`` whose place is a :class:`~ast_nodes.SubscriptPlace` chain of
-    2+ simple subscripts — possibly separated by static
+    1+ subscripts — possibly separated by static
     :class:`~ast_nodes.MemberPlace` segments — rooted at a
-    :class:`~ast_nodes.VariablePlace`.  Each subscript index is carried as a
-    distinct dynamic leaf in :attr:`Address.indices` (in source order, matching
-    :meth:`Builder._lower_subscript_chain_indices`); the static member offsets
-    and per-position element strides stay layout-derived at emission, where the
-    reconstructed ``PlaceStore`` reaches the EXACT ``_emit_place_store`` path
-    the :class:`Access` escape hatch fed.  Gated on simple indices
-    (:func:`_is_simple_index`) and a byte-safe leaf RHS
-    (:func:`_is_byte_safe_store_rhs`) so every re-seated node round-trips to
-    the exact AST sub-expression the legacy store walked inline — byte-neutral.
-    ``symbol_table[index].name[n] = src`` / ``= 0`` in ``asm.c`` ``symbol_add``
-    are the real consumers; compound-index or compound-RHS chains stay on
+    :class:`~ast_nodes.VariablePlace` or at the arrow root
+    ``DereferencePlace(VariablePlace)`` (``pointer->field[index]``).  Each
+    subscript index — simple OR compound (``s->buffer[s->length]``) — is
+    carried as a distinct dynamic leaf in :attr:`Address.indices` (in source
+    order, matching :meth:`Builder._lower_subscript_chain_indices`); the
+    static member offsets and per-position element strides stay
+    layout-derived at emission's planners.  Gated on a byte-safe leaf RHS
+    (:func:`_is_byte_safe_store_rhs`) so the RHS-vs-address ordering stays
+    byte-identical to the legacy store.  The parser routes the bare
+    single-subscript ``name[index] = expr`` form to
+    :class:`~ast_nodes.IndexAssign`, so a single-subscript chain here always
+    carries at least one member segment or a deref root.
+    ``symbol_table[index].name[n] = src`` in ``asm.c`` ``symbol_add`` and
+    ``s->buffer[s->length] = character`` in ``stdio.c`` ``_emit`` (ledger
+    class 4) are the real consumers; compound-RHS chains stay on
     :class:`Access` (the byte gate is the backstop).
     """
     if not (isinstance(node, ast_nodes.PlaceStore) and isinstance(node.place, ast_nodes.SubscriptPlace)):
@@ -1700,11 +1704,13 @@ def _is_mixed_subscript_chain_store(node: ast_nodes.Node, /) -> bool:
     current: ast_nodes.Node = node.place
     while isinstance(current, (ast_nodes.MemberPlace, ast_nodes.SubscriptPlace)):
         if isinstance(current, ast_nodes.SubscriptPlace):
-            if not _is_simple_index(current.index):
-                return False
             subscript_count += 1
         current = current.base
-    return subscript_count >= 2 and isinstance(current, ast_nodes.VariablePlace)
+    if subscript_count < 1:
+        return False
+    if isinstance(current, ast_nodes.VariablePlace):
+        return True
+    return isinstance(current, ast_nodes.DereferencePlace) and isinstance(current.pointer, ast_nodes.VariablePlace)
 
 
 def _is_nested_named_subscript_chain(place: ast_nodes.Node, /) -> bool:
