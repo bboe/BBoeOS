@@ -640,7 +640,13 @@ class EmissionMixin:
         # BX from the temp pool for these functions instead — the
         # conservative, byte-cheap fix (it costs at most one register of
         # residency in member-indexing functions, and the runtime matrix
-        # stays green).
+        # stays green).  Phase 2's per-instruction clobber table
+        # (_instruction_clobber_registers) covers the planned-terminal
+        # paths (Load / Store / AddressOf / IncrementDecrement); the
+        # Access / Block escape-hatch lowering resolves the member index
+        # inline via _resolve_member_index, which is NOT a planned
+        # terminal, so this blanket exclusion remains load-bearing for
+        # those paths.
         if self._body_has_member_index_access(body):
             reserved_registers.add(self.target.bx_register)
         temp_pool = tuple(register for register in self.target.register_pool if register not in reserved_registers)
@@ -658,7 +664,40 @@ class EmissionMixin:
 
         spill_benefit = {temp: use_counts.get(temp, 0) for temp in allocatable_temps}
         register_save_cost = {temp: dict.fromkeys(temp_pool, result.live_across_call.get(temp, 0)) for temp in allocatable_temps}
-        constraints = regalloc.RegisterConstraints(allowed={}, pool=temp_pool, precolored={})
+        # Clobber-aware homes (phase 2): a temp live across — or read by —
+        # an instruction whose emission writes register R must not be homed
+        # in R.  Reads are included conservatively because a terminal may
+        # write its materialization registers before it reads its operands
+        # (the subscript store evaluates the RHS, then seeds BX, then reads
+        # the index term).  ``_instruction_clobber_registers`` returns
+        # canonical 16-bit names; normalising the pool side through
+        # ``target.low_word`` widens the comparison exactly like
+        # ``_pinned_registers_to_save`` does for ``BUILTIN_CLOBBERS``
+        # (identity at 16-bit, ``edx`` → ``dx`` at 32-bit).  Switch arms
+        # are covered by the Switch instruction itself: its clobber set is
+        # the union over the arms and ``instruction_uses`` walks the arms,
+        # matching ``live_across``'s opaque-Switch CFG keying.  A temp
+        # whose allowed set becomes empty simply spills — sound.
+        low_word = self.target.low_word
+        pool_set = frozenset(temp_pool)
+        allowed: dict[str, frozenset[str]] = {}
+        for instruction in body:
+            clobber_names = self._instruction_clobber_registers(instruction)
+            if not clobber_names:
+                continue
+            clobbered = frozenset(register for register in pool_set if low_word(register) in clobber_names)
+            if not clobbered:
+                continue
+            endangered = result.live_across.get(id(instruction), frozenset()) | frozenset(
+                name
+                for name in regalloc.instruction_uses(instruction=instruction)
+                if name in allocatable_temps
+                # conservative: a terminal may write its materialization registers before reading its operands
+            )
+            for temp in endangered:
+                if temp in allocatable_temps:  # live_across may contain non-allocatable names (auto-pinned locals/params)
+                    allowed[temp] = allowed.get(temp, pool_set) - clobbered
+        constraints = regalloc.RegisterConstraints(allowed=allowed, pool=temp_pool, precolored={})
         costs = regalloc.CostModel(register_save_cost=register_save_cost, spill_benefit=spill_benefit)
         allocation = regalloc.color(constraints=constraints, costs=costs, interference=restricted_graph, moves=set())
 
@@ -2118,6 +2157,86 @@ class EmissionMixin:
             and isinstance(if_stmt.else_body[-1], Call)
             and self._is_tail_call_eligible(if_stmt.else_body[-1])
         )
+
+    def _instruction_clobber_registers(self, instruction: ir.Instruction, /) -> frozenset[str]:
+        """Return the canonical 16-bit registers *instruction*'s emission writes.
+
+        The write-set the allocator must keep live-through temps away from:
+
+        - ``Load`` / ``Store`` / ``AddressOf`` / ``IncrementDecrement``
+          consuming a planned address: the plan's declared ``clobbers``
+          plus the subscript terminals' unconditional BX guard
+          (``subscript_terminal`` plans emit it even with no dynamic
+          terms).  IncrementDecrement's triple re-materialization repeats
+          the same set, so no widening is needed.  AddressOf /
+          IncrementDecrement consume a plan natively only through their
+          arrow gate (``base_kind == "pointer"`` with no bitfield); a
+          gate-rejected plan rides the legacy arm below.
+        - the same terminals consuming an UNPLANNED address: shape-keyed
+          off the recorded op (``_ir_address_ops``).  The array-of-pointers
+          residual family — the uniform ``name[i][j]...`` chain
+          ``_uniform_subscript_chain`` recognizes (the exact shape class
+          ``_plan_subscript_chain`` declines and the census allowlist
+          locks) — emits through ``_generate_nested_index_expression``,
+          whose walk writes only {'ax', 'si'} at BOTH widths
+          (derived from _generate_nested_index_expression's SI/AX-only
+          walk — re-verify there if that helper changes).  Every other unplanned
+          shape (bitfield ride-along member arms, deref stores, anything
+          future) keeps the conservative {'ax', 'bx', 'si'} — the legacy
+          re-seat walk's full scratch footprint.
+        - ``BinaryOperation`` whose operation the emitter lowers through
+          a DX-writing sequence: {'dx'} for ``/`` and ``%`` (the
+          ``xor dx, dx`` + ``div`` arm of
+          ``_generate_binary_operation_expression``) and for ``*`` with a
+          non-constant right operand (the ``mul`` arm; a constant right
+          lowers via ``shl`` / ``imul reg, imm``, which never touch DX).
+        - ``Switch``: the union over its arms' instructions, because the
+          outer CFG treats a Switch as one opaque instruction — inner
+          terminals have no ``live_across`` entries of their own, while
+          ``instruction_uses`` of the Switch already covers every name
+          read anywhere inside the arms.
+        - ``IndirectCall``: nothing, by documented phase-1 convention —
+          call_slot plans declare empty clobbers and the conservative
+          full-pool call-site save governs the whole sequence.
+        - everything else: empty.
+
+        Terminal-owned writes deliberately NOT listed: the accumulator (AX
+        is not in the allocatable pool) and leaf RHS evaluation (AX only).
+        Reads are not clobbers.
+        """
+        legacy_reseat_scratch = frozenset({"ax", "bx", "si"})
+        match instruction:
+            case ir.Load(address=address) | ir.Store(address=address):
+                plan = self._ir_address_plans.get(address)
+                if plan is None:
+                    address_op = self._ir_address_ops.get(address)
+                    if address_op is not None and self._uniform_subscript_chain(address_op.shape) is not None:
+                        # Array-of-pointers residual: the nested-index walk
+                        # writes only the accumulator and SI (see fact table).
+                        return frozenset({"ax", "si"})
+                    return legacy_reseat_scratch
+                # the subscript terminals' BX guard is an unconditional legacy invariant owned by the terminal,
+                # deliberately NOT folded into plan.clobbers (which declare materialization writes only)
+                return plan.clobbers | (frozenset({"bx"}) if plan.subscript_terminal else frozenset())
+            case ir.AddressOf(address=address) | ir.IncrementDecrement(address=address):
+                plan = self._ir_address_plans.get(address)
+                if plan is None or plan.base_kind != "pointer" or plan.bitfield is not None:
+                    return legacy_reseat_scratch
+                return plan.clobbers
+            case ir.BinaryOperation(operation=operation, right=right):
+                if operation in {"/", "%"}:
+                    return frozenset({"dx"})
+                if operation == "*" and not isinstance(right, int):
+                    return frozenset({"dx"})
+                return frozenset()
+            case ir.Switch(cases=cases):
+                clobbered: frozenset[str] = frozenset()
+                for switch_case in cases:
+                    for inner_instruction in switch_case.body:
+                        clobbered |= self._instruction_clobber_registers(inner_instruction)
+                return clobbered
+            case _:
+                return frozenset()
 
     def _ir_address_with_index(self, address: ir.Address, /) -> Node:
         """Return the residual :class:`ir.Address` ``shape``, re-seating its pre-lowered dynamic indices.

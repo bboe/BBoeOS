@@ -197,6 +197,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 #: Files with zero residuals are omitted.
 RESIDUAL_CENSUS_ALLOWLIST = {"user/programs/shell.c": 6}
 
+SPANNING_TEMP_SOURCE = """
+struct pair { int first; int second; };
+int helper(int alpha, int beta, int gamma) {
+    return alpha + beta + gamma;
+}
+int provoke(struct pair *pair_pointer, int seed) {
+    return helper(seed * 3, seed * 5, pair_pointer->first);
+}
+"""
+
 STRUCT_ARRAY_CONSTANT_SOURCE = """
 struct entry { int key; int payload; };
 struct entry table[8];
@@ -884,3 +894,37 @@ def test_subscript_call_slot_plans_and_calls_natively() -> None:
     assert lines.count("shl eax, 2") == 1
     assert lines.count("mov eax, [eax]") == 1  # slot load
     assert lines.count("call eax") == 1
+
+
+def test_temp_homes_avoid_member_store_base_clobber() -> None:
+    """A temp live across an arrow-store terminal is never homed in BX.
+
+    The store plan declares clobbers={'bx'} (``_load_member_base`` writes BX
+    to seed the member base); the allocator must exclude BX from any temp
+    live across — or read by — that Store.  Step-1 probe verdict: HEAD
+    MISCOMPILES the live-across-Load twin of this constraint —
+    ``SPANNING_TEMP_SOURCE`` homes the ``seed * 3`` temp in EBX, the planned
+    arrow-member Load's materialization then runs ``mov ebx,
+    [pair_pointer]`` (no guard exists for non-subscript member plans), and
+    the call argument pushes the pointer instead of the product.  The
+    spanning-a-Store variant cannot be constructed from C today (Store
+    values are always leaves and temps never live across statement
+    boundaries), so the Store fact is locked by a direct call into
+    ``_instruction_clobber_registers`` while the compile fixture exercises
+    the Load instance of the same ``_load_member_base`` clobber.
+    """
+    generator = _generate(SPANNING_TEMP_SOURCE)
+    homes = generator.temp_pinned_registers
+    # The fixture forces two interfering deferred-single-use temps
+    # (``seed * 3`` / ``seed * 5``) live across the ``pair_pointer->first``
+    # Load; both must be homed, and neither in the clobbered EBX (the
+    # allocator relocates them onto EDX / EDI instead of spilling).
+    assert "ebx" not in homes.values()
+    assert len(homes) == 2  # both temps homed, neither spilled
+    # Direct fact check for the Store terminal: an arrow-member store plan
+    # declares the BX base-load clobber, and the helper reports it for the
+    # consuming ``ir.Store``.
+    store_generator = _generate(ARROW_STORE_SOURCE)
+    (address_destination,) = store_generator._ir_address_plans  # noqa: SLF001
+    store = ir.Store(address=address_destination, value=7, width=4)
+    assert store_generator._instruction_clobber_registers(store) == frozenset({"bx"})  # noqa: SLF001
