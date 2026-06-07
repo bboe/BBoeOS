@@ -69,6 +69,32 @@ def test_benefit_gate_spills_when_save_cost_too_high() -> None:
     assert "x" in alloc.spilled
 
 
+def test_build_interference_reports_live_across_sets() -> None:
+    """live_across[id(I)] is the set of allocatable names live through I.
+
+    t0 is defined before the BinaryOperation and used after it, so it is
+    live across; t1 is the BinaryOperation's own destination and must NOT
+    be in its live-across set (it is written by I, not live through it).
+    A last-use operand is dead through its consumer: the second
+    BinaryOperation reads t1 for the final time, so its live-across set is
+    empty — this pins the snapshot BEFORE the backward walk adds the
+    instruction's own uses back into the live set.
+    """
+    binop = ir.BinaryOperation(destination="t1", left="t0", operation="+", right=2)
+    last_use_binop = ir.BinaryOperation(destination="_discard1", left="t1", operation="+", right="t1")
+    body = [
+        ir.Copy(destination="t0", source=1),
+        binop,
+        ir.Copy(destination="_discard0", source="t0"),
+        last_use_binop,
+        ir.Return(value="_discard1"),
+    ]
+    allocatable = frozenset({"t0", "t1", "_discard0", "_discard1"})
+    result = build_interference(allocatable=allocatable, function=_function(body=body))
+    assert result.live_across[id(binop)] == frozenset({"t0"})
+    assert result.live_across[id(last_use_binop)] == frozenset()
+
+
 def test_coalesce_move_shares_register() -> None:
     """Coalescing forces move-related values onto the SAME register under pressure.
 
@@ -229,8 +255,9 @@ def test_public_types_construct() -> None:
     assert costs.spill_benefit == {}
     assert allocation.homes["x"] == "ebx"
     assert "y" in allocation.spilled
-    inter = InterferenceResult(graph={"x": set()}, live_across_call={"x": 1}, moves=set())
+    inter = InterferenceResult(graph={"x": set()}, live_across={}, live_across_call={"x": 1}, moves=set())
     assert inter.graph == {"x": set()}
+    assert inter.live_across == {}
     assert inter.live_across_call["x"] == 1
 
 

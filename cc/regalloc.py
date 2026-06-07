@@ -92,14 +92,19 @@ class CostModel:
 class InterferenceResult:
     """Output of ``build_interference``.
 
-    ``graph`` is the symmetric adjacency map over allocatable values.  ``moves``
-    is the set of coalesce candidates (each a frozenset of two values related by
-    a ``Copy``).  ``live_across_call`` maps a value to the number of ``Call`` /
+    ``graph`` is the symmetric adjacency map over allocatable values.
+    ``live_across`` maps ``id(instruction)`` to the allocatable names live
+    *through* that instruction (live-out minus its own defs).  Keyed by
+    identity, not value — value-equal instructions at different program points
+    must not collide.  Valid only while the analyzed ``ir.Function`` object is
+    alive.  ``live_across_call`` maps a value to the number of ``Call`` /
     ``TailCall`` / ``CarryBranch`` instructions it is live across (feeds the
-    save-cost model in PR 2/3).
+    save-cost model in PR 2/3).  ``moves`` is the set of coalesce candidates
+    (each a frozenset of two values related by a ``Copy``).
     """
 
     graph: dict[str, set[str]]
+    live_across: dict[int, frozenset[str]]
     live_across_call: dict[str, int]
     moves: set[frozenset[str]]
 
@@ -342,6 +347,7 @@ def build_interference(*, allocatable: frozenset[str], function: ir.Function) ->
                 changed = True
 
     adjacency: dict[str, set[str]] = {name: set() for name in allocatable}
+    live_across: dict[int, frozenset[str]] = {}
     moves: set[frozenset[str]] = set()
     live_across_call: Counter[str] = Counter()
 
@@ -358,6 +364,11 @@ def build_interference(*, allocatable: frozenset[str], function: ir.Function) ->
                 for name in live:
                     live_across_call[name] += 1
             defs = [name for name in _instruction_defs(instruction=instruction) if name in allocatable]
+            # Snapshot live-through (live-out minus this instruction's own
+            # defs) BEFORE edges/uses mutate ``live``.  ``live`` only ever
+            # holds allocatable names, so subtracting the allocatable-filtered
+            # ``defs`` is equivalent to subtracting all defs.
+            live_across[id(instruction)] = frozenset(live - set(defs))
             for defined in defs:
                 for other in live:
                     add_edge(name_a=defined, name_b=other)
@@ -374,7 +385,7 @@ def build_interference(*, allocatable: frozenset[str], function: ir.Function) ->
                 if name in allocatable:
                     live.add(name)
 
-    return InterferenceResult(graph=adjacency, live_across_call=dict(live_across_call), moves=moves)
+    return InterferenceResult(graph=adjacency, live_across=live_across, live_across_call=dict(live_across_call), moves=moves)
 
 
 def color(
