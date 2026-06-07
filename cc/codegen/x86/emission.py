@@ -918,6 +918,61 @@ class EmissionMixin:
             else:
                 self.emit(f"_l_{vname}: {int_directive}")
 
+    def _emit_planned_member_store(self, plan: AddressPlan, value: Node, /) -> None:
+        """Store *value* through a planned member address (native ``ir.Store`` path).
+
+        Mirrors the four orderings of
+        :meth:`~cc.codegen.x86.generator.X86CodeGenerator._emit_member_scalar_resolved_store`
+        using the plan's declared base facts instead of re-walking the AST
+        shape, and calls the SAME resolved-store sub-emitters
+        (``_emit_bitfield_write_literal`` / ``_try_fold_bitfield_int_store`` /
+        ``_emit_resolved_field_store``) so the byte sequences match:
+
+        1. Static base — materialization emits nothing, so resolve first,
+           take the bitfield literal / const-fold fast paths, then evaluate
+           the rhs and store (the legacy no-spill dot store).
+        2. 1-bit literal bitfield on a register base — needs no rhs in a
+           register; materialize the base and write the single ``and``/``or``.
+        3. Accumulator-preserving register base (arrow named-pointer) — rhs
+           first, then the bare ``mov bx, [ptr]`` base load, then store.
+        4. Accumulator-clobbering base (chained) — the base materialization
+           runs through the accumulator, so it goes first; rhs, then store.
+
+        Every early return maps to the legacy member-scalar store's early
+        returns; the consuming ``ir.Store`` case runs its trailing
+        ``ax_clear`` after this helper on ALL paths, exactly as it does after
+        the legacy ``_emit_place_store`` dispatch (whose early returns land
+        back in the same trailing clear).
+        """
+        self.ax_clear()
+        if plan.base_is_static:
+            operand = self._materialize_address_plan(plan)
+            if operand.bitfield is not None:
+                address = self._build_address(operand.base, operand.displacement)
+                literal = self._bitfield_write_literal_value(operand.bitfield, value)
+                if literal is not None:
+                    self._emit_bitfield_write_literal(operand.bitfield, addr=address, value=literal)
+                    return
+                if self._try_fold_bitfield_int_store(operand, value):
+                    return
+            self.generate_expression(value)
+            self._emit_resolved_field_store(operand, value)
+            return
+        literal = self._bitfield_write_literal_value(plan.bitfield, value)
+        if literal is not None:
+            operand = self._materialize_address_plan(plan)
+            address = self._build_address(operand.base, operand.displacement)
+            self._emit_bitfield_write_literal(operand.bitfield, addr=address, value=literal)
+            return
+        if plan.base_preserves_accumulator:
+            self.generate_expression(value)
+            operand = self._materialize_address_plan(plan)
+            self._emit_resolved_field_store(operand, value)
+            return
+        operand = self._materialize_address_plan(plan)
+        self.generate_expression(value)
+        self._emit_resolved_field_store(operand, value)
+
     def _emit_pointer_bump(self, *, delta: int, line: int, name: str) -> None:
         """Advance pointer variable ``name`` by ``delta * sizeof(*name)`` bytes in place.
 
@@ -2096,17 +2151,29 @@ class EmissionMixin:
                     shape = self._ir_address_with_index(address_op)
                     self.emit_store_local(expression=PlaceLoad(line=shape.line, place=shape), name=destination)
             case ir.Store(address=address, value=value):
-                # ``*(shape) = value`` — drive the EXISTING member-store path
-                # from the producing ``Address``'s deref-free ``shape`` so the
-                # static field layout (offset / width / bitfield) and the
-                # RHS-vs-base evaluation ordering are produced by the EXACT
-                # helper the ``ir.Access`` member-store path used
-                # (``_emit_place_store``).  ``value`` is a byte-safe leaf
-                # (guaranteed by the ``_is_*_member_store`` lowering predicate),
-                # so ``_ir_value_to_ast`` round-trips it to the AST node the
-                # legacy store evaluated in place — no spill/reload, byte-neutral.
-                shape = self._ir_address_with_index(self._ir_address_ops[address])
-                self._emit_place_store(shape, self._ir_value_to_ast(value))
+                plan = self._ir_address_plans.get(address)
+                if plan is not None:
+                    # Native path: every planned shape is a bare ``MemberPlace``
+                    # (dot / arrow / multi-level arrow), which the legacy
+                    # ``_emit_place_store`` dispatch routes unconditionally to
+                    # ``_emit_member_scalar_resolved_store`` (the subscript /
+                    # struct-array arms all require a ``SubscriptPlace``
+                    # somewhere in the chain).  ``_emit_planned_member_store``
+                    # mirrors that emitter's four orderings from the plan's
+                    # declared base facts, calling the SAME sub-emitters.
+                    self._emit_planned_member_store(plan, self._ir_value_to_ast(value))
+                else:
+                    # ``*(shape) = value`` — drive the EXISTING member-store path
+                    # from the producing ``Address``'s deref-free ``shape`` so the
+                    # static field layout (offset / width / bitfield) and the
+                    # RHS-vs-base evaluation ordering are produced by the EXACT
+                    # helper the ``ir.Access`` member-store path used
+                    # (``_emit_place_store``).  ``value`` is a byte-safe leaf
+                    # (guaranteed by the ``_is_*_member_store`` lowering predicate),
+                    # so ``_ir_value_to_ast`` round-trips it to the AST node the
+                    # legacy store evaluated in place — no spill/reload, byte-neutral.
+                    shape = self._ir_address_with_index(self._ir_address_ops[address])
+                    self._emit_place_store(shape, self._ir_value_to_ast(value))
                 # The legacy statement-level ``PlaceStore`` path clears AX
                 # tracking after the store (the accumulator no longer holds a
                 # tracked local); mirror it so downstream codegen decisions

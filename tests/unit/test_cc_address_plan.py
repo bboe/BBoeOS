@@ -27,6 +27,13 @@ int read_value(struct node *n) {
 }
 """
 
+ARROW_STORE_SOURCE = """
+struct node { int value; };
+void write_value(struct node *n, int v) {
+    n->value = v;
+}
+"""
+
 CHAINED_DOT_SOURCE = """
 struct inner { int a; int b; };
 struct outer { int pad; struct inner mid; };
@@ -104,6 +111,35 @@ def test_arrow_member_load_plans_pointer_base() -> None:
     assert plan.base == "n"
     assert plan.base_preserves_accumulator is True
     assert plan.base_is_static is False
+
+
+def test_arrow_member_store_consumes_native_plan() -> None:
+    """``n->value = v`` plans an accumulator-preserving pointer base and stores natively.
+
+    The plan facts pin the store ordering (rhs first, then the bare
+    ``mov ebx, [n]`` base load); the asm-shape assertions pin the native
+    materialization to exactly one base load and one register-base store,
+    with the rhs evaluated BEFORE the base load (the accumulator-preserving
+    ordering).  Byte-for-byte parity with the legacy path is enforced by
+    ``tests/test_cc_function_sizes.py``.
+    """
+    generator = _generate(ARROW_STORE_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.base_kind == "pointer"
+    assert plan.base_is_static is False
+    assert plan.base_preserves_accumulator is True
+    body = generator.output.split("write_value:")[1]
+    lines = [line.strip() for line in body.splitlines()]
+    base_loads = [line for line in lines if line.startswith("mov ebx, [")]
+    assert base_loads == ["mov ebx, [ebp-4]"]
+    assert lines.count("mov [ebx], eax") == 1
+    assert lines.index("mov eax, [ebp-8]") < lines.index("mov ebx, [ebp-4]")
+    # No spill: the accumulator-preserving ordering never saves the rhs
+    # around the base load (a push/pop pair here would be a +2-byte
+    # regression the byte gate would also catch corpus-wide).
+    assert "push eax" not in lines
 
 
 def test_chained_dot_member_load_records_no_address_op() -> None:

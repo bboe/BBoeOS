@@ -693,6 +693,19 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         return 1
 
     @staticmethod
+    def _bitfield_write_literal_value(info: FieldInfo | None, value: Node, /) -> int | None:
+        """Return the 0/1 literal for a 1-bit bitfield store of an ``Int``, else None.
+
+        The pure eligibility core shared by the place-driven
+        :meth:`_member_bitfield_literal` wrapper and the plan-driven native
+        ``ir.Store`` path (which carries the member's bitfield
+        :class:`FieldInfo` on its ``AddressPlan`` rather than a place).
+        """
+        if info is not None and info.bit_width == 1 and isinstance(value, Int) and value.value in (0, 1):
+            return value.value
+        return None
+
+    @staticmethod
     def _build_address(base: str, offset: int, /, *, index: str = "") -> str:
         """Return ``[base+offset+index]``, collapsing zero ``offset``.
 
@@ -3956,9 +3969,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         register-base member.
         """
         info = self._member_field_info(place)
-        if info.bit_width == 1 and isinstance(value, Int) and value.value in (0, 1):
-            return value.value
-        return None
+        return self._bitfield_write_literal_value(info, value)
 
     def _member_dot_targets_global(self, place: MemberPlace, /) -> bool:
         """Return True if *place* is ``global.field`` on a file-scope struct global.
