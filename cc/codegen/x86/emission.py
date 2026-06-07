@@ -2038,11 +2038,20 @@ class EmissionMixin:
         )
 
     def _ir_address_with_index(self, address: ir.Address, /) -> Node:
-        """Return the :class:`ir.Address` ``shape``, re-seating its pre-lowered dynamic indices.
+        """Return the residual :class:`ir.Address` ``shape``, re-seating its pre-lowered dynamic indices.
+
+        This is the RESIDUAL legacy path: every legacy fallback branch in the
+        five Address-consuming terminals funnels through it for the shapes
+        ``_plan_ir_address`` declines (array-of-pointers subscript chains,
+        aliased-pointer / non-pointer-holder deref stores, bitfield
+        AddressOf / IncrementDecrement, undefined-name call slots — see the
+        planner's residual census).  It shrinks as phase 4 / 3b.2 extends the
+        plan model (the array-of-pointers chain needs a chain-splitting
+        element-pointer-load plan extension).
 
         When ``address.indices`` is empty the segment is static (a dot member /
         symbol-rooted base) and the immutable ``shape`` already carries the full
-        place — returned as-is, exactly as slices 1-3 drove it.
+        place — returned as-is.
 
         When ``address.indices`` carries :data:`Value` leaves, each dynamic
         subscript index was pre-lowered to a ``Value`` at IR-build time.
@@ -2050,16 +2059,14 @@ class EmissionMixin:
         subscript/member chain and re-seats every index via
         :meth:`_ir_value_to_ast`, so the existing ``resolve_address`` /
         ``_accumulate_subscript`` path materializes and scales each index from
-        the IR ``Value`` instead of re-walking the original AST sub-expression
-        — covering slice 4's single-index ``array[index].member``, the multidim
-        / mixed chains, and the top-level ``name[index]`` call-slot shape
-        uniformly.  For a simple-var / constant index the round-trip
-        reconstructs the exact node ``resolve_address`` walked inline today, so
-        the materialize / scale / index-register choice is byte-identical; a
-        compound index arrives as a register-resident temp ``Var`` (the byte
-        gate is the backstop).  The static member offset / element stride /
-        width are still derived from the rebuilt ``shape`` by the unchanged
-        layout helpers.
+        the IR ``Value`` instead of re-walking the original AST sub-expression.
+        For a simple-var / constant index the round-trip reconstructs the exact
+        node ``resolve_address`` walked inline today, so the materialize /
+        scale / index-register choice is byte-identical; a compound index
+        arrives as a register-resident temp ``Var`` (the byte gate is the
+        backstop).  The static member offset / element stride / width are
+        still derived from the rebuilt ``shape`` by the unchanged layout
+        helpers.
         """
         shape = address.shape
         if not address.indices:
@@ -2258,17 +2265,22 @@ class EmissionMixin:
                 self._generate_ir_switch(instruction)
             case ir.Address(destination=destination):
                 # Pure structured-reference value: emits no code on its own.
-                # Plannable shapes record an AddressPlan (the native path —
-                # every terminal now consumes plans); the op itself is also
-                # recorded because the PLANNER is not yet total: unplannable
-                # shapes (and the bitfield-gated AddressOf / IncrementDecrement
-                # plans) still route through the legacy AST re-seat.  The op
-                # recording (and the re-seat path) is deleted once the planner
-                # covers every lowered shape.
+                # Recording is EXCLUSIVE: a plannable shape records only its
+                # AddressPlan (the native path every terminal consumes first);
+                # an unplannable shape records only the op, routing its
+                # consumer through the legacy AST re-seat.  One ride-along
+                # exception: a BITFIELD member plan also records the op,
+                # because Load / Store consume bitfield plans natively while
+                # AddressOf / IncrementDecrement still gate on
+                # ``plan.bitfield is None`` and need the op for their legacy
+                # fallbacks (the address-of CompileError diagnostic and the
+                # mask/shift read-modify-write).  The ride-along disappears
+                # when those two terminals grow native bitfield handling.
                 plan = self._plan_ir_address(instruction)
                 if plan is not None:
                     self._ir_address_plans[destination] = plan
-                self._ir_address_ops[destination] = instruction
+                if plan is None or plan.bitfield is not None:
+                    self._ir_address_ops[destination] = instruction
             case ir.Load(address=address, destination=destination):
                 plan = self._ir_address_plans.get(address)
                 if plan is not None:
@@ -2384,7 +2396,11 @@ class EmissionMixin:
                     # lands in the accumulator and the store-to-local tail matches
                     # the one ``emit_store_local`` runs after a ``PlaceAddressOf``
                     # expression, so this is byte-neutral with the prior temp+Block.
-                    shape = self._ir_address_with_index(self._ir_address_ops[address])
+                    address_op = self._ir_address_ops.get(address)
+                    if address_op is None:
+                        message = f"AddressOf consumed a planned address {address!r} its native gate rejected"
+                        raise CompileError(message)
+                    shape = self._ir_address_with_index(address_op)
                     self.emit_store_local(expression=PlaceAddressOf(line=shape.line, place=shape), name=destination)
             case ir.IncrementDecrement(address=address, delta=delta, is_postfix=is_postfix):
                 plan = self._ir_address_plans.get(address)
@@ -2408,7 +2424,11 @@ class EmissionMixin:
                     # sequence (including the single-instruction memory
                     # ``inc``/``dec``) is produced by the EXACT emitter the
                     # ``Block`` path used — byte-neutral with the prior Block.
-                    shape = self._ir_address_with_index(self._ir_address_ops[address])
+                    address_op = self._ir_address_ops.get(address)
+                    if address_op is None:
+                        message = f"IncrementDecrement consumed a planned address {address!r} its native gate rejected"
+                        raise CompileError(message)
+                    shape = self._ir_address_with_index(address_op)
                     self.generate_statement(PlaceIncrementDecrement(line=shape.line, delta=delta, is_postfix=is_postfix, place=shape))
             case ir.IndirectCall(address=address):
                 plan = self._ir_address_plans.get(address)
@@ -2426,7 +2446,11 @@ class EmissionMixin:
                     # come from the EXACT legacy indexed-call emitter the
                     # ``Access`` path used — byte-neutral, including the
                     # conservative pinned-register save default around the call.
-                    shape = self._ir_address_with_index(self._ir_address_ops[address])
+                    address_op = self._ir_address_ops.get(address)
+                    if address_op is None:
+                        message = f"IndirectCall consumed a planned address {address!r} its native gate rejected"
+                        raise CompileError(message)
+                    shape = self._ir_address_with_index(address_op)
                     self.generate_statement(PlaceCall(line=shape.line, args=[], place=shape))
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
@@ -2739,12 +2763,28 @@ class EmissionMixin:
         )
 
     def _plan_ir_address(self, address: ir.Address, /) -> AddressPlan | None:
-        """Derive the pure AddressPlan for *address*, or None if not yet plannable.
+        """Derive the pure AddressPlan for *address*, or None if not plannable.
 
-        Phase-1 coverage grows shape class by shape class; a None return routes
-        the op through the legacy AST re-seat path. Planning is PURE — no code
-        is emitted here (every phase-1 plan is folded; the consuming terminal
-        materializes it).
+        Planning is PURE — no code is emitted here (every phase-1 plan is
+        folded; the consuming terminal materializes it).  A None return
+        records the op instead, routing its consumer through the legacy AST
+        re-seat path.  The full phase-1 residual census (everything still on
+        the legacy path, locked by the allowlist test in
+        ``tests/unit/test_cc_address_plan.py``):
+
+        - array-of-pointers subscript chains (``name[i][j]`` over ``char
+          *name[N]``) — the mid-chain element-pointer load has no plan model.
+        - aliased-pointer deref stores (``out_register_locals``) — zero
+          corpus sites; not worth a plan kind.
+        - non-pointer-holder deref stores — the legacy arm owns the
+          place-anchored "write to non-pointer variable" CompileError.
+        - bitfield AddressOf / IncrementDecrement — legacy diagnostic /
+          mask-shift RMW; the plan is recorded too (the ride-along) so Load
+          and Store stay native.
+        - undefined-name call slots — the legacy arm owns the
+          ``_check_defined`` diagnostic.
+        - chained dot (``g.mid.b``) never lowers to ``ir.Address`` at all —
+          it stays whole on ``ir.Access``, so it is not a residual here.
         """
         if address.indices:
             if len(address.indices) == 1:
@@ -3107,6 +3147,14 @@ class EmissionMixin:
 
     def _reseat_nested_subscript_indices(self, shape: Node, indices: tuple[ir.Value, ...]) -> Node:
         """Re-seat an N-tuple of pre-lowered indices into a nested ``name[i][j]...`` shape.
+
+        Reached only from :meth:`_ir_address_with_index` — the RESIDUAL
+        legacy path; the indexed residual families today are the
+        array-of-pointers subscript chain and the undefined-name call slot
+        (whose rebuilt ``PlaceCall`` exists only to raise the legacy
+        ``_check_defined`` diagnostic).  This helper shrinks to the
+        diagnostic-only case once the plan model grows the chain-splitting
+        element-pointer load.
 
         ``shape`` is a left-nested :class:`SubscriptPlace` chain — possibly
         with static :class:`MemberPlace` segments between subscripts
@@ -5831,12 +5879,13 @@ class EmissionMixin:
     def lower_ir_body(self, body: list[ir.Instruction]) -> None:
         """Generate x86 assembly from a flat IR instruction list."""
         # ``Address`` ops emit no code; they name a resolved address that a
-        # later ``Load`` / ``Store`` / ``AddressOf`` consumes.  Record each by
-        # its destination temp so the consumer can recover its ``shape`` (the
-        # deref-free place driving the static layout in ``resolve_address``).
-        # Plannable shapes additionally record their pure ``AddressPlan`` so
-        # the migrated terminals materialize the operand without re-walking
-        # the AST shape.
+        # later ``Load`` / ``Store`` / ``AddressOf`` consumes.  Recording is
+        # exclusive per shape: a plannable shape records its pure
+        # ``AddressPlan`` (the native path the terminals consume first); an
+        # unplannable RESIDUAL shape records the op itself so the consumer
+        # can recover its ``shape`` for the legacy AST re-seat (see
+        # ``_plan_ir_address`` for the residual census; bitfield member
+        # shapes record both — the ride-along in the ``ir.Address`` case).
         self._ir_address_ops: dict[str, ir.Address] = {}
         self._ir_address_plans: dict[str, AddressPlan] = {}
         for instruction in body:

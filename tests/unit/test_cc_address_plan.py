@@ -2,16 +2,29 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from cc.cli import compile_module
+from cc import ir
+from cc.ast_nodes import SubscriptPlace
+from cc.cli import _discover_include_paths, compile_module  # noqa: PLC2701 — the census needs the CLI's include discovery
 from cc.codegen.address_plan import AddressPlan, AddressTerm, scale_encodes_in_operand
 from cc.codegen.x86.generator import X86CodeGenerator
 from cc.options import CompilerOptions
+
+#: Userland translation units the residual census compiles — the same corpus
+#: ``tests/test_cc_function_sizes.py`` gates byte-for-byte.
+CORPUS_SOURCE_GLOBS = ("user/libbboeos/*.c", "user/programs/*.c")
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+#: The locked residual census: repo-relative source -> unplanned Address count.
+#: Files with zero residuals are omitted.
+RESIDUAL_CENSUS_ALLOWLIST = {"user/programs/shell.c": 6}
 
 # Member accesses live in helper functions (not ``main``) because ``main``
 # bypasses the IR lowering path — only IR-lowered bodies record Address ops.
@@ -201,6 +214,48 @@ void write_payload(int index, int leaf) {
     table[index].payload = leaf;
 }
 """
+
+
+def _corpus_residual_census() -> tuple[int, dict[str, list[ir.Address]]]:
+    """Compile every corpus source; return (total Address ops, residual ops per file).
+
+    Wraps ``lower_ir_body`` so the per-function ``_ir_address_ops`` dict (which
+    is reset at the top of every body) is snapshotted after each body lowers,
+    accumulating residual (legacy-recorded) ops across all functions of all
+    translation units.  ``include/syscalls.h`` is generated first so the
+    libbboeos sources resolve, mirroring ``tests/test_cc_function_sizes.py``.
+
+    Note: a future corpus bitfield member access would appear here despite
+    Load/Store consuming it natively — bitfield plans dual-record into
+    ``_ir_address_ops`` as a ride-along for the legacy bitfield diagnostic
+    path.  Split the allowlist semantics if that ever happens.
+    """
+    subprocess.run([sys.executable, str(REPO_ROOT / "tools" / "generate_syscalls_h.py")], check=True)
+    residual_by_file: dict[str, list[ir.Address]] = {}
+    total_addresses = 0
+    current_file = ""
+    original = X86CodeGenerator.lower_ir_body
+
+    def spy(self: X86CodeGenerator, body: list[ir.Instruction]) -> None:
+        nonlocal total_addresses
+        total_addresses += sum(isinstance(instruction, ir.Address) for instruction in body)
+        original(self, body)
+        residual_by_file.setdefault(current_file, []).extend(self._ir_address_ops.values())
+
+    X86CodeGenerator.lower_ir_body = spy  # type: ignore[method-assign]
+    try:
+        for glob in CORPUS_SOURCE_GLOBS:
+            directory, pattern = glob.rsplit("/", 1)
+            for source in sorted((REPO_ROOT / directory).glob(pattern)):
+                current_file = str(source.relative_to(REPO_ROOT))
+                compile_module(
+                    input_path=source,
+                    options=CompilerOptions(bits=32, object_mode=True, per_function_sections=True),
+                    search_paths=_discover_include_paths(extra_include_paths=(), input_path=source),
+                )
+    finally:
+        X86CodeGenerator.lower_ir_body = original  # type: ignore[method-assign]
+    return total_addresses, residual_by_file
 
 
 def _generate(source_text: str, /, *, bits: int = 32) -> X86CodeGenerator:
@@ -573,6 +628,34 @@ def test_pointer_to_array_load_plans_outer_row_stride() -> None:
     assert plan.base == "p"
     assert plan.base_always_in_register is True
     assert [term.scale for term in plan.terms] == [12, 4]
+
+
+def test_residual_address_census_matches_allowlist() -> None:
+    """Every unplanned corpus Address is the array-of-pointers subscript family, exactly 6 in shell.c.
+
+    With exclusive plan recording, ``_ir_address_ops`` holds ONLY the residual
+    (legacy-routed) ops.  The single residual family today is the
+    array-of-pointers subscript chain (``pipe_left_argv[0][copy_index]`` and
+    friends in shell.c): its mid-chain ELEMENT-POINTER LOAD — dereferencing
+    ``name[i]`` to re-root the rest of the chain — has no phase-1 plan model
+    (planning it needs emission's registered pointer-array element types
+    folded into a chain-splitting plan extension), so
+    ``_plan_subscript_chain`` declines and the legacy AST re-seat path owns
+    the shape.
+
+    A failure here means a new corpus shape stopped planning (add a planner
+    arm, or — if the shape genuinely cannot plan in the phase-1 model —
+    document it in ``_plan_ir_address`` and update
+    ``RESIDUAL_CENSUS_ALLOWLIST`` deliberately).
+    """
+    total_addresses, residual_by_file = _corpus_residual_census()
+    residual_counts = {source: len(address_ops) for source, address_ops in residual_by_file.items() if address_ops}
+    assert residual_counts == RESIDUAL_CENSUS_ALLOWLIST
+    for address_ops in residual_by_file.values():
+        for address_op in address_ops:
+            assert isinstance(address_op.shape, SubscriptPlace)
+    residual_total = sum(residual_counts.values())
+    assert total_addresses - residual_total > 0  # the planner covers the rest of the corpus
 
 
 def test_scale_encodes_in_operand_16_bit_only_unscaled() -> None:
