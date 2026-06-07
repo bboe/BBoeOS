@@ -918,6 +918,33 @@ class EmissionMixin:
             else:
                 self.emit(f"_l_{vname}: {int_directive}")
 
+    def _emit_planned_deref_store(self, plan: AddressPlan, value: Node, /) -> None:
+        """Store *value* through a planned ``*pointer`` deref (native ``ir.Store`` path).
+
+        Mirrors the legacy named-pointer general sub-arm of the standalone
+        ``DereferencePlace`` case in
+        :meth:`~cc.codegen.x86.generator.X86CodeGenerator._emit_place_store`
+        step for step: the rhs evaluates first, the pointer VALUE loads into
+        SI (``_emit_load_var`` — a bare register load that never reads the
+        accumulator, so no spill), then the width-selected register-base
+        store runs through the SAME shared terminal
+        (``_emit_store_accumulator_at_width``; the plan's ``field_size``
+        carries the legacy byte-vs-full select from
+        ``_named_pointer_deref_store_width``, including its documented
+        ``unsigned short *`` gap).  The aliased-pointer and non-pointer
+        sub-arms never reach here — the planner returns None for both, so
+        the legacy arm keeps the register-alias write and the
+        ``CompileError`` diagnostic anchored at the place line.  The
+        trailing ``ax_clear`` is the legacy arm's own clear; the consuming
+        ``ir.Store`` case runs its statement-level clear after this helper,
+        exactly as it does after the legacy ``_emit_place_store`` dispatch.
+        """
+        assert isinstance(plan.base, str)
+        self.generate_expression(value)
+        self._emit_load_var(plan.base, register=self.target.si_register)
+        self._emit_store_accumulator_at_width(destination=f"[{self.target.si_register}]", width=plan.field_size)
+        self.ax_clear()
+
     def _emit_planned_increment_decrement(self, plan: AddressPlan, /, *, delta: int, is_postfix: bool) -> None:
         """Read-modify-write ``*(plan) += delta`` (native ``ir.IncrementDecrement`` path).
 
@@ -2285,7 +2312,14 @@ class EmissionMixin:
             case ir.Store(address=address, value=value):
                 plan = self._ir_address_plans.get(address)
                 if plan is not None:
-                    if plan.subscript_terminal:
+                    if plan.deref_store:
+                        # Bare ``*pointer = leaf`` store: the plan's emission
+                        # is owned by this terminal alone (the legacy
+                        # named-pointer arm's rhs-first / SI-load /
+                        # width-selected ordering; see
+                        # ``_emit_planned_deref_store``).
+                        self._emit_planned_deref_store(plan, self._ir_value_to_ast(value))
+                    elif plan.subscript_terminal:
                         # Indexed shape (struct-array member): the legacy
                         # ``_emit_place_store`` dispatch fell through to the
                         # protect-BX subscript terminal, which spills the rhs
@@ -2416,6 +2450,13 @@ class EmissionMixin:
         # a generic materialization would emit the wrong byte sequence.
         if plan.call_slot:
             message = "call-slot AddressPlan is materialized by the IndirectCall terminal only"
+            raise NotImplementedError(message)
+        # Deref-store plans (the bare ``*pointer = leaf`` shape) are owned
+        # exclusively by the ``ir.Store`` terminal: their pointer VALUE loads
+        # into SI via ``_emit_load_var``, not the member "pointer" kind's
+        # SI-or-BX ``_load_member_base`` the generic path below would run.
+        if plan.deref_store:
+            message = "deref-store AddressPlan is materialized by the Store terminal only"
             raise NotImplementedError(message)
         # Horner plans (row-major multidim / pointer-to-array) materialize
         # through the legacy Horner tail emitters, dispatched on the plan's
@@ -2654,6 +2695,49 @@ class EmissionMixin:
             return False
         return info.bit_width is not None
 
+    def _plan_deref_store(self, address: ir.Address, /) -> AddressPlan | None:
+        """Plan the bare ``*pointer = leaf`` store shape (pure; no emission).
+
+        Only the named-pointer general sub-arm of the legacy standalone
+        ``DereferencePlace`` store is planned: ``base_kind="pointer"`` with
+        the ``deref_store`` flag (the SI pointer-VALUE load + width-selected
+        store, owned by the ``ir.Store`` terminal).  The other two legacy
+        sub-arms return None and stay on the legacy path:
+
+        - a register-aliased pointer (``out_register_locals``) writes the rhs
+          straight into the alias register — zero corpus sites today, so it
+          is not worth a plan kind;
+        - a non-pointer holder type must keep raising the legacy
+          ``CompileError`` ("pointer dereference write to non-pointer
+          variable") anchored at the place line, so the planner declines and
+          the legacy arm owns the diagnostic.
+
+        ``field_size`` carries the shared legacy width select
+        (``_named_pointer_deref_store_width``), including its documented
+        ``unsigned short *`` gap.
+        """
+        shape = address.shape
+        assert isinstance(shape, DereferencePlace)
+        # The lowering gate (``_is_deref_store``) only admits a plain
+        # pointer-variable read ``Var(p)`` under the dereference.
+        if not isinstance(shape.pointer, Var):
+            return None
+        pointer_name = shape.pointer.name
+        if pointer_name in self.out_register_locals:
+            return None
+        width = self._named_pointer_deref_store_width(pointer_name)
+        if width is None:
+            return None
+        return AddressPlan(
+            base=pointer_name,
+            base_is_static=False,
+            base_kind="pointer",
+            base_preserves_accumulator=True,
+            deref_store=True,
+            field_size=width,
+            line=shape.line,
+        )
+
     def _plan_ir_address(self, address: ir.Address, /) -> AddressPlan | None:
         """Derive the pure AddressPlan for *address*, or None if not yet plannable.
 
@@ -2672,6 +2756,11 @@ class EmissionMixin:
                     return self._plan_subscript_call_slot(address)
                 return self._plan_struct_array_member(address)
             return self._plan_subscript_chain(address)
+        # A bare ``DereferencePlace`` shape is the ``*pointer = leaf`` store
+        # (the only lowering that produces it; rvalue ``*p`` desugars to
+        # ``Index(p, 0)`` before lowering, so no deref load reaches here).
+        if isinstance(address.shape, DereferencePlace):
+            return self._plan_deref_store(address)
         # Arrow shapes carry the pointer name in ``base_value``; the shape
         # itself roots at the same ``DereferencePlace(VariablePlace)``, so the
         # member-place planner derives the base from the shape directly.

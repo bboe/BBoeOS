@@ -54,6 +54,18 @@ int main() {
 }
 """
 
+DEREF_STORE_BYTE_SOURCE = """
+void write_byte(char *target, int value) {
+    *target = value;
+}
+"""
+
+DEREF_STORE_SOURCE = """
+void write_through(int *target, int value) {
+    *target = value;
+}
+"""
+
 DOT_MEMBER_SOURCE = """
 struct point { int x; int y; };
 struct point g;
@@ -340,6 +352,62 @@ def test_chained_dot_member_load_records_no_address_op() -> None:
     generator = _generate(CHAINED_DOT_SOURCE)
     assert generator._ir_address_ops == {}  # noqa: SLF001
     assert generator._ir_address_plans == {}  # noqa: SLF001
+
+
+def test_deref_store_byte_pointer_plans_field_size_one() -> None:
+    """``*target = value`` through a ``char *`` plans field_size 1 and stores one byte.
+
+    The byte select mirrors the legacy named-pointer arm exactly
+    (``pointee_type in BYTE_TYPES`` -> low-byte store), including its
+    documented ``unsigned short *`` width gap — the plan's ``field_size``
+    only ever carries 1 or the full ``int_size``.
+    """
+    generator, reseat_count = _generate_with_reseat_spy(DEREF_STORE_BYTE_SOURCE)
+    assert reseat_count == 0
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.base == "target"
+    assert plan.base_kind == "pointer"
+    assert plan.deref_store is True
+    assert plan.field_size == 1
+    body = generator.output.split("write_byte:")[1]
+    lines = [line.strip() for line in body.splitlines()]
+    assert lines.count("mov [esi], al") == 1
+    assert "mov [esi], eax" not in lines
+
+
+def test_deref_store_consumes_native_plan() -> None:
+    """``*target = value`` through an ``int *`` plans and stores natively (no AST re-seat).
+
+    The asm-shape assertions pin the legacy ordering the native path must
+    reproduce: rhs first, then the pointer VALUE loaded into SI, then the
+    full-accumulator register-base store — with no spill around the base
+    load.  Byte-for-byte parity with the legacy emission is enforced by
+    ``tests/test_cc_function_sizes.py`` (builtins.c / stdio.c / string.c /
+    shell.c are the live corpus consumers).
+    """
+    generator, reseat_count = _generate_with_reseat_spy(DEREF_STORE_SOURCE)
+    assert reseat_count == 0
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.base == "target"
+    assert plan.base_is_static is False
+    assert plan.base_kind == "pointer"
+    assert plan.base_preserves_accumulator is True
+    assert plan.deref_store is True
+    assert plan.field_size == 4
+    body = generator.output.split("write_through:")[1]
+    lines = [line.strip() for line in body.splitlines()]
+    pointer_loads = [line for line in lines if line.startswith("mov esi, [")]
+    assert pointer_loads == ["mov esi, [ebp-4]"]
+    assert lines.count("mov [esi], eax") == 1
+    assert lines.index("mov eax, [ebp-8]") < lines.index("mov esi, [ebp-4]")
+    # No spill: the rhs stays live in the accumulator across the bare SI
+    # pointer load (a push/pop pair here would be a +2-byte regression the
+    # byte gate would also catch corpus-wide).
+    assert "push eax" not in lines
 
 
 def test_dot_member_load_produces_pure_displacement_plan() -> None:

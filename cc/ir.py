@@ -267,12 +267,15 @@ def _is_deref_store(node: ast_nodes.Node, /) -> bool:
     pointer ``Value`` (the name ``"p"``) and there is no static member offset to
     derive.  Gated on a byte-safe leaf RHS (:func:`_is_byte_safe_store_rhs`) so
     the RHS-vs-address ordering stays byte-identical to the legacy deref store.
-    Emission drives the EXACT legacy ``_emit_place_store`` path off the
-    immutable ``DereferencePlace`` ``shape``; ``base_value`` is purely the
-    optimizer-visible dynamic leaf.  Stage 3b.1 slice 5 lowers exactly this
-    plain-pointer-var subset onto :class:`Address` + :class:`Store`; every
-    other deref store shape (``*(p + 1)``, ``*(T *)e``, ``*pp``) stays on
-    :class:`Access` unchanged.
+    Emission plans natively via :func:`~cc.codegen.x86.emission._plan_deref_store`
+    (``deref_store`` :class:`~cc.codegen.address_plan.AddressPlan`); the
+    :class:`Store` terminal drives :meth:`~cc.codegen.x86.emission.EmissionMixin._emit_planned_deref_store`
+    directly.  ``base_value`` is purely the optimizer-visible dynamic leaf.
+    Stage 3b.1 slice 5 lowers exactly this plain-pointer-var subset onto
+    :class:`Address` + :class:`Store`; every other deref store shape
+    (``*(p + 1)``, ``*(T *)e``, ``*pp``) stays on :class:`Access` unchanged.
+    The aliased-pointer and non-pointer-holder cases that fail the plan gate
+    fall back to the legacy ``_emit_place_store`` path for diagnostics.
     """
     return (
         isinstance(node, ast_nodes.PlaceStore)

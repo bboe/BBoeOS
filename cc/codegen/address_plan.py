@@ -65,6 +65,14 @@ class AddressPlan:
     ``ir.IndirectCall`` terminal (the legacy ``generate_indexed_call`` SI-base
     accumulate, which differs from the BX-seeded ``_accumulate_subscript``
     walk); the generic materializer refuses it loudly.
+
+    ``deref_store`` marks the bare ``*pointer = leaf`` store plan over a
+    named pointer.  Like ``call_slot``, its emission is owned exclusively by
+    its terminal (``ir.Store``): the pointer VALUE loads into SI via
+    ``_emit_load_var`` (not the member "pointer" kind's SI-or-BX
+    ``_load_member_base``) and the store width is the plan's ``field_size``
+    (the legacy byte-vs-full-accumulator select, including its documented
+    ``unsigned short *`` gap); the generic materializer refuses it loudly.
     """
 
     base: AddressPlan | str
@@ -76,6 +84,7 @@ class AddressPlan:
     call_slot: bool = False
     clobbers: frozenset[str] = field(default_factory=frozenset)
     decay_to_address: bool = False
+    deref_store: bool = False
     displacement: int = 0
     element_size: int = 0
     field_size: int = 0

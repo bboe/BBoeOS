@@ -3011,23 +3011,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         self.emit(f"        mov {register}, {source}")
                     self.ax_clear()
                     return
-                holder_type = self.variable_types.get(pointer_name)
-                if not holder_type or not holder_type.endswith("*"):
+                # NOTE: the byte/full width select (including the documented
+                # ``unsigned short *`` gap) lives in the shared
+                # ``_named_pointer_deref_store_width`` helper, which the
+                # AddressPlan planner also reads.
+                width = self._named_pointer_deref_store_width(pointer_name)
+                if width is None:
                     message = f"pointer dereference write to non-pointer variable '{pointer_name}'"
                     raise CompileError(message, line=place.line)
-                pointee_type = holder_type[:-1]
                 self.generate_expression(value)
                 self._emit_load_var(pointer_name, register=self.target.si_register)
-                # NOTE: this byte/full select reproduces the legacy bespoke
-                # emitter exactly and shares its latent gap — a 32-bit
-                # ``unsigned short *`` write stores the full accumulator
-                # instead of the low word.  Left byte-identical here; fixing
-                # it is a separate codegen change (own commit + width test)
-                # because it alters emitted bytes for that case.
-                if pointee_type in self.BYTE_TYPES:
-                    self.emit(f"        mov [{self.target.si_register}], {self.target.low_byte(self.target.acc)}")
-                else:
-                    self.emit(f"        mov [{self.target.si_register}], {self.target.acc}")
+                self._emit_store_accumulator_at_width(destination=f"[{self.target.si_register}]", width=width)
                 self.ax_clear()
                 return
             # Cast / arbitrary address expression: ``*(T *)e = value``.
@@ -3332,8 +3326,10 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         2-byte width on a 32-bit target stores the low-word alias with an
         explicit ``word`` size prefix; every other width stores the full
         accumulator.  Shared by the standalone-``DereferencePlace`` store
-        (cast fast path and general path) and the ``*p++ =`` increment
-        store, which all wrote this same byte/word/full triple inline.
+        (named-pointer arm, cast fast path, and general path; the
+        named-pointer width comes from ``_named_pointer_deref_store_width``),
+        the planned native deref store, and the ``*p++ =`` increment store,
+        which all wrote this same byte/word/full triple inline.
         """
         accumulator = self.target.acc
         if width == 1:
@@ -4145,6 +4141,27 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             raise CompileError(message, line=line)
         element_size = self._type_size(element_type.to_string())
         return element_size, self._derive_row_major_strides(dimension_counts, element_size=element_size)
+
+    def _named_pointer_deref_store_width(self, pointer_name: str, /) -> int | None:
+        """Byte width of a ``*pointer = value`` store through a named pointer.
+
+        The pure width half of the legacy named-pointer deref-store arm,
+        shared by that arm and the AddressPlan planner.  Byte pointee types
+        store one byte; everything else stores the full ``int_size``
+        accumulator.  Returns None when the holder is not a pointer type
+        (the legacy arm raises its diagnostic; the planner declines).
+
+        NOTE: this byte/full select reproduces the legacy bespoke emitter
+        exactly and shares its latent gap — a 32-bit ``unsigned short *``
+        write stores the full accumulator instead of the low word.  Left
+        byte-identical here; fixing it is a separate codegen change (own
+        commit + width test) because it alters emitted bytes for that case.
+        """
+        holder_type = self.variable_types.get(pointer_name)
+        if not holder_type or not holder_type.endswith("*"):
+            return None
+        pointee_type = holder_type[:-1]
+        return 1 if pointee_type in self.BYTE_TYPES else self.target.int_size
 
     @staticmethod
     def _parse_local_byte_addr(addr: str) -> int | None:
