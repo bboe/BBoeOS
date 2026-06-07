@@ -1248,6 +1248,28 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return 2
         return self.target.int_size
 
+    def _derive_dot_member_layout(self, place: MemberPlace, /) -> tuple[str, FieldInfo]:
+        """Pure layout derivation for ``obj.field`` (the VariablePlace arm).
+
+        Returns ``(base_operand, info)`` without emitting code — the pure half
+        of :meth:`_resolve_member_place_info`'s dot arm, shared by the legacy
+        resolver and the AddressPlan planner.
+        """
+        base = place.base
+        member_name = place.member_name
+        line = place.line
+        struct_type = self.variable_types.get(base.name)
+        if struct_type is None:
+            message = f"undefined variable '{base.name}'"
+            raise CompileError(message, line=line)
+        if struct_type.endswith("*") or not struct_type.startswith("struct "):
+            message = f"'.' requires a struct value, got type '{struct_type}'"
+            raise CompileError(message, line=line)
+        tag = struct_type[7:]
+        info = self._lookup_struct_field(tag, member_name, line)
+        base_operand = self._resolve_struct_value_base(base.name, line=line)
+        return base_operand, info
+
     def _emit_bitfield_read(self, info: FieldInfo, /, *, addr: str) -> None:
         """Emit the load-shift-mask-extend sequence for a bitfield read.
 
@@ -4809,16 +4831,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         line = place.line
         # Dot access on a named struct value: ``obj.field``.
         if isinstance(base, VariablePlace):
-            struct_type = self.variable_types.get(base.name)
-            if struct_type is None:
-                message = f"undefined variable '{base.name}'"
-                raise CompileError(message, line=line)
-            if struct_type.endswith("*") or not struct_type.startswith("struct "):
-                message = f"'.' requires a struct value, got type '{struct_type}'"
-                raise CompileError(message, line=line)
-            tag = struct_type[7:]
-            info = self._lookup_struct_field(tag, member_name, line)
-            base_operand = self._resolve_struct_value_base(base.name, line=line)
+            base_operand, info = self._derive_dot_member_layout(place)
             return base_operand, False, info
         # Arrow access on a named pointer: ``ptr->field``.
         if isinstance(base, DereferencePlace) and isinstance(base.pointer, VariablePlace):

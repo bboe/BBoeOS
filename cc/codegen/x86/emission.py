@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, ClassVar
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from cc.codegen.x86.generator import MemoryOperand
+
 from cc import ir, regalloc
 from cc.ast_nodes import (
     ArrayDecl,
@@ -83,6 +85,7 @@ from cc.ast_nodes import (
     While,
     address_of_variable_name,
 )
+from cc.codegen.address_plan import AddressPlan
 from cc.codegen.x86.jumps import (
     CMOV_WHEN_FALSE,
     CMOV_WHEN_TRUE,
@@ -2048,21 +2051,50 @@ class EmissionMixin:
                 self._generate_ir_switch(instruction)
             case ir.Address(destination=destination):
                 # Pure structured-reference value: emits no code on its own.
-                # Record it so the consuming Load / Store / AddressOf can
-                # recover its ``shape`` for the static-layout resolution.
+                # Plannable shapes record an AddressPlan (native path for the
+                # migrated terminals); the op itself is also recorded for the
+                # legacy AST re-seat because the not-yet-migrated terminals
+                # (Store / AddressOf / IncrementDecrement / IndirectCall) can
+                # consume the same plannable shape class — the op recording
+                # (and the re-seat path) is deleted once the planner and every
+                # terminal are total.
+                plan = self._plan_ir_address(instruction)
+                if plan is not None:
+                    self._ir_address_plans[destination] = plan
                 self._ir_address_ops[destination] = instruction
             case ir.Load(address=address, destination=destination):
-                # ``destination = *(shape)`` — drive ``resolve_address`` from
-                # the producing ``Address``'s deref-free ``shape`` so the
-                # static field layout (offset / width / decay / bitfield) and
-                # the width-aware ``mov`` / ``movzx`` terminal are derived by
-                # the EXACT helpers the ``ir.Access`` member-load path used.
-                # The value lands in the accumulator; the store-to-local tail
-                # is the same one ``emit_store_local`` runs after evaluating a
-                # ``PlaceLoad`` expression.
-                address_op = self._ir_address_ops[address]
-                shape = self._ir_address_with_index(address_op)
-                self.emit_store_local(expression=PlaceLoad(line=shape.line, place=shape), name=destination)
+                plan = self._ir_address_plans.get(address)
+                if plan is not None:
+                    # Native path: materialize the plan and run the shared
+                    # resolved load + the exact store-to-local tail
+                    # ``emit_store_local`` runs.  The legacy path's other
+                    # ``emit_store_local`` branches are provably dead here:
+                    # the destination is an ``_ir_*`` temp (never a global
+                    # array, typed "int" so never unsigned-long / virtual-long,
+                    # never byte-scalar), the expression is a ``PlaceLoad``
+                    # (not a ``Conditional``; ``_try_direct_load`` returns
+                    # False for it), and the ``store_target_register`` wrap is
+                    # unread on this path (its only readers live in
+                    # ``_generate_binary_operation_expression``).
+                    self.ax_clear()
+                    operand = self._materialize_address_plan(plan)
+                    self._emit_resolved_load(operand)
+                    direct_register = self.pinned_register.get(destination)
+                    if direct_register is None:
+                        direct_register = self.register_aliased_globals.get(destination)
+                    self._store_accumulator_to_local(destination, direct_register=direct_register)
+                else:
+                    # ``destination = *(shape)`` — drive ``resolve_address`` from
+                    # the producing ``Address``'s deref-free ``shape`` so the
+                    # static field layout (offset / width / decay / bitfield) and
+                    # the width-aware ``mov`` / ``movzx`` terminal are derived by
+                    # the EXACT helpers the ``ir.Access`` member-load path used.
+                    # The value lands in the accumulator; the store-to-local tail
+                    # is the same one ``emit_store_local`` runs after evaluating a
+                    # ``PlaceLoad`` expression.
+                    address_op = self._ir_address_ops[address]
+                    shape = self._ir_address_with_index(address_op)
+                    self.emit_store_local(expression=PlaceLoad(line=shape.line, place=shape), name=destination)
             case ir.Store(address=address, value=value):
                 # ``*(shape) = value`` — drive the EXISTING member-store path
                 # from the producing ``Address``'s deref-free ``shape`` so the
@@ -2112,6 +2144,35 @@ class EmissionMixin:
                 self.generate_statement(PlaceCall(line=shape.line, args=[], place=shape))
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
+
+    def _materialize_address_plan(self, plan: AddressPlan, /) -> MemoryOperand:  # noqa: PLR6301
+        """Emit the plan's deferred base/index code; return the terminal operand.
+
+        Phase-1 dot-member plans are pure displacement: nothing is emitted
+        (parity with the legacy static-base resolution).
+        """
+        # Guard against plan shapes the materializer does not yet support.
+        # Future tasks extend the materializer in lockstep with the planner;
+        # failing loudly here prevents a silent garbage operand if that
+        # invariant is violated.
+        if plan.terms or plan.horner or not isinstance(plan.base, str):
+            message = f"unmaterializable AddressPlan shape (base_kind={plan.base_kind!r}, terms={len(plan.terms)})"
+            raise NotImplementedError(message)
+
+        # Local import: ``MemoryOperand`` lives in generator.py, which imports
+        # this mixin module — a module-level import here would be circular.
+        from cc.codegen.x86.generator import MemoryOperand  # noqa: PLC0415
+
+        return MemoryOperand(
+            base=plan.base,
+            base_kind=plan.base_kind,
+            bitfield=plan.bitfield,
+            decay_to_address=plan.decay_to_address,
+            displacement=plan.displacement,
+            element_size=plan.element_size,
+            field_size=plan.field_size,
+            raw_width=plan.raw_width,
+        )
 
     @staticmethod
     def _merge_pinned_save_filters(
@@ -2252,6 +2313,38 @@ class EmissionMixin:
         if info is None:
             return False
         return info.bit_width is not None
+
+    def _plan_ir_address(self, address: ir.Address, /) -> AddressPlan | None:
+        """Derive the pure AddressPlan for *address*, or None if not yet plannable.
+
+        Phase-1 coverage grows shape class by shape class; a None return routes
+        the op through the legacy AST re-seat path. Planning is PURE — no code
+        is emitted here (every phase-1 plan is folded; the consuming terminal
+        materializes it).
+        """
+        shape = address.shape
+        if address.indices:
+            return None  # dynamic-index shapes arrive in a later task
+        if address.base_value is not None:
+            return None  # arrow/deref shapes carry base_value; not planned yet
+        if isinstance(shape, MemberPlace) and isinstance(shape.base, VariablePlace):
+            # ``obj.field`` dot access on a named struct value.  Mirrors the
+            # MemoryOperand the legacy ``resolve_address`` dot arm builds:
+            # pure label/frame base + field displacement, decaying to the
+            # field address for array-typed and struct-value members.
+            base_operand, info = self._derive_dot_member_layout(shape)
+            is_struct_value = info.type_name.startswith("struct ") and not info.type_name.endswith("*")
+            return AddressPlan(
+                base=base_operand,
+                base_kind=self._member_base_kind(shape),
+                bitfield=info if info.bit_width is not None else None,
+                decay_to_address=info.field_size != info.element_size or is_struct_value,
+                displacement=info.byte_offset,
+                element_size=info.element_size,
+                field_size=info.field_size,
+                line=shape.line,
+            )
+        return None
 
     @staticmethod
     def _rep_width_suffix(element_size: int, /) -> str:
@@ -4987,6 +5080,10 @@ class EmissionMixin:
         # later ``Load`` / ``Store`` / ``AddressOf`` consumes.  Record each by
         # its destination temp so the consumer can recover its ``shape`` (the
         # deref-free place driving the static layout in ``resolve_address``).
+        # Plannable shapes additionally record their pure ``AddressPlan`` so
+        # the migrated terminals materialize the operand without re-walking
+        # the AST shape.
         self._ir_address_ops: dict[str, ir.Address] = {}
+        self._ir_address_plans: dict[str, AddressPlan] = {}
         for instruction in body:
             self._lower_ir_instruction(instruction)
