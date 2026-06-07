@@ -675,6 +675,58 @@ def test_multidim_three_dimensional_load_plans_three_terms() -> None:
     assert [term.scale for term in plan.terms] == [48, 12, 4]
 
 
+def test_plans_recorded_before_emission() -> None:
+    """Every ir.Address plan is recorded before body emission begins.
+
+    Mechanism: monkeypatch ``_plan_ir_address`` to snapshot ``len(self.lines)``
+    at each call, and monkeypatch ``lower_ir_body`` to snapshot
+    ``len(self.lines)`` at its entry point (the moment body emission starts).
+    After compilation the test asserts that every ``_plan_ir_address`` call
+    happened with a smaller line count than the corresponding ``lower_ir_body``
+    entry — i.e. all planning occurred before any body instruction was emitted.
+
+    With HEAD's lazy path the planning calls fire INSIDE ``lower_ir_body``, so
+    their line-count snapshots are >= the entry snapshot; the assertion fails,
+    confirming the test detects the pre-pass ordering requirement.  After the
+    eager pre-pass lands the calls fire before the function label is emitted,
+    making their snapshots strictly less than the entry snapshot.
+    """
+    plan_call_line_counts: list[int] = []
+    lower_ir_body_entry_line_counts: list[int] = []
+    original_plan = X86CodeGenerator._plan_ir_address  # noqa: SLF001
+    original_lower = X86CodeGenerator.lower_ir_body
+
+    def plan_spy(self: X86CodeGenerator, address_op: object, /) -> object:
+        plan_call_line_counts.append(len(self.lines))
+        return original_plan(self, address_op)
+
+    def lower_spy(self: X86CodeGenerator, body: object, /) -> None:
+        lower_ir_body_entry_line_counts.append(len(self.lines))
+        original_lower(self, body)
+
+    X86CodeGenerator._plan_ir_address = plan_spy  # type: ignore[method-assign] # noqa: SLF001
+    X86CodeGenerator.lower_ir_body = lower_spy  # type: ignore[method-assign]
+    try:
+        _generate(ARROW_STORE_SOURCE)
+    finally:
+        X86CodeGenerator._plan_ir_address = original_plan  # type: ignore[method-assign] # noqa: SLF001
+        X86CodeGenerator.lower_ir_body = original_lower  # type: ignore[method-assign]
+
+    assert plan_call_line_counts, "no _plan_ir_address calls recorded — source has no ir.Address"
+    assert lower_ir_body_entry_line_counts, "no lower_ir_body calls recorded"
+    # Every planning call must precede body emission: its line-count snapshot
+    # must be strictly less than the lowest lower_ir_body entry snapshot seen
+    # across the entire compilation (functions are processed sequentially, so
+    # the minimum entry snapshot bounds the earliest body-emission point).
+    minimum_body_entry = min(lower_ir_body_entry_line_counts)
+    for count in plan_call_line_counts:
+        assert count < minimum_body_entry, (
+            f"_plan_ir_address called at line count {count}, "
+            f"but lower_ir_body entry was at {minimum_body_entry} — "
+            "planning occurred during body emission (lazy path), not before it"
+        )
+
+
 def test_pointer_to_array_load_plans_outer_row_stride() -> None:
     """``p[i][j]`` over ``int (*p)[3]`` plans a pointer-base Horner plan.
 

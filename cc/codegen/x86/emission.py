@@ -2347,11 +2347,18 @@ class EmissionMixin:
                 # fallbacks (the address-of CompileError diagnostic and the
                 # mask/shift read-modify-write).  The ride-along disappears
                 # when those two terminals grow native bitfield handling.
-                plan = self._plan_ir_address(instruction)
-                if plan is not None:
-                    self._ir_address_plans[destination] = plan
-                if plan is None or plan.bitfield is not None:
-                    self._ir_address_ops[destination] = instruction
+                #
+                # CONSUME-ONLY: ``_plan_ir_addresses`` ran as an eager pre-pass
+                # in ``generate_function`` before ``_allocate_ir_temps``, so
+                # every ``ir.Address`` destination is already in either
+                # ``_ir_address_plans`` or ``_ir_address_ops`` (or both for
+                # the bitfield ride-along).  No planning happens here.
+                if destination not in self._ir_address_plans and destination not in self._ir_address_ops:
+                    message = (
+                        f"ir.Address destination {destination!r} not found in eager pre-pass dicts — "
+                        "_plan_ir_addresses must be called before lower_ir_body"
+                    )
+                    raise NotImplementedError(message)
             case ir.Load(address=address, destination=destination):
                 plan = self._ir_address_plans.get(address)
                 if plan is not None:
@@ -2841,6 +2848,31 @@ class EmissionMixin:
         # itself roots at the same ``DereferencePlace(VariablePlace)``, so the
         # member-place planner derives the base from the shape directly.
         return self._plan_member_place(address.shape)
+
+    def _plan_ir_addresses(self, body: list[ir.Instruction], /) -> None:
+        """Plan every ``ir.Address`` in *body* (including Switch arms) eagerly.
+
+        Runs in ``generate_function`` after auto-pin finalizes locals/params
+        and before ``_allocate_ir_temps``, so the plans' declared clobber
+        facts exist at IR-temp allocation time (consumed in phase 2's
+        clobber-aware coloring).  Recording semantics are identical to the
+        (now consume-only) ``case ir.Address`` arm: plannable ops record
+        their plan; unplannable ops and bitfield ride-alongs record the op
+        for the legacy / diagnostic arms.
+        """
+        for instruction in body:
+            if isinstance(instruction, ir.Switch):
+                for switch_case in instruction.cases:
+                    self._plan_ir_addresses(switch_case.body)
+                continue
+            if not isinstance(instruction, ir.Address):
+                continue
+            destination = instruction.destination
+            plan = self._plan_ir_address(instruction)
+            if plan is not None:
+                self._ir_address_plans[destination] = plan
+            if plan is None or plan.bitfield is not None:
+                self._ir_address_ops[destination] = instruction
 
     def _plan_member_place(self, shape: Place, /) -> AddressPlan | None:
         """Plan one deref-free / arrow-rooted member ``shape`` (pure; no emission).
@@ -4715,7 +4747,20 @@ class EmissionMixin:
         # for the temporaries that stayed in memory so the frame size is
         # correct before the prologue is emitted.  A temp that won a register
         # home skips its frame slot.
+        #
+        # Address plans are built eagerly here — before IR-temp coloring —
+        # so their declared ``clobbers`` sets exist when ``_allocate_ir_temps``
+        # colors temps onto registers (phase 2 consumes them to keep temps
+        # out of registers that the plan's materialization clobbers).  The
+        # ``case ir.Address`` arm in ``_lower_ir_instruction`` is consume-only:
+        # it reads the pre-populated dicts rather than calling ``_plan_ir_address``
+        # again.  ``ir_body is not None`` iff ``ir_function is not None``
+        # (both set in the same ``isinstance(function, ir.Function)`` branch),
+        # so a single guard covers both.
         if ir_function is not None:
+            self._ir_address_ops = {}
+            self._ir_address_plans = {}
+            self._plan_ir_addresses(ir_function.body)
             self._allocate_ir_temps(ir_function=ir_function)
         if ir_body is not None:
             for temp in self._collect_ir_temps(ir_body):
@@ -5832,15 +5877,13 @@ class EmissionMixin:
     def lower_ir_body(self, body: list[ir.Instruction]) -> None:
         """Generate x86 assembly from a flat IR instruction list."""
         # ``Address`` ops emit no code; they name a resolved address that a
-        # later ``Load`` / ``Store`` / ``AddressOf`` consumes.  Recording is
-        # exclusive per shape: a plannable shape records its pure
-        # ``AddressPlan`` (the native path the terminals consume first); an
-        # unplannable RESIDUAL shape records the op itself so the consumer
-        # can recover its ``shape`` for the legacy AST re-seat (see
-        # ``_plan_ir_address`` for the residual census; bitfield member
-        # shapes record both — the ride-along in the ``ir.Address`` case).
-        self._ir_address_ops: dict[str, ir.Address] = {}
-        self._ir_address_plans: dict[str, AddressPlan] = {}
+        # later ``Load`` / ``Store`` / ``AddressOf`` consumes.  The dicts are
+        # populated by the ``_plan_ir_addresses`` eager pre-pass in
+        # ``generate_function`` before ``_allocate_ir_temps`` runs; the
+        # ``case ir.Address`` arm in ``_lower_ir_instruction`` is consume-only
+        # (it asserts that the destination is already present).  See
+        # ``_plan_ir_address`` for the residual census; bitfield member shapes
+        # record both — the ride-along in the ``ir.Address`` case.
         for instruction in body:
             self._lower_ir_instruction(instruction)
 
