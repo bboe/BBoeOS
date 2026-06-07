@@ -5066,6 +5066,50 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if guarded:
             self.emit(f"        pop {self.target.si_register}")
 
+    def _store_accumulator_to_local(self, name: str, /, *, direct_register: str | None) -> None:
+        """Store the accumulator into local *name* (pinned register / byte / word tail).
+
+        The shared tail of :meth:`emit_store_local`, extracted so the native
+        ``ir.Load`` terminal can run the byte-identical store + AX-tracking
+        sequence after materializing an AddressPlan load.
+        """
+        if direct_register is not None:
+            if direct_register != self.target.acc:
+                # When storing into a 16-bit register from a 32-bit acc,
+                # use the low-word of acc to avoid an invalid operand mix.
+                source = self.target.low_word(self.target.acc) if len(direct_register) < len(self.target.acc) else self.target.acc
+                self.emit(f"        mov {direct_register}, {source}")
+            self.ax_is_byte = False
+        elif self._is_byte_scalar(name):
+            # Byte-scalar locals and globals store as a single byte;
+            # the source value is either already byte-valued
+            # (``ax_is_byte``) or sits in AX's low byte (wider
+            # operands truncate to 8 bits on store).  Either way,
+            # writing AL alone leaves the neighbouring byte untouched.
+            self.emit(f"        mov [{self._local_address(name)}], al")
+            # AL still holds the stored byte but AH may be stale: the
+            # store is itself an AL-only consumer, which lets
+            # :meth:`peephole_dead_ah` drop the zero-extend emitted by a
+            # preceding byte load.  Mark AX as byte-valued so downstream
+            # compare / test paths emit ``cmp al`` / ``test al`` and
+            # don't read the high byte.  Any promotion to a full word
+            # goes through the Var-load path which re-issues the load.
+            self.ax_is_byte = True
+        else:
+            self.emit(f"        mov [{self._local_address(name)}], {self.target.acc}")
+            self.ax_is_byte = False
+        self.ax_local = name
+        # ``mov ax, D / <operation> ax, ... / mov D, ax`` sequences are fused
+        # by the late peephole passes into a single ``<operation> D, ...`` (or
+        # into a compute-into-pinned-register form), neither of which
+        # leaves AX holding the new value.  When that fusion applies,
+        # the ``ax_local`` tracking we just set would let a downstream
+        # read of ``name`` skip its reload and pick up the pre-sequence
+        # AX contents instead.  Invalidate the tracking here so the
+        # reload happens naturally.
+        if self._peephole_will_strand_ax():
+            self.ax_local = None
+
     def _tally_auto_pin_counts(self, node: Node, /, *, role: str = "other", state: AutoPinTallyState) -> None:
         """Tally per-var reference counts for :meth:`_select_auto_pin_candidates`.
 
@@ -6438,42 +6482,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.store_target_register = direct_register
         self.generate_expression(expression)
         self.store_target_register = previous_store_target
-        if direct_register is not None:
-            if direct_register != self.target.acc:
-                # When storing into a 16-bit register from a 32-bit acc,
-                # use the low-word of acc to avoid an invalid operand mix.
-                source = self.target.low_word(self.target.acc) if len(direct_register) < len(self.target.acc) else self.target.acc
-                self.emit(f"        mov {direct_register}, {source}")
-            self.ax_is_byte = False
-        elif self._is_byte_scalar(name):
-            # Byte-scalar locals and globals store as a single byte;
-            # the source value is either already byte-valued
-            # (``ax_is_byte``) or sits in AX's low byte (wider
-            # operands truncate to 8 bits on store).  Either way,
-            # writing AL alone leaves the neighbouring byte untouched.
-            self.emit(f"        mov [{self._local_address(name)}], al")
-            # AL still holds the stored byte but AH may be stale: the
-            # store is itself an AL-only consumer, which lets
-            # :meth:`peephole_dead_ah` drop the zero-extend emitted by a
-            # preceding byte load.  Mark AX as byte-valued so downstream
-            # compare / test paths emit ``cmp al`` / ``test al`` and
-            # don't read the high byte.  Any promotion to a full word
-            # goes through the Var-load path which re-issues the load.
-            self.ax_is_byte = True
-        else:
-            self.emit(f"        mov [{self._local_address(name)}], {self.target.acc}")
-            self.ax_is_byte = False
-        self.ax_local = name
-        # ``mov ax, D / <operation> ax, ... / mov D, ax`` sequences are fused
-        # by the late peephole passes into a single ``<operation> D, ...`` (or
-        # into a compute-into-pinned-register form), neither of which
-        # leaves AX holding the new value.  When that fusion applies,
-        # the ``ax_local`` tracking we just set would let a downstream
-        # read of ``name`` skip its reload and pick up the pre-sequence
-        # AX contents instead.  Invalidate the tracking here so the
-        # reload happens naturally.
-        if self._peephole_will_strand_ax():
-            self.ax_local = None
+        self._store_accumulator_to_local(name, direct_register=direct_register)
 
     def resolve_address(self, place: Place, /) -> MemoryOperand:
         """Resolve *place* to a MemoryOperand, emitting side-effect code as needed.
