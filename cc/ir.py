@@ -1525,6 +1525,25 @@ def _is_arrow_member_store(node: ast_nodes.Node, /) -> bool:
     )
 
 
+def _is_byte_safe_binary_operation(node: ast_nodes.Node, /) -> bool:
+    """Return True for a BinaryOperation whose operands are all leaves or nested byte-safe BinaryOperations.
+
+    The class-1 admission shape: every operand is an ``Int`` literal, a
+    ``Var`` read, or itself a byte-safe ``BinaryOperation`` — the pure
+    arithmetic subfamily whose pre-lowered defs the emission-side store
+    sink replays at the terminal's legacy RHS slot.  A ``PlaceLoad`` /
+    ``Index`` / ``Cast`` / call operand anywhere in the tree rejects the
+    whole RHS (see :func:`_is_byte_safe_store_rhs` for the residual
+    rationale).
+    """
+    if not isinstance(node, ast_nodes.BinaryOperation):
+        return False
+    return all(
+        isinstance(operand, (ast_nodes.Int, ast_nodes.Var)) or _is_byte_safe_binary_operation(operand)
+        for operand in (node.left, node.right)
+    )
+
+
 def _is_byte_safe_store_rhs(node: ast_nodes.Node, /) -> bool:
     """Return True for a member-store RHS whose IR pre-lowering is measured byte-neutral.
 
@@ -1575,9 +1594,22 @@ def _is_byte_safe_store_rhs(node: ast_nodes.Node, /) -> bool:
     ``Index`` (ledger class 3) is re-admitted in phase 2: the store-terminal
     RHS sink replays the def at the legacy post-materialization slot, so the
     pre-lowered temp no longer pays the spill/bounce measured above.
+
+    ``BinaryOperation`` (ledger class 1) is re-admitted in phase 2 for the
+    leaf-operand and pure-binop-chain shapes
+    (:func:`_is_byte_safe_binary_operation`): the store-terminal RHS sink
+    replays the def — or the whole left-spine chain of defs — at the
+    terminal's legacy RHS slot, riding the accumulator between links (the
+    gettimeofday ``(total_ms % 1000) * 1000`` div→mod fusion).  The
+    PlaceLoad-operand subfamily (``p->bytes += q->bytes`` — stdlib.c
+    release/malloc) stays on :class:`Access`: its legacy stack choreography
+    (1-byte pushes around the member loads) cannot be matched by
+    slot-resident temps — documented residual, ledger annotated.
     """
-    return isinstance(node, (ast_nodes.Index, ast_nodes.Int, ast_nodes.PlaceLoad, ast_nodes.String, ast_nodes.Var)) or (
-        isinstance(node, ast_nodes.PlaceAddressOf) and isinstance(node.place, ast_nodes.VariablePlace)
+    return (
+        isinstance(node, (ast_nodes.Index, ast_nodes.Int, ast_nodes.PlaceLoad, ast_nodes.String, ast_nodes.Var))
+        or _is_byte_safe_binary_operation(node)
+        or (isinstance(node, ast_nodes.PlaceAddressOf) and isinstance(node.place, ast_nodes.VariablePlace))
     )
 
 

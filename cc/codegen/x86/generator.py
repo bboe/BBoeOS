@@ -672,6 +672,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # auto-pinned locals declared but not yet stored to).  None
         # means "no info available" — fall back to saving everything.
         self._ir_call_pinned_initialized: dict[int, frozenset[str]] = {}
+        # Sunk store-RHS defs (Task 6a / phase 2): repopulated per IR
+        # function in generate_function; defaulted empty here so the
+        # legacy place-driven store terminals (reachable from non-IR
+        # bodies such as ``main``) can consult it unconditionally —
+        # ``_ir_*`` value names never occur in non-IR bodies, so a stale
+        # previous-function entry can never match there.
+        self._ir_sunk_store_values: dict[str, ir.BinaryOperation | ir.Index] = {}
         self._current_call_pinned_initialized: frozenset[str] | None = None
         # IR temps that won a pool-register home in _allocate_ir_temps.
         # Maps temp name -> register.  Distinct from auto-pinned locals
@@ -3578,7 +3585,17 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         protect_bx = self._bx_holds_pinned_var()
         if protect_bx:
             self.emit(f"        push {self.target.bx_register}")
-        self.generate_expression(value)  # AX = value
+        # Sunk-RHS replay slot (phase 2 Gap B): the subscript terminal's
+        # RHS evaluation point IS its head (RHS-first, before the
+        # unconditional spill across the operand materialization), so a
+        # sunk single-use store-RHS def replays here instead of paying
+        # the dead slot round-trip a pre-lowered temp would.  Both the
+        # sunk dict and the replay helper live on the shared generator
+        # class (EmissionMixin methods on X86CodeGenerator).
+        if isinstance(value, Var) and (sunk_definition := self._ir_sunk_store_values.get(value.name)) is not None:
+            self._emit_sunk_store_value(sunk_definition)  # AX = value
+        else:
+            self.generate_expression(value)  # AX = value
         self.emit(f"        push {self.target.acc}")  # save value on top of stack
         operand = resolve_operand()  # may use BX/AX as scratch
         if operand.field_size not in allowed:

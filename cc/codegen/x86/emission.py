@@ -986,9 +986,22 @@ class EmissionMixin:
         * The intervening instruction is the store's address-producing
           ``ir.Address`` (emits nothing; the consume-only arm touches no
           tracking state).
-        * The store's recorded plan exists and does NOT preserve the
-          accumulator up to the RHS read — for preserving plans Task 5's
-          unpinned accumulator ride already wins.
+        * The store's recorded plan exists and either does NOT preserve
+          the accumulator up to the RHS read (for preserving plans
+          Task 5's unpinned accumulator ride already wins) OR is a
+          ``subscript_terminal`` plan.  The subscript terminal evaluates
+          its RHS at the HEAD of ``_emit_subscript_operand_store``
+          (RHS-first, before the unconditional spill across the operand
+          materialization), so a pre-lowered temp pays a dead slot
+          round-trip there — ``mov [slot], acc`` at the def, ``mov acc,
+          [slot]`` at the head — that the replay removes (the symbol_add
+          ``scope & 0xFF`` +6 anatomy).  Mutual exclusion with Task 5's
+          def+2 phantom skip in
+          :meth:`_collect_ir_deferred_single_use_temps`: a
+          subscript-terminal store's RHS temp would ALSO match that skip
+          (the preserve predicate returns True for subscript plans), but
+          sunk temps are excluded from ``pure_temps`` before the
+          deferred scan runs, so the ride never sees them.
         * Replay safety for the def's own operands: sinking reorders the
           def AFTER the base materialization, which may clobber pool
           registers (AX/BX), so an operand temp homed in one of them
@@ -996,11 +1009,34 @@ class EmissionMixin:
           memory-resident (:meth:`_collect_ir_index_operand_temps`
           excludes it from allocation; its frame slot is never reused),
           so it replays safely.  A :class:`ir.BinaryOperation` reading
-          any ``_ir_*`` temp is rejected conservatively — this pre-scan
-          runs BEFORE :meth:`_allocate_ir_temps`, so the operand's home
-          is unknowable here.  Named locals/params need no gate: the
+          any ``_ir_*`` temp is rejected conservatively (the chain shape
+          below is the one structured exception) — this pre-scan runs
+          BEFORE :meth:`_allocate_ir_temps`, so the operand's home is
+          unknowable here.  Named locals/params need no gate: the
           replayed bytes are exactly the legacy inline walk's, so their
           pinned-register interactions match the established behavior.
+
+        CHAIN extension (phase 2 Gap A1, the gettimeofday
+        ``(total_ms % 1000) * 1000`` anatomy): consecutive
+        :class:`ir.BinaryOperation` defs ``[d1; ...; dn; ir.Address;
+        ir.Store]`` sink as a unit when each intermediate def's
+        destination is a single-use temp consumed exactly as the NEXT
+        def's LEFT operand, every right operand is a non-``_ir_*`` leaf,
+        and ``dn``'s destination is the store's single-use VALUE.  Every
+        chain temp (intermediate and final) is suppressed at its arm and
+        excluded from coloring / frame slots;
+        :meth:`_emit_sunk_store_value` replays d1..dn sequentially at
+        the terminal's RHS slot, riding the accumulator between links —
+        the exact nested-expression walk the legacy inline RHS took.
+        Unlike a lone def, a chain sinks for EVERY planned store (the
+        preserve verdict is irrelevant): an accumulator-preserving plan
+        lets only the FINAL value ride ``ax_local``; the intermediate
+        links still pay a slot round-trip when emitted standalone
+        (Task 4's DX reservation forces the div→mod remainder temp into
+        a frame slot — ``mov [slot], edx`` / ``mov acc, [slot]`` vs the
+        legacy ``mov acc, dx``).  :class:`ir.Index` stays single-def
+        only — an Index def feeding a chain keeps the standalone slot
+        path.
 
         Conservative: only the flat top-level instruction order is
         considered (Switch-arm triples are never sunk), matching the
@@ -1012,29 +1048,61 @@ class EmissionMixin:
         for instruction in body:
             for name in regalloc.instruction_uses(instruction=instruction):
                 use_counts[name] = use_counts.get(name, 0) + 1
-        result: dict[str, ir.Instruction] = {}
+        result: dict[str, ir.BinaryOperation | ir.Index] = {}
         for position, instruction in enumerate(body):
-            if not isinstance(instruction, (ir.BinaryOperation, ir.Index)):
+            if not isinstance(instruction, ir.Store) or position < 2:
                 continue
-            destination = instruction.destination
-            if not destination.startswith("_ir_") or use_counts.get(destination, 0) != 1:
+            address_instruction = body[position - 1]
+            if not isinstance(address_instruction, ir.Address) or instruction.address != address_instruction.destination:
                 continue
-            if isinstance(instruction, ir.BinaryOperation) and any(
-                isinstance(operand, str) and operand.startswith("_ir_") for operand in (instruction.left, instruction.right)
-            ):
-                continue
-            if position + 2 >= len(body):
-                continue
-            address_instruction = body[position + 1]
-            store = body[position + 2]
-            if not (isinstance(address_instruction, ir.Address) and isinstance(store, ir.Store)):
-                continue
-            if store.address != address_instruction.destination or store.value != destination:
+            value = instruction.value
+            if not (isinstance(value, str) and value.startswith("_ir_") and use_counts.get(value, 0) == 1):
                 continue
             plan = self._ir_address_plans.get(address_instruction.destination)
-            if plan is None or self._plan_preserves_accumulator_for_store_rhs(plan):
+            if plan is None:
                 continue
-            result[destination] = instruction
+            # Walk the def chain backwards from the final def at
+            # ``position - 2``.  ``chain`` collects dn..d1 (reverse
+            # source order; replay recursion restores it).
+            chain: list[ir.BinaryOperation | ir.Index] = []
+            chain_complete = False
+            expected_destination = value
+            chain_position = position - 2
+            while chain_position >= 0:
+                definition = body[chain_position]
+                if isinstance(definition, ir.Index) and not chain and definition.destination == expected_destination:
+                    # Lone class-3 def; ir.Index never links a chain.
+                    chain.append(definition)
+                    chain_complete = True
+                    break
+                if not isinstance(definition, ir.BinaryOperation) or definition.destination != expected_destination:
+                    break
+                if chain and use_counts.get(expected_destination, 0) != 1:
+                    # Intermediate link temp read elsewhere too — its
+                    # standalone emission must survive.
+                    break
+                if isinstance(definition.right, str) and definition.right.startswith("_ir_"):
+                    # Right operands must be leaves: the replay rides the
+                    # accumulator through the LEFT spine only.
+                    break
+                if isinstance(definition.left, str) and definition.left.startswith("_ir_"):
+                    # Chain link: the left operand must be produced by the
+                    # def immediately above (checked on the next pass).
+                    chain.append(definition)
+                    expected_destination = definition.left
+                    chain_position -= 1
+                    continue
+                chain.append(definition)
+                chain_complete = True
+                break
+            if not chain_complete:
+                continue
+            if len(chain) == 1 and self._plan_preserves_accumulator_for_store_rhs(plan) and not plan.subscript_terminal:
+                # Lone def on a preserving non-subscript plan: Task 5's
+                # unpinned accumulator ride already wins; do not sink.
+                continue
+            for definition in chain:
+                result[definition.destination] = definition
         return result
 
     def _emit_function_pointer_call(
@@ -1259,7 +1327,14 @@ class EmissionMixin:
         exactly as it does after the legacy ``_emit_place_store`` dispatch.
         """
         assert isinstance(plan.base, str)
-        self.generate_expression(value)
+        # Sunk-RHS replay slot (phase 2 Gap A1): deref-store plans preserve
+        # the accumulator (rhs first, bare SI pointer load), so only CHAIN
+        # finals can arrive sunk here; the replay slot is the legacy
+        # RHS-first head, mirroring ordering 3 of _emit_planned_member_store.
+        if isinstance(value, Var) and (sunk_definition := self._ir_sunk_store_values.get(value.name)) is not None:
+            self._emit_sunk_store_value(sunk_definition)
+        else:
+            self.generate_expression(value)
         self._emit_load_var(plan.base, register=self.target.si_register)
         self._emit_store_accumulator_at_width(destination=f"[{self.target.si_register}]", width=plan.field_size)
         self.ax_clear()
@@ -1427,24 +1502,32 @@ class EmissionMixin:
             self._emit_bitfield_write_literal(operand.bitfield, addr=address, value=literal)
             return
         if plan.base_preserves_accumulator:
-            # Ordering 3 (accumulator-preserving base): in the common case the
+            # Ordering 3 (accumulator-preserving base): for a LONE def the
             # sink gate excludes this path (``_plan_preserves_accumulator_for_store_rhs``
             # returns True), so ``value`` is evaluated first and rides the
             # preserved accumulator across the base materialization — Task 5's
             # unpinned accumulator ride.
             #
-            # Sunk-RHS replay slot (Task 6a hardening): a preserving plan
-            # normally declares no AX clobber, but if future drift produced
-            # one that declares "ax" in plan.clobbers, the sink gate would
-            # admit the temp and route here.  Mirroring ordering 1's defensive
-            # slot: the base materializes first (so the sunk replay sees the
-            # same post-materialization state ordering 4 provides), and the
-            # replay or generate_expression follows exactly as ordering 1.
-            # Today this inner branch is statically unreachable under the
-            # current gate.
+            # Sunk-RHS replay slot (phase 2 Gap A1): a CHAIN of
+            # BinaryOperation defs sinks regardless of the preserve verdict
+            # (the intermediate links pay slot round-trips when emitted
+            # standalone — the gettimeofday anatomy), so chain finals DO
+            # arrive here.  Replay at the legacy RHS-first slot: the chain
+            # value rides the preserved accumulator across the bare base
+            # load exactly as the non-sunk branch's generate_expression
+            # result does.  The materialize-first sub-order survives as a
+            # defensive slot for planner drift (Task 6a hardening): a
+            # preserving base whose plan declared an AX clobber would fail
+            # the preserve predicate, admit a LONE def, and need ordering
+            # 1's post-materialization slot — statically unreachable today
+            # (no preserving plan declares "ax").
             if isinstance(value, Var) and (sunk_definition := self._ir_sunk_store_values.get(value.name)) is not None:
-                operand = self._materialize_address_plan(plan)
-                self._emit_sunk_store_value(sunk_definition)
+                if self._plan_preserves_accumulator_for_store_rhs(plan):
+                    self._emit_sunk_store_value(sunk_definition)
+                    operand = self._materialize_address_plan(plan)
+                else:
+                    operand = self._materialize_address_plan(plan)
+                    self._emit_sunk_store_value(sunk_definition)
                 self._emit_resolved_field_store(operand, value)
             else:
                 self.generate_expression(value)
@@ -1606,9 +1689,31 @@ class EmissionMixin:
         base materialization reads pointer slots — the legacy compiler
         used exactly this base-first-then-RHS order, so observable
         semantics match the established behavior.
+
+        Chain replay (phase 2 Gap A1): when a ``BinaryOperation`` def's
+        LEFT operand is itself a sunk temp, the linked def replays FIRST
+        (recursively, restoring d1..dn source order), leaving the link
+        value in the accumulator; ``ax_local`` is then pointed at the
+        link temp so the consumer's left-operand read hits the
+        ``generate_expression`` already-in-AX fast path — zero bytes
+        between chain links, exactly the state the legacy
+        nested-expression walk carried between the inner and outer
+        operations.  ``division_remainder`` parity: only ``mul`` /
+        ``div`` emission mutates that state, and between a chain def's
+        site and its replay only suppressed defs (emit nothing), folded
+        Addresses (emit nothing), and base materializations (bare
+        register loads / resolved loads — no ``mul``/``div``) sit, so a
+        replayed ``%`` hits the same remainder-fusion verdict
+        (``mov acc, dx``) it would have hit at the def site.
         """
         match definition:
             case ir.BinaryOperation(operation=operation, left=left, right=right):
+                if isinstance(left, str) and (linked_definition := self._ir_sunk_store_values.get(left)) is not None:
+                    self._emit_sunk_store_value(linked_definition)
+                    # The link value is in the accumulator (the replay's
+                    # trailing ax_clear dropped the tracking); restore it
+                    # so the consumer's left-operand read emits nothing.
+                    self.ax_local = left
                 self.generate_expression(
                     BinaryOperation(left=self._ir_value_to_ast(left), operation=operation, right=self._ir_value_to_ast(right))
                 )
@@ -5215,6 +5320,16 @@ class EmissionMixin:
         # again.  ``ir_body is not None`` iff ``ir_function is not None``
         # (both set in the same ``isinstance(function, ir.Function)`` branch),
         # so a single guard covers both.
+        # These two dicts reset UNCONDITIONALLY — every function, not only
+        # IR-lowered ones — for defensive uniformity.  Today their only
+        # readers are the store-terminal helpers (``_emit_planned_*`` /
+        # ``_emit_sunk_store_value`` / ``_materialize_member_index_plan``),
+        # all reached solely through ``_lower_ir_instruction`` on the IR
+        # path, so the AST path never consults them.  Resetting them for
+        # every function (rather than gating on ``ir_function is not None``)
+        # guarantees no stale cross-function entry can ever be read should a
+        # future AST-path consumer be added.
+        self._ir_sunk_store_values = {}
         if ir_function is not None:
             self._ir_address_ops = {}
             self._ir_address_plans = {}
@@ -5226,7 +5341,7 @@ class EmissionMixin:
             # pre-allocation below, both of which must skip sunk temps (no
             # register home, no frame slot — the def replays inside the
             # store terminal).
-            self._ir_sunk_store_values: dict[str, ir.BinaryOperation | ir.Index] = self._collect_ir_sunk_store_values(ir_function.body)
+            self._ir_sunk_store_values = self._collect_ir_sunk_store_values(ir_function.body)
             self._allocate_ir_temps(ir_function=ir_function)
         if ir_body is not None:
             for temp in self._collect_ir_temps(ir_body):
