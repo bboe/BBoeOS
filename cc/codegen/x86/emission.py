@@ -918,6 +918,113 @@ class EmissionMixin:
             else:
                 self.emit(f"_l_{vname}: {int_directive}")
 
+    def _emit_planned_increment_decrement(self, plan: AddressPlan, /, *, delta: int, is_postfix: bool) -> None:
+        """Read-modify-write ``*(plan) += delta`` (native ``ir.IncrementDecrement`` path).
+
+        Mirrors the legacy generic arm of
+        :meth:`~cc.codegen.x86.generator.X86CodeGenerator._emit_place_increment_decrement`
+        step for step — the ``place = place ± delta`` store through the
+        accumulator-preserving member store, the discarded-value reload, and
+        the postfix pre-update recovery — materializing the plan everywhere
+        the legacy arm re-resolved the place (three base loads pre-peephole;
+        the redundancy folds away identically downstream).  The ``± Int``
+        update reproduces the immediate fast path of
+        ``_generate_binary_operation_expression`` (1-byte ``inc``/``dec`` for
+        a unit delta), and the store calls the SAME width-aware field-store
+        terminal ``_emit_resolved_field_store`` bottoms out in (the plan gate
+        excludes bitfields, the only shape that terminal treats differently).
+        """
+        delta_value = abs(delta)
+        # ``_emit_member_scalar_resolved_store`` lead-in clear (which also
+        # covers the ``_emit_place_load`` lead-in — both are tracking-only),
+        # then the rhs ``PlaceLoad(place) ± delta`` evaluation
+        # (accumulator-preserving ordering: rhs first, then the bare base
+        # load, then the store).
+        self.ax_clear()
+        operand = self._materialize_address_plan(plan)
+        self._emit_resolved_load(operand)
+        if delta_value == 1:
+            self.emit(f"        {'inc' if delta > 0 else 'dec'} {self.target.acc}")
+        else:
+            self.emit(f"        {'add' if delta > 0 else 'sub'} {self.target.acc}, {delta_value}")
+        self.ax_clear()
+        operand = self._materialize_address_plan(plan)
+        address = self._build_address(operand.base, operand.displacement, index=operand.index or "")
+        allowed_sizes = (1, 2, 4) if self.target.int_size == 4 else (1, 2)
+        if operand.field_size not in allowed_sizes:
+            message = f"writing field (size {operand.field_size}) not yet supported; use asm()"
+            raise CompileError(message)
+        self._emit_field_store(addr=address, field_size=operand.field_size)
+        # Discarded-value reload (the legacy statement form still reloads),
+        # then the postfix form recovers the pre-update value.
+        self.ax_clear()
+        operand = self._materialize_address_plan(plan)
+        self._emit_resolved_load(operand)
+        if is_postfix:
+            self.emit(f"        {'sub' if delta > 0 else 'add'} {self.target.acc}, {delta_value}")
+            self.ax_clear()
+
+    def _emit_planned_indirect_call(self, plan: AddressPlan, /) -> None:
+        """Call through a planned function-pointer slot (native ``ir.IndirectCall`` path).
+
+        Mirrors the legacy ``generate_indexed_call`` shape for the
+        zero-argument, discarded-result statement (the only producer): the
+        conservative pinned-register save default (``pusha`` at >= 3 saves —
+        the return value is always discarded here), the per-base-kind slot
+        walk, the indirect ``call``, and the restore tail.  The slot walk
+        calls the SAME emitting helpers per arm:
+
+        - constant index (no terms) — a static base folds the displacement
+          into one ``mov acc, [base+disp]``; a pointer base loads its VALUE,
+          ``add``s the displacement, and loads the slot through ``acc``.
+        - dynamic index (one term) — the SI scratch guard, the base seeded
+          into SI (``lea`` for static bases, the pointer VALUE load
+          otherwise), the index evaluated into the accumulator and scaled
+          (``_emit_scale_index``), then ``add acc, si`` + the slot load.
+        """
+        self.si_local = None
+        clobbers: frozenset[str] = frozenset(self.target.register_pool)
+        saved = self._pinned_registers_to_save(clobbers)
+        use_pusha = len(saved) >= 3
+        if use_pusha:
+            self.emit("        pusha")
+        else:
+            for register in saved:
+                self.emit(f"        push {register}")
+        acc = self.target.acc
+        si = self.target.si_register
+        if not plan.terms:
+            if plan.base_kind == "pointer":
+                assert isinstance(plan.base, str)
+                self._emit_load_var(plan.base, register=acc)
+                if plan.displacement:
+                    self.emit(f"        add {acc}, {plan.displacement}")
+                self.emit(f"        mov {acc}, [{acc}]")
+            else:
+                addr = f"{plan.base}+{plan.displacement}" if plan.displacement else plan.base
+                self.emit(f"        mov {acc}, [{addr}]")
+        else:
+            term = plan.terms[0]
+            pointer_name = plan.base if plan.base_kind == "pointer" else None
+            assert pointer_name is None or isinstance(pointer_name, str)
+            guarded = self._si_scratch_guard_begin(pointer_name)
+            if pointer_name is not None:
+                self._emit_load_var(pointer_name, register=si)
+            else:
+                self.emit(f"        lea {si}, [{plan.base}]")
+            self.generate_expression(self._ir_value_to_ast(term.index_value))
+            self._emit_scale_index(acc, scale=term.scale)
+            self.emit(f"        add {acc}, {si}")
+            self.emit(f"        mov {acc}, [{acc}]")
+            self._si_scratch_guard_end(guarded=guarded)
+        self.emit(f"        call {acc}")
+        if use_pusha:
+            self.emit("        popa")
+        else:
+            for register in reversed(saved):
+                self.emit(f"        pop {register}")
+        self.ax_clear()
+
     def _emit_planned_member_store(self, plan: AddressPlan, value: Node, /) -> None:
         """Store *value* through a planned member address (native ``ir.Store`` path).
 
@@ -2124,13 +2231,13 @@ class EmissionMixin:
                 self._generate_ir_switch(instruction)
             case ir.Address(destination=destination):
                 # Pure structured-reference value: emits no code on its own.
-                # Plannable shapes record an AddressPlan (native path for the
-                # migrated terminals); the op itself is also recorded for the
-                # legacy AST re-seat because the not-yet-migrated terminals
-                # (Store / AddressOf / IncrementDecrement / IndirectCall) can
-                # consume the same plannable shape class — the op recording
-                # (and the re-seat path) is deleted once the planner and every
-                # terminal are total.
+                # Plannable shapes record an AddressPlan (the native path —
+                # every terminal now consumes plans); the op itself is also
+                # recorded because the PLANNER is not yet total: unplannable
+                # shapes (and the bitfield-gated AddressOf / IncrementDecrement
+                # plans) still route through the legacy AST re-seat.  The op
+                # recording (and the re-seat path) is deleted once the planner
+                # covers every lowered shape.
                 plan = self._plan_ir_address(instruction)
                 if plan is not None:
                     self._ir_address_plans[destination] = plan
@@ -2215,35 +2322,78 @@ class EmissionMixin:
                 # match byte-for-byte.
                 self.ax_clear()
             case ir.AddressOf(address=address, destination=destination):
-                # ``destination = &(shape)`` — drive the EXISTING address-of
-                # path from the producing ``Address``'s deref-free ``shape`` so
-                # the static field layout (offset) and the ``lea`` terminal are
-                # produced by the EXACT helper the legacy ``PlaceAddressOf``
-                # expression used (``_emit_place_address_of``).  The address
-                # lands in the accumulator and the store-to-local tail matches
-                # the one ``emit_store_local`` runs after a ``PlaceAddressOf``
-                # expression, so this is byte-neutral with the prior temp+Block.
-                shape = self._ir_address_with_index(self._ir_address_ops[address])
-                self.emit_store_local(expression=PlaceAddressOf(line=shape.line, place=shape), name=destination)
+                plan = self._ir_address_plans.get(address)
+                if plan is not None and plan.base_kind == "pointer" and plan.bitfield is None:
+                    # Native path: the only ``ir.AddressOf`` producer is the
+                    # arrow-member ``&p->field`` shape, whose plan is a
+                    # pointer base + pure field displacement.  Run the SAME
+                    # emitting core the legacy arrow arm bottoms out in
+                    # (pointer VALUE into the accumulator + one ``add``) and
+                    # the exact store-to-local tail ``emit_store_local`` runs
+                    # — the other ``emit_store_local`` branches are provably
+                    # dead here for the same reasons as the native ``ir.Load``
+                    # case (int-typed destination, non-constant expression).
+                    # A bitfield member routes to the legacy path so its
+                    # CompileError diagnostic fires unchanged.
+                    assert isinstance(plan.base, str)
+                    self._emit_pointer_member_address_of(plan.base, byte_offset=plan.displacement)
+                    direct_register = self.pinned_register.get(destination)
+                    if direct_register is None:
+                        direct_register = self.register_aliased_globals.get(destination)
+                    self._store_accumulator_to_local(destination, direct_register=direct_register)
+                else:
+                    # ``destination = &(shape)`` — drive the EXISTING address-of
+                    # path from the producing ``Address``'s deref-free ``shape`` so
+                    # the static field layout (offset) and the ``lea`` terminal are
+                    # produced by the EXACT helper the legacy ``PlaceAddressOf``
+                    # expression used (``_emit_place_address_of``).  The address
+                    # lands in the accumulator and the store-to-local tail matches
+                    # the one ``emit_store_local`` runs after a ``PlaceAddressOf``
+                    # expression, so this is byte-neutral with the prior temp+Block.
+                    shape = self._ir_address_with_index(self._ir_address_ops[address])
+                    self.emit_store_local(expression=PlaceAddressOf(line=shape.line, place=shape), name=destination)
             case ir.IncrementDecrement(address=address, delta=delta, is_postfix=is_postfix):
-                # ``*(shape) += delta`` — drive the EXISTING statement
-                # increment path from the producing ``Address``'s deref-free
-                # ``shape`` by rebuilding the exact source
-                # ``PlaceIncrementDecrement`` node, so the read-modify-write
-                # sequence (including the single-instruction memory
-                # ``inc``/``dec``) is produced by the EXACT emitter the
-                # ``Block`` path used — byte-neutral with the prior Block.
-                shape = self._ir_address_with_index(self._ir_address_ops[address])
-                self.generate_statement(PlaceIncrementDecrement(line=shape.line, delta=delta, is_postfix=is_postfix, place=shape))
+                plan = self._ir_address_plans.get(address)
+                if plan is not None and plan.base_kind == "pointer" and plan.bitfield is None:
+                    # Native path: the only ``ir.IncrementDecrement`` producer
+                    # is the arrow-member ``p->field++`` statement, whose plan
+                    # is a pointer base + pure field displacement.  The
+                    # plan-driven core mirrors the legacy generic
+                    # read-modify-write arm; the trailing ``ax_clear`` is the
+                    # one the statement-scope ``PlaceIncrementDecrement`` arm
+                    # ran after the expression-form codegen.  A bitfield
+                    # member routes to the legacy path, whose resolved store /
+                    # load terminals own the mask/shift sequences.
+                    self._emit_planned_increment_decrement(plan, delta=delta, is_postfix=is_postfix)
+                    self.ax_clear()
+                else:
+                    # ``*(shape) += delta`` — drive the EXISTING statement
+                    # increment path from the producing ``Address``'s deref-free
+                    # ``shape`` by rebuilding the exact source
+                    # ``PlaceIncrementDecrement`` node, so the read-modify-write
+                    # sequence (including the single-instruction memory
+                    # ``inc``/``dec``) is produced by the EXACT emitter the
+                    # ``Block`` path used — byte-neutral with the prior Block.
+                    shape = self._ir_address_with_index(self._ir_address_ops[address])
+                    self.generate_statement(PlaceIncrementDecrement(line=shape.line, delta=delta, is_postfix=is_postfix, place=shape))
             case ir.IndirectCall(address=address):
-                # ``call [shape]`` — drive the EXISTING function-pointer call
-                # statement path from the producing ``Address``'s ``shape`` by
-                # rebuilding the source ``PlaceCall``, so the slot load + call
-                # fold into the single ``call [table + reg*4]`` instruction the
-                # ``Access`` path emitted — byte-neutral, including the
-                # conservative pinned-register save default around the call.
-                shape = self._ir_address_with_index(self._ir_address_ops[address])
-                self.generate_statement(PlaceCall(line=shape.line, args=[], place=shape))
+                plan = self._ir_address_plans.get(address)
+                if plan is not None and plan.call_slot:
+                    # Native path: the slot plan replays the legacy
+                    # ``generate_indexed_call`` walk from declared base facts.
+                    # The trailing ``ax_clear`` is the one the statement-scope
+                    # ``PlaceCall`` arm ran after ``_emit_place_call``.
+                    self._emit_planned_indirect_call(plan)
+                    self.ax_clear()
+                else:
+                    # ``call [shape]`` — drive the EXISTING function-pointer call
+                    # statement path from the producing ``Address``'s ``shape`` by
+                    # rebuilding the source ``PlaceCall``, so the slot load + call
+                    # come from the EXACT legacy indexed-call emitter the
+                    # ``Access`` path used — byte-neutral, including the
+                    # conservative pinned-register save default around the call.
+                    shape = self._ir_address_with_index(self._ir_address_ops[address])
+                    self.generate_statement(PlaceCall(line=shape.line, args=[], place=shape))
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
 
@@ -2260,6 +2410,13 @@ class EmissionMixin:
         static base through the legacy ``_accumulate_subscript`` emitter,
         seeding the operand's BX index register.
         """
+        # Call-slot plans (the ``name[index]()`` function-pointer slot) are
+        # owned exclusively by the ``ir.IndirectCall`` terminal: their legacy
+        # walk accumulates through SI, not the BX-seeded term loop below, so
+        # a generic materialization would emit the wrong byte sequence.
+        if plan.call_slot:
+            message = "call-slot AddressPlan is materialized by the IndirectCall terminal only"
+            raise NotImplementedError(message)
         # Horner plans (row-major multidim / pointer-to-array) materialize
         # through the legacy Horner tail emitters, dispatched on the plan's
         # declared base facts.
@@ -2507,6 +2664,12 @@ class EmissionMixin:
         """
         if address.indices:
             if len(address.indices) == 1:
+                # The two single-index producers split on the shape root: the
+                # ``name[index]()`` function-pointer slot is a bare
+                # ``SubscriptPlace``; the struct-array member shape roots at a
+                # ``MemberPlace``.
+                if isinstance(address.shape, SubscriptPlace):
+                    return self._plan_subscript_call_slot(address)
                 return self._plan_struct_array_member(address)
             return self._plan_subscript_chain(address)
         # Arrow shapes carry the pointer name in ``base_value``; the shape
@@ -2669,11 +2832,11 @@ class EmissionMixin:
 
         The only other single-index ``Address`` producer today is the
         ``name[index]()`` function-pointer slot (consumed by
-        ``ir.IndirectCall``, which reads ``_ir_address_ops``, not plans) —
-        its non-``MemberPlace`` shape returns None here.  The member-index
-        shape ``base.field[i]`` has no IR lowering predicate yet, so it never
-        reaches the planner; when it does, its plan must carry ``raw_width``
-        and the member-index store orderings.
+        ``ir.IndirectCall``), whose bare-``SubscriptPlace`` shape dispatches
+        to :meth:`_plan_subscript_call_slot` before this planner runs.  The
+        member-index shape ``base.field[i]`` has no IR lowering predicate
+        yet, so it never reaches the planner; when it does, its plan must
+        carry ``raw_width`` and the member-index store orderings.
         """
         shape = address.shape
         if not isinstance(shape, MemberPlace):
@@ -2702,6 +2865,58 @@ class EmissionMixin:
             field_size=field_size,
             line=shape.line,
             subscript_terminal=True,
+            terms=terms,
+        )
+
+    def _plan_subscript_call_slot(self, address: ir.Address, /) -> AddressPlan | None:
+        """Plan the ``name[index]()`` function-pointer slot (pure; no emission).
+
+        Mirrors the legacy ``generate_indexed_call`` dispatch from its pure
+        halves: a global array roots at its label, a local stack array at its
+        frame operand (with the ``elide_frame`` ``_l_<name>`` variant), and
+        any other name is a pointer variable whose VALUE seeds the slot walk
+        — the same three arms, in the same precedence.  The slot stride is
+        the pointer size; a constant index folds ``index * int_size`` into
+        the displacement exactly where the legacy constant arms folded it.
+
+        The plan is marked ``call_slot``: its materialization (the SI-base
+        scale-and-add of ``generate_indexed_call``, not the BX-seeded
+        ``_accumulate_subscript`` walk) is owned exclusively by the
+        ``ir.IndirectCall`` terminal.  An undefined name returns None so the
+        legacy path raises its ``_check_defined`` diagnostic unchanged.
+        """
+        shape = address.shape
+        if not (isinstance(shape, SubscriptPlace) and isinstance(shape.base, VariablePlace)):
+            return None
+        name = shape.base.name
+        if name not in self.visible_vars or name in self.NAMED_CONSTANTS or name in self.enum_constants:
+            return None
+        scale = self.target.int_size
+        if name in self.global_arrays:
+            base_kind = "label"
+            base = self._global_label(name)
+        elif name in self.local_stack_arrays:
+            base_kind = "frame"
+            base = f"_l_{name}" if self.elide_frame else f"{self.target.base_register}-{self.locals[name]}"
+        else:
+            base_kind = "pointer"
+            base = name
+        index_value = address.indices[0]
+        if isinstance(index_value, int):
+            displacement = index_value * scale
+            terms: tuple[AddressTerm, ...] = ()
+        else:
+            displacement = 0
+            terms = (AddressTerm(index_value=index_value, scale=scale),)
+        return AddressPlan(
+            base=base,
+            base_is_static=base_kind != "pointer",
+            base_kind=base_kind,
+            call_slot=True,
+            displacement=displacement,
+            element_size=scale,
+            field_size=scale,
+            line=shape.line,
             terms=terms,
         )
 

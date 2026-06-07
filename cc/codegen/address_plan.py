@@ -59,6 +59,12 @@ class AddressPlan:
     (``_emit_subscript_resolved_load`` / ``_emit_subscript_resolved_store``)
     — even when every index folded to a constant (``terms`` empty), because
     those terminals emit the BX guard and the rhs spill unconditionally.
+
+    ``call_slot`` marks the function-pointer-slot plan of a statement
+    ``name[index]()`` call.  Its materialization is owned exclusively by the
+    ``ir.IndirectCall`` terminal (the legacy ``generate_indexed_call`` SI-base
+    accumulate, which differs from the BX-seeded ``_accumulate_subscript``
+    walk); the generic materializer refuses it loudly.
     """
 
     base: AddressPlan | str
@@ -67,6 +73,7 @@ class AddressPlan:
     base_is_static: bool = True
     base_preserves_accumulator: bool = False
     bitfield: FieldInfo | None = None
+    call_slot: bool = False
     clobbers: frozenset[str] = field(default_factory=frozenset)
     decay_to_address: bool = False
     displacement: int = 0

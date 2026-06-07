@@ -484,10 +484,10 @@ def _is_subscript_call(node: ast_nodes.Node, /) -> bool:
     COMPOUND (the slice-4 precedent: an index temp is consumed IMMEDIATELY by
     the address scale, so the allocator keeps it register-resident —
     ``_atexit_fns[--_atexit_count]()`` in ``stdlib.c`` ``exit`` is the real
-    consumer and the byte gate the proof).  Emission re-seats the index into
-    the ``shape`` and drives the EXACT legacy function-pointer call statement
-    path, which folds the slot load and the call into one ``call [table +
-    reg*4]`` instruction — hence :class:`IndirectCall` consumes the SLOT
+    consumer and the byte gate the proof).  Emission plans the slot as a
+    ``call_slot`` AddressPlan and replays the EXACT legacy function-pointer
+    call statement walk from it, keeping the slot load and the call adjacent
+    — hence :class:`IndirectCall` consumes the SLOT
     :class:`Address`, not a pre-loaded pointer.  Gated on zero arguments and
     discarded result (statement position): argument evaluation ordering and
     the result store stay on :class:`Access` until a consumer surfaces.
@@ -687,8 +687,8 @@ class IndirectCall:
     """call [address] — discarded-result call through the function pointer stored at a resolved :class:`Address`.
 
     The statement-position ``place()`` no-argument call through a
-    function-pointer slot (``handlers[index]()``).  The single x86
-    instruction loads and calls through the slot in one step, so the op
+    function-pointer slot (``handlers[index]()``).  Emission loads the
+    pointer from the slot and calls through the accumulator, so the op
     consumes the SLOT address, not a pre-loaded pointer value.
     Side-effecting like :class:`Call`: never eliminated by DCE, and a memory
     barrier that :class:`Load` / :class:`AddressOf` must not be reordered or
@@ -1452,9 +1452,9 @@ class Builder:
                 # a function-pointer slot.  The index — compound allowed, the
                 # slice-4 immediate-consumption precedent — pre-lowers to the
                 # segment's only dynamic leaf on ``Address.indices``; emission
-                # re-seats it into the ``shape`` and drives the EXACT legacy
-                # function-pointer call path, which loads and calls through the
-                # slot in one ``call [table + reg*4]`` instruction
+                # plans the slot natively and replays the legacy indexed-call
+                # shape (scale into the SI base, slot load, ``call`` through
+                # the accumulator)
                 # (``_atexit_fns[--_atexit_count]()`` in ``stdlib.c`` ``exit``).
                 index_value = self._build_expr(expr=place.index, out=out, strings=strings)
                 address_temp = self._tmp()

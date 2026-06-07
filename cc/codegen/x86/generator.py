@@ -2700,11 +2700,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if info.bit_width is not None:
                 message = f"cannot take address of bitfield '{place.member_name}'"
                 raise CompileError(message, line=place.line)
-            self.ax_clear()
-            self._emit_load_var(object_name, register=self.target.acc)
-            if info.byte_offset:
-                self.emit(f"        add {self.target.acc}, {info.byte_offset}")
-            self.ax_clear()
+            self._emit_pointer_member_address_of(object_name, byte_offset=info.byte_offset)
             return
         # Dot form: ``&obj.field`` (named struct value).
         if isinstance(base, VariablePlace):
@@ -3064,6 +3060,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # member subscript shapes all resolve through the recursive address
         # resolver and run the shared protect-BX terminal store.
         self._emit_subscript_resolved_store(place, value)
+
+    def _emit_pointer_member_address_of(self, object_name: str, /, *, byte_offset: int) -> None:
+        """Emit ``&ptr->field`` for a named pointer: pointer value plus field offset.
+
+        The emitting half of the legacy ``_emit_place_address_of`` arrow arm,
+        split out so the plan-driven native ``ir.AddressOf`` terminal and the
+        place-driven legacy arm (which keeps the type / bitfield diagnostics)
+        share one byte sequence: the pointer VALUE loads into the accumulator
+        and a nonzero field offset folds in with a single ``add``.
+        """
+        self.ax_clear()
+        self._emit_load_var(object_name, register=self.target.acc)
+        if byte_offset:
+            self.emit(f"        add {self.target.acc}, {byte_offset}")
+        self.ax_clear()
 
     def _emit_pointer_to_array_address(self, base_name: str, indices: list[Node], /, *, line: int) -> MemoryOperand:
         """Emit the row-major address of ``p[i0][i1]...`` for a pointer-to-array ``p``.

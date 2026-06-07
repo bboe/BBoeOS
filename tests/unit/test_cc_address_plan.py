@@ -5,19 +5,25 @@ from __future__ import annotations
 import sys
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from cc.cli import compile_module
 from cc.codegen.address_plan import AddressPlan, AddressTerm, scale_encodes_in_operand
+from cc.codegen.x86.generator import X86CodeGenerator
 from cc.options import CompilerOptions
-
-if TYPE_CHECKING:
-    from cc.codegen.x86.generator import X86CodeGenerator
 
 # Member accesses live in helper functions (not ``main``) because ``main``
 # bypasses the IR lowering path — only IR-lowered bodies record Address ops.
+ADDRESS_OF_SOURCE = """
+struct node { int value; };
+int *field_pointer(struct node *n) {
+    int *p;
+    p = &n->value;
+    return p;
+}
+"""
+
 ARROW_MEMBER_SOURCE = """
 struct node { int value; struct node *next; };
 int read_value(struct node *n) {
@@ -58,6 +64,21 @@ int reader() {
 }
 int main() {
     return reader();
+}
+"""
+
+INCREMENT_SOURCE = """
+struct counter { int hits; };
+void bump(struct counter *c) {
+    c->hits++;
+}
+"""
+
+INDIRECT_CALL_SOURCE = """
+void (*handlers[4])(void);
+int next;
+void run_last(void) {
+    handlers[--next]();
 }
 """
 
@@ -182,6 +203,29 @@ def _generate(source_text: str, /, *, bits: int = 32) -> X86CodeGenerator:
         )
 
 
+def _generate_with_reseat_spy(source_text: str, /) -> tuple[X86CodeGenerator, int]:
+    """Compile *source_text*; return the generator and the legacy re-seat count.
+
+    Wraps ``_ir_address_with_index`` (the helper every legacy AST re-seat
+    branch funnels through) with a counting spy, so a test can assert that a
+    migrated terminal consumed its AddressPlan natively instead of rebuilding
+    the source ``Place`` node from ``_ir_address_ops``.
+    """
+    calls: list[object] = []
+    original = X86CodeGenerator._ir_address_with_index  # noqa: SLF001
+
+    def spy(self: X86CodeGenerator, address_op: object, /) -> object:
+        calls.append(address_op)
+        return original(self, address_op)
+
+    X86CodeGenerator._ir_address_with_index = spy  # type: ignore[method-assign] # noqa: SLF001
+    try:
+        generator = _generate(source_text)
+    finally:
+        X86CodeGenerator._ir_address_with_index = original  # type: ignore[method-assign] # noqa: SLF001
+    return generator, len(calls)
+
+
 def test_address_plan_defaults() -> None:
     """Default fields on a minimal ``AddressPlan`` have the expected zero values."""
     plan = AddressPlan(base="ebp-8", base_kind="frame")
@@ -197,6 +241,50 @@ def test_address_term_carries_value_and_scale() -> None:
     term = AddressTerm(index_value="_ir_3", scale=4)
     assert term.index_value == "_ir_3"
     assert term.scale == 4
+
+
+def test_arrow_member_address_of_consumes_native_plan() -> None:
+    """``p = &n->value`` consumes its pointer-base plan natively (no AST re-seat).
+
+    The plan facts pin the deferred base; the re-seat spy proves the
+    ``ir.AddressOf`` terminal ran the plan-driven path rather than rebuilding
+    a ``PlaceAddressOf`` from ``_ir_address_ops``.  Byte-for-byte parity with
+    the legacy emission is enforced by ``tests/test_cc_function_sizes.py``
+    (``dirent.c`` is the live corpus consumer).
+    """
+    generator, reseat_count = _generate_with_reseat_spy(ADDRESS_OF_SOURCE)
+    assert reseat_count == 0
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.base_kind == "pointer"
+    assert plan.base == "n"
+    assert plan.bitfield is None
+
+
+def test_arrow_member_increment_decrement_consumes_native_plan() -> None:
+    """``c->hits++`` consumes its pointer-base plan natively (no AST re-seat).
+
+    The asm-shape assertions pin the legacy read-modify-write sequence the
+    native path must reproduce: one register-base load, the 1-byte ``inc``,
+    the register-base store, and the discarded-value reload + postfix
+    recovery.  Byte-for-byte parity is enforced by
+    ``tests/test_cc_function_sizes.py`` (``stdio.c`` ``_emit`` is the live
+    corpus consumer).
+    """
+    generator, reseat_count = _generate_with_reseat_spy(INCREMENT_SOURCE)
+    assert reseat_count == 0
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.base_kind == "pointer"
+    assert plan.base == "c"
+    body = generator.output.split("bump:")[1]
+    lines = [line.strip() for line in body.splitlines()]
+    assert lines.count("inc eax") == 1
+    assert lines.count("mov [ebx], eax") == 1
+    assert lines.count("mov eax, [ebx]") == 2  # rmw load + discarded reload
+    assert lines.count("sub eax, 1") == 1  # postfix pre-update recovery
 
 
 def test_arrow_member_load_plans_pointer_base() -> None:
@@ -489,3 +577,32 @@ def test_struct_array_member_store_plans_term_and_emits_indexed_store() -> None:
     assert lines.count("mov [_g_table+4+ebx], eax") == 1  # indexed store terminal
     assert lines.count("push eax") == 1  # the rhs spill across the index eval
     assert "push ebx" not in lines  # no pinned-EBX guard needed here
+
+
+def test_subscript_call_slot_plans_and_calls_natively() -> None:
+    """``handlers[--next]()`` plans a call-slot Address and calls through it natively.
+
+    The function-pointer slot of a bare array variable plans one
+    pointer-size-scaled term over the array's static base, marked
+    ``call_slot`` so only the ``ir.IndirectCall`` terminal materializes it.
+    The asm-shape assertions pin the legacy ``generate_indexed_call``
+    global-array sequence: SI base seed, index scale, slot load, and the
+    indirect ``call``.  Byte-for-byte parity is enforced by
+    ``tests/test_cc_function_sizes.py`` (``stdlib.c`` ``exit`` is the live
+    corpus consumer).
+    """
+    generator, reseat_count = _generate_with_reseat_spy(INDIRECT_CALL_SOURCE)
+    assert reseat_count == 0
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.call_slot is True
+    assert plan.base_kind == "label"
+    assert plan.base == "_g_handlers"
+    assert [term.scale for term in plan.terms] == [4]  # pointer-size slot stride
+    body = generator.output.split("run_last:")[1]
+    lines = [line.strip() for line in body.splitlines()]
+    assert lines.count("lea esi, [_g_handlers]") == 1
+    assert lines.count("shl eax, 2") == 1
+    assert lines.count("mov eax, [eax]") == 1  # slot load
+    assert lines.count("call eax") == 1
