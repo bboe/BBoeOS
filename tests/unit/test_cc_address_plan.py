@@ -27,6 +27,13 @@ int *field_pointer(struct node *n) {
 }
 """
 
+ARROW_COPY_SOURCE = """
+struct pair { int first; int second; };
+void copy_field(struct pair *p, struct pair *q) {
+    p->first = q->second;
+}
+"""
+
 ARROW_MEMBER_SOURCE = """
 struct node { int value; struct node *next; };
 int read_value(struct node *n) {
@@ -54,6 +61,15 @@ int reader() {
 }
 int main() {
     return reader();
+}
+"""
+
+CHAINED_STORE_SOURCE = """
+struct inner { int a; int b; };
+struct outer { int pad; struct inner mid; };
+struct source { int field; };
+void copy_chained(struct outer *p, struct source *q) {
+    p->mid.b = q->field;
 }
 """
 
@@ -297,6 +313,30 @@ def _generate(source_text: str, /, *, bits: int = 32) -> X86CodeGenerator:
             options=CompilerOptions(bits=bits),
             search_paths=(),
         )
+
+
+def _generate_with_ir_bodies(source_text: str, /) -> tuple[X86CodeGenerator, list[list[ir.Instruction]]]:
+    """Compile *source_text*; return the generator and every lowered IR body.
+
+    Wraps ``lower_ir_body`` with a snapshotting spy so a test can inspect the
+    exact instruction sequence a function lowered through (the per-function
+    ``_ir_address_plans`` dict on the returned generator holds the LAST
+    function's plans, so single-function fixtures pair each body with its
+    plans).
+    """
+    bodies: list[list[ir.Instruction]] = []
+    original = X86CodeGenerator.lower_ir_body
+
+    def spy(self: X86CodeGenerator, body: list[ir.Instruction]) -> None:
+        bodies.append(list(body))
+        original(self, body)
+
+    X86CodeGenerator.lower_ir_body = spy  # type: ignore[method-assign]
+    try:
+        generator = _generate(source_text)
+    finally:
+        X86CodeGenerator.lower_ir_body = original  # type: ignore[method-assign]
+    return generator, bodies
 
 
 def _generate_with_reseat_spy(source_text: str, /) -> tuple[X86CodeGenerator, int]:
@@ -830,6 +870,49 @@ def test_scale_encodes_in_operand_32_bit() -> None:
     assert scale_encodes_in_operand(bits=32, scale=8)
     assert not scale_encodes_in_operand(bits=32, scale=3)
     assert not scale_encodes_in_operand(bits=32, scale=32)
+
+
+def test_single_use_store_rhs_temp_rides_accumulator() -> None:
+    """Accumulator-preserving store-RHS temps are not pinned across folded Address ops.
+
+    A store-RHS temp whose consuming store preserves the accumulator up
+    to the RHS read is NOT pinned (the folded ir.Address between def and
+    use is transparent to the def+1 adjacency test; the value rides
+    ax_local with zero extra bytes — the gettimeofday class-1 shape).  A
+    chained-base store (accumulator-clobbering materialization) keeps the
+    pin — the release/malloc relink shape stays byte-identical.
+
+    HEAD-probe note: today's only admitted non-leaf store RHS is a
+    ``PlaceLoad``, whose ``ir.Load`` def is invisible to
+    ``_ir_instruction_store_targets`` (it returns ``[]`` for Load), so no
+    compile-only fixture pins its RHS temp at HEAD.  The def+2 phantom is
+    therefore locked at the heuristic level: each fixture's lowered body
+    has its ``ir.Load`` def swapped for an ``ir.BinaryOperation`` def (a
+    VISIBLE store target — the quotient shape the class-3/4 re-admissions
+    produce), keeping the real folded ``ir.Address`` + ``ir.Store`` pair
+    and the real recorded AddressPlan.
+    """
+
+    def deferred_verdict(source_text: str, /) -> tuple[str, set[str]]:
+        generator, bodies = _generate_with_ir_bodies(source_text)
+        (body,) = bodies
+        (store,) = (instruction for instruction in body if isinstance(instruction, ir.Store))
+        address_instruction = body[body.index(store) - 1]
+        assert isinstance(address_instruction, ir.Address)
+        assert address_instruction.destination == store.address
+        assert isinstance(store.value, str)
+        synthetic_body: list[ir.Instruction] = [
+            ir.BinaryOperation(destination=store.value, left="seed", operation="/", right=1000),
+            address_instruction,
+            store,
+        ]
+        deferred = generator._collect_ir_deferred_single_use_temps(body=synthetic_body, temps=frozenset({store.value}))  # noqa: SLF001
+        return store.value, deferred
+
+    arrow_temp, arrow_deferred = deferred_verdict(ARROW_COPY_SOURCE)
+    assert arrow_temp not in arrow_deferred  # value rides EAX; a pin would only add bytes
+    chained_temp, chained_deferred = deferred_verdict(CHAINED_STORE_SOURCE)
+    assert chained_temp in chained_deferred  # base materialization clobbers AX before the RHS read
 
 
 def test_struct_array_constant_index_folds_into_displacement() -> None:
