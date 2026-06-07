@@ -357,6 +357,65 @@ class EmissionMixin:
         return BinaryOperation(left=condition, line=condition.line, operation="!=", right=Int(line=condition.line, value=0))
 
     @staticmethod
+    def _plan_preserves_accumulator_for_store_rhs(plan: AddressPlan, /) -> bool:
+        """Return True when *plan*'s store materialization keeps AX intact up to the RHS read.
+
+        Consulted by :meth:`_collect_ir_deferred_single_use_temps` to decide
+        whether a folded ``ir.Address`` between a store-RHS temp's def and
+        its consuming ``ir.Store`` is transparent (the value rides EAX into
+        the rhs read — pinning would only add a ``mov reg, eax`` def bounce
+        plus a ``mov eax, reg`` read) or real (the materialization clobbers
+        AX first, so the rhs reload exists and a register home removes it).
+        Ordering table, one row per consuming-store shape, each read
+        directly from its emitter:
+
+        - ``deref_store`` (``_emit_planned_deref_store``): the rhs evaluates
+          FIRST; the pointer VALUE then loads into SI via a bare register
+          ``mov`` (``_emit_load_var``) that never touches AX; the store
+          writes from AX.  Preserves.
+        - ``subscript_terminal`` (``_emit_subscript_operand_store``): the
+          rhs evaluates FIRST and is pushed; the term accumulation that
+          clobbers AX runs entirely inside the ``push acc`` / ``pop acc``
+          bracket, AFTER the rhs read.  Preserves in the relevant sense:
+          the rhs read precedes every AX-clobbering materialization step.
+        - member store, ``base_is_static`` (ordering 1 of
+          ``_emit_planned_member_store``): the materialization emits
+          NOTHING (pure label/frame displacement), then the rhs evaluates.
+          Preserves.
+        - member store, ``base_preserves_accumulator`` (ordering 3 — the
+          arrow ``pointer->field`` base): the rhs evaluates FIRST, then the
+          bare ``mov bx, [pointer]`` base load.  Preserves.
+        - member store, chained ``base_kind == "plan"`` (ordering 4): the
+          base materializes FIRST and runs THROUGH the accumulator (the
+          inner decayed member address loads via ``_emit_resolved_load``
+          before seeding BX), destroying AX before the rhs read.  Does NOT
+          preserve.
+        - ``call_slot``: never a Store's plan (owned exclusively by the
+          ``ir.IndirectCall`` terminal); conservatively does not preserve.
+
+        Ordering 2 of ``_emit_planned_member_store`` (the 1-bit literal
+        bitfield write) never reads a temp rhs —
+        ``_bitfield_write_literal_value`` matches integer literals only —
+        so it has no row here.
+        """
+        if plan.call_slot:
+            return False
+        if plan.deref_store or plan.subscript_terminal:
+            return True
+        if plan.base_kind == "plan":
+            return False
+        # Hardening against planner drift: today every terms-bearing plan
+        # routes through the subscript terminals (handled above), so the
+        # member orderings below never accumulate through AX — but a future
+        # terms-bearing non-subscript plan would (``_accumulate_subscript``
+        # evaluates each index through the accumulator).  Requiring an
+        # AX-free declared clobber set keeps the verdict sound by
+        # construction instead of by invariant.
+        if "ax" in plan.clobbers:
+            return False
+        return plan.base_is_static or plan.base_preserves_accumulator
+
+    @staticmethod
     def _rep_width_suffix(element_size: int, /) -> str:
         """Map element size 1/2/4 to the string-op mnemonic suffix."""
         return {1: "b", 2: "w", 4: "d"}[element_size]
@@ -867,6 +926,34 @@ class EmissionMixin:
           a branch test, ``Return``, ``Call`` arg, or store materialize
           the value into a register / flag and benefit from the home.
 
+        One def+2 shape is treated as def+1: a folded :class:`ir.Address`
+        emits NOTHING (and the consume-only ``case ir.Address`` arm touches
+        no accumulator-tracking state), yet it occupies an instruction
+        slot, so a store-RHS temp in the sequence ``[temp = rhs;
+        Address(a); Store(a, temp)]`` looks deferred while its value in
+        fact rides EAX straight into the store's rhs read.  The phantom is
+        skipped ONLY when (a) the intervening instruction is the
+        ``ir.Address`` whose destination the use instruction consumes, (b)
+        its recorded :class:`AddressPlan` exists and
+        :meth:`_plan_preserves_accumulator_for_store_rhs` confirms the
+        store materialization keeps AX intact up to the rhs read, and (c)
+        the temp is the ``ir.Store``'s VALUE operand (index-term reads
+        happen mid-materialization, after AX is clobbered — though a temp
+        used as a term index is also read by the ``Address`` itself, so it
+        can never be single-use here; the ``value`` check keeps the gate
+        explicit).  A chained-base store (``base_kind == "plan"``) keeps
+        the pin verdict: its materialization loads the inner member
+        address THROUGH the accumulator before the rhs read, so the
+        reload is real and the register home removes it.  Wider gaps
+        (def+3 and beyond, even when every intervening instruction is a
+        folded ``Address``) deliberately keep the pin — only the exact
+        one-phantom shape is proven AX-transparent.
+
+        The plan lookup is safe here: this method runs inside
+        :meth:`_allocate_ir_temps`, which ``generate_function`` calls
+        AFTER the eager ``_plan_ir_addresses`` pre-pass — verified call
+        order, so ``self._ir_address_plans`` is fully populated.
+
         Conservative: only the flat top-level instruction order is
         considered.  A temp whose def or use lives inside a Switch arm
         (not visited here) is not returned, so it falls back to the
@@ -894,8 +981,26 @@ class EmissionMixin:
                 continue
             if temp in binop_operand_temps:
                 continue
-            if uses[0] != definition_index[temp] + 1:
-                result.add(temp)
+            definition_position = definition_index[temp]
+            use_position = uses[0]
+            if use_position == definition_position + 1:
+                continue
+            # Folded-Address phantom (see docstring): a def+2 use whose
+            # single intervening instruction is the consumed ir.Address of
+            # an accumulator-preserving Store is effectively def+1.
+            if use_position == definition_position + 2:
+                intervening = body[definition_position + 1]
+                consumer = body[use_position]
+                if (
+                    isinstance(intervening, ir.Address)
+                    and isinstance(consumer, ir.Store)
+                    and consumer.address == intervening.destination
+                    and consumer.value == temp
+                    and (plan := self._ir_address_plans.get(intervening.destination)) is not None
+                    and self._plan_preserves_accumulator_for_store_rhs(plan)
+                ):
+                    continue
+            result.add(temp)
         return result
 
     def _emit_function_pointer_call(
