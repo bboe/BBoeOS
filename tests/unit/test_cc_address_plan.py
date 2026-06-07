@@ -16,8 +16,31 @@ from cc.options import CompilerOptions
 if TYPE_CHECKING:
     from cc.codegen.x86.generator import X86CodeGenerator
 
-# The dot access lives in a helper function (not ``main``) because ``main``
+# Member accesses live in helper functions (not ``main``) because ``main``
 # bypasses the IR lowering path — only IR-lowered bodies record Address ops.
+ARROW_MEMBER_SOURCE = """
+struct node { int value; struct node *next; };
+int read_value(struct node *n) {
+    int out;
+    out = n->value;
+    return out;
+}
+"""
+
+CHAINED_DOT_SOURCE = """
+struct inner { int a; int b; };
+struct outer { int pad; struct inner mid; };
+struct outer g;
+int reader() {
+    int value;
+    value = g.mid.b;
+    return value;
+}
+int main() {
+    return reader();
+}
+"""
+
 DOT_MEMBER_SOURCE = """
 struct point { int x; int y; };
 struct point g;
@@ -28,6 +51,16 @@ int reader() {
 }
 int main() {
     return reader();
+}
+"""
+
+MULTI_LEVEL_ARROW_SOURCE = """
+struct inner { int a; int b; };
+struct outer { int pad; struct inner mid; };
+int reader(struct outer *p) {
+    int value;
+    value = p->mid.b;
+    return value;
 }
 """
 
@@ -61,6 +94,32 @@ def test_address_term_carries_value_and_scale() -> None:
     assert term.scale == 4
 
 
+def test_arrow_member_load_plans_pointer_base() -> None:
+    """``n->value`` plans a "pointer" base whose materialization is the SI-or-BX load."""
+    generator = _generate(ARROW_MEMBER_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.base_kind == "pointer"
+    assert plan.base == "n"
+    assert plan.base_preserves_accumulator is True
+    assert plan.base_is_static is False
+
+
+def test_chained_dot_member_load_records_no_address_op() -> None:
+    """``g.mid.b`` never lowers to ``ir.Address`` — it stays on legacy ``ir.Access``.
+
+    The IR lowering predicates cover dot, arrow, and arrow-then-dot member
+    loads only; a ``MemberPlace(MemberPlace(VariablePlace))`` chained-dot read
+    is not gated in, so there is no Address op (and hence no plan) to
+    materialize.  The legacy chained arm in ``_resolve_member_place_info``
+    handles it whole.
+    """
+    generator = _generate(CHAINED_DOT_SOURCE)
+    assert generator._ir_address_ops == {}  # noqa: SLF001
+    assert generator._ir_address_plans == {}  # noqa: SLF001
+
+
 def test_dot_member_load_produces_pure_displacement_plan() -> None:
     """``g.y`` lowers to one Address whose plan is a pure label+displacement."""
     generator = _generate(DOT_MEMBER_SOURCE)
@@ -71,6 +130,29 @@ def test_dot_member_load_produces_pure_displacement_plan() -> None:
     assert plan.displacement == 4  # offset of y
     assert plan.terms == ()
     assert plan.field_size == 4
+
+
+def test_multi_level_arrow_load_plans_nested_plan_base() -> None:
+    """``p->mid.b`` plans a "plan" base nesting the arrow plan for ``p->mid``.
+
+    Mirrors the legacy chained arm of ``_resolve_member_place_info``: the
+    inner ``p->mid`` struct-value member address is loaded (decayed ``lea``)
+    and moved into BX, then the outer field offset rides the register base.
+    """
+    generator = _generate(MULTI_LEVEL_ARROW_SOURCE)
+    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.base_kind == "plan"
+    assert plan.base_is_static is False
+    assert plan.base_preserves_accumulator is False
+    assert plan.displacement == 4  # offset of b within struct inner
+    inner = plan.base
+    assert isinstance(inner, AddressPlan)
+    assert inner.base_kind == "pointer"
+    assert inner.base == "p"
+    assert inner.displacement == 4  # offset of mid within struct outer
+    assert inner.decay_to_address is True  # struct-value member decays via lea
 
 
 def test_scale_encodes_in_operand_16_bit_only_unscaled() -> None:

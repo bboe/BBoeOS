@@ -2145,17 +2145,21 @@ class EmissionMixin:
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
 
-    def _materialize_address_plan(self, plan: AddressPlan, /) -> MemoryOperand:  # noqa: PLR6301
+    def _materialize_address_plan(self, plan: AddressPlan, /) -> MemoryOperand:
         """Emit the plan's deferred base/index code; return the terminal operand.
 
         Phase-1 dot-member plans are pure displacement: nothing is emitted
-        (parity with the legacy static-base resolution).
+        (parity with the legacy static-base resolution).  A "pointer" base
+        defers to the shared SI-or-BX base load (``_load_member_base``); a
+        "plan" base materializes the nested plan, loads its decayed
+        struct-value address, and seeds BX — both call the SAME legacy
+        emitting helpers the AST resolver used, so the byte sequences match.
         """
         # Guard against plan shapes the materializer does not yet support.
         # Future tasks extend the materializer in lockstep with the planner;
         # failing loudly here prevents a silent garbage operand if that
         # invariant is violated.
-        if plan.terms or plan.horner or not isinstance(plan.base, str):
+        if plan.terms or plan.horner:
             message = f"unmaterializable AddressPlan shape (base_kind={plan.base_kind!r}, terms={len(plan.terms)})"
             raise NotImplementedError(message)
 
@@ -2163,16 +2167,36 @@ class EmissionMixin:
         # this mixin module — a module-level import here would be circular.
         from cc.codegen.x86.generator import MemoryOperand  # noqa: PLC0415
 
-        return MemoryOperand(
-            base=plan.base,
-            base_kind=plan.base_kind,
-            bitfield=plan.bitfield,
-            decay_to_address=plan.decay_to_address,
-            displacement=plan.displacement,
-            element_size=plan.element_size,
-            field_size=plan.field_size,
-            raw_width=plan.raw_width,
-        )
+        def build_operand(*, base: str, base_kind: str) -> MemoryOperand:
+            # Single construction point so the per-base-kind arms can never
+            # diverge in which plan fields reach the terminal operand.
+            return MemoryOperand(
+                base=base,
+                base_kind=base_kind,
+                bitfield=plan.bitfield,
+                decay_to_address=plan.decay_to_address,
+                displacement=plan.displacement,
+                element_size=plan.element_size,
+                field_size=plan.field_size,
+                raw_width=plan.raw_width,
+            )
+
+        if plan.base_kind == "pointer":
+            # Arrow base: the same SI-or-BX load the legacy arrow arm emits.
+            base_register = self._load_member_base(plan.base)
+            return build_operand(base=base_register, base_kind="register")
+        if plan.base_kind == "plan":
+            # Chained base: mirror the legacy chained arm — load the inner
+            # member's decayed struct address (``lea`` terminal) into the
+            # accumulator, then seed BX with it.  The consuming terminal's
+            # leading ``ax_clear`` already cleared the tracking state the
+            # legacy arm cleared before its inner ``generate_expression``.
+            inner_operand = self._materialize_address_plan(plan.base)
+            self._emit_resolved_load(inner_operand)
+            self.emit(f"        mov {self.target.bx_register}, {self.target.acc}")
+            self.ax_clear()
+            return build_operand(base=self.target.bx_register, base_kind="register")
+        return build_operand(base=plan.base, base_kind=plan.base_kind)
 
     @staticmethod
     def _merge_pinned_save_filters(
@@ -2322,29 +2346,95 @@ class EmissionMixin:
         is emitted here (every phase-1 plan is folded; the consuming terminal
         materializes it).
         """
-        shape = address.shape
         if address.indices:
             return None  # dynamic-index shapes arrive in a later task
-        if address.base_value is not None:
-            return None  # arrow/deref shapes carry base_value; not planned yet
-        if isinstance(shape, MemberPlace) and isinstance(shape.base, VariablePlace):
+        # Arrow shapes carry the pointer name in ``base_value``; the shape
+        # itself roots at the same ``DereferencePlace(VariablePlace)``, so the
+        # member-place planner derives the base from the shape directly.
+        return self._plan_member_place(address.shape)
+
+    def _plan_member_place(self, shape: Place, /) -> AddressPlan | None:
+        """Plan one deref-free / arrow-rooted member ``shape`` (pure; no emission).
+
+        Dispatches on ``shape.base`` to mirror the legacy
+        ``_resolve_member_place_info`` arms whose base materialization the
+        materializer reproduces by calling the same emitting helpers:
+
+        - :class:`VariablePlace` — dot ``obj.field``: pure label/frame base.
+        - :class:`DereferencePlace` of a :class:`VariablePlace` — arrow
+          ``ptr->field``: ``base_kind="pointer"``; materialization runs the
+          shared SI-or-BX base load (``_load_member_base``).
+        - :class:`MemberPlace` — chained ``p->mid.b``: ``base_kind="plan"``
+          nesting the inner member's plan; materialization loads the inner
+          decayed struct address and seeds BX, exactly like the legacy
+          chained arm.
+
+        Depth note: the IR lowering gates (``_is_arrow_member_member_load``)
+        cap member chains at two levels today, so the recursion here is only
+        ever exercised at depth 1; a future gate widening must extend the
+        materializer's nested-plan coverage (and the byte gate) in lockstep.
+        """
+        if not isinstance(shape, MemberPlace):
+            return None
+        base = shape.base
+        if isinstance(base, VariablePlace):
             # ``obj.field`` dot access on a named struct value.  Mirrors the
             # MemoryOperand the legacy ``resolve_address`` dot arm builds:
             # pure label/frame base + field displacement, decaying to the
             # field address for array-typed and struct-value members.
             base_operand, info = self._derive_dot_member_layout(shape)
-            is_struct_value = info.type_name.startswith("struct ") and not info.type_name.endswith("*")
-            return AddressPlan(
-                base=base_operand,
-                base_kind=self._member_base_kind(shape),
-                bitfield=info if info.bit_width is not None else None,
-                decay_to_address=info.field_size != info.element_size or is_struct_value,
-                displacement=info.byte_offset,
-                element_size=info.element_size,
-                field_size=info.field_size,
+            plan_base: AddressPlan | str = base_operand
+            plan_base_kind = self._member_base_kind(shape)
+            base_is_static = True
+            base_preserves_accumulator = False
+        elif isinstance(base, DereferencePlace) and isinstance(base.pointer, VariablePlace):
+            # ``ptr->field`` arrow access on a named pointer.  The layout
+            # lookup is the pure half of the legacy arrow arm; the deferred
+            # ``_load_member_base`` happens at materialization.  The base load
+            # is a bare ``mov bx, [ptr]`` (or an SI reuse), so it never reads
+            # the accumulator.
+            info = self._resolve_member_index_layout(
+                arrow=True,
                 line=shape.line,
+                member_name=shape.member_name,
+                object_name=base.pointer.name,
             )
-        return None
+            plan_base = base.pointer.name
+            plan_base_kind = "pointer"
+            base_is_static = False
+            base_preserves_accumulator = True
+        elif isinstance(base, MemberPlace):
+            # Chained member (``p->mid.b``): the inner member's decayed
+            # struct-value address seeds the outer base register.  Plan the
+            # inner member recursively; an unplannable inner (or a non-value
+            # base type, which the legacy chained arm rejects with its own
+            # CompileError) routes the whole shape to the legacy path.
+            inner_plan = self._plan_member_place(base)
+            if inner_plan is None:
+                return None
+            base_type = self._place_type(base)
+            if not base_type.startswith("struct ") or base_type.endswith("*"):
+                return None
+            info = self._lookup_struct_field(base_type[7:], shape.member_name, shape.line)
+            plan_base = inner_plan
+            plan_base_kind = "plan"
+            base_is_static = False
+            base_preserves_accumulator = False
+        else:
+            return None
+        is_struct_value = info.type_name.startswith("struct ") and not info.type_name.endswith("*")
+        return AddressPlan(
+            base=plan_base,
+            base_is_static=base_is_static,
+            base_kind=plan_base_kind,
+            base_preserves_accumulator=base_preserves_accumulator,
+            bitfield=info if info.bit_width is not None else None,
+            decay_to_address=info.field_size != info.element_size or is_struct_value,
+            displacement=info.byte_offset,
+            element_size=info.element_size,
+            field_size=info.field_size,
+            line=shape.line,
+        )
 
     @staticmethod
     def _rep_width_suffix(element_size: int, /) -> str:
