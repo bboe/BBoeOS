@@ -284,3 +284,21 @@ Recorded as deliberate exclusions:
   suffices for the corpus).
 - Strength reduction of induction-variable addresses (post-3c candidate).
 - Any IR-builder type table (explicitly rejected with Approach B).
+
+## Phase-1 errata (2026-06-07, implementation `bboe/cc-native-address-phase1`)
+
+Task 9's "delete the AST re-seat machinery" proved impossible at 0-delta within
+phase 1: the array-of-pointers subscript chain (`name[i][j]` over `char
+*name[N]`, 6 corpus sites in shell.c) requires a mid-chain element-pointer load
+that has no plan model without an IR-visible type table, and four
+diagnostic-owning arms (aliased-pointer and non-pointer-holder deref stores,
+bitfield AddressOf/IncrementDecrement, undefined-name call slots) keep their
+place-anchored CompileErrors on the legacy arms. `_ir_address_with_index` /
+`_reseat_nested_subscript_indices` therefore survive as a NARROWED residual
+path, locked by
+`tests/unit/test_cc_address_plan.py::test_residual_address_census_matches_allowlist`
+(`RESIDUAL_CENSUS_ALLOWLIST = {"user/programs/shell.c": 6}`). The deletion moves
+to phase 4 (3b.2), which adds the chain-splitting element-pointer-load plan
+extension. A controller-added slice (Task 9a) planned bare deref stores
+`*pointer = leaf` natively to narrow the census to the array-of-pointers family
+alone.
