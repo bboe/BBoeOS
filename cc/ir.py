@@ -1545,66 +1545,55 @@ def _is_byte_safe_binary_operation(node: ast_nodes.Node, /) -> bool:
 
 
 def _is_byte_safe_store_rhs(node: ast_nodes.Node, /) -> bool:
-    """Return True for a member-store RHS whose IR pre-lowering is measured byte-neutral.
+    """Return True for a member-store RHS that is byte-safe to pre-lower to IR.
 
-    ``Int`` / ``Var`` / ``String`` / ``&variable`` are the leaves
-    :meth:`_build_expr` returns directly as an :data:`Value` (an immediate, a
-    name, a string label, or a passed-through ``PlaceAddressOf``) WITHOUT
-    appending any preceding instruction: ``_ir_value_to_ast`` round-trips the
-    leaf back to the exact AST node the legacy ``_emit_place_store`` evaluated
-    in place, so no spill/reload is introduced.
+    **Admitted classes** — all verified 0-delta across 361 functions:
 
-    ``PlaceLoad`` is the one COMPOUND RHS class measured byte-neutral
-    (Stage 3b.1, gate 0-delta over all 361 functions): the RHS member load
-    lowers to its own ``Address`` + ``Load`` whose temp lands in the
-    accumulator immediately before the store consumes it — exactly the register
-    the legacy inline RHS evaluation left it in — and the allocator keeps the
-    single-use temp register-resident (``block->next->prev = block->prev`` in
-    ``stdlib.c`` ``release`` / ``malloc``).
+    *Leaves* (``Int`` / ``Var`` / ``String`` / ``&variable``): :meth:`_build_expr`
+    returns these directly as a :data:`Value` without appending any preceding
+    instruction; ``_ir_value_to_ast`` round-trips the leaf back to the exact
+    AST node, so no spill/reload is introduced.
 
-    Every other compound RHS stays excluded — re-measured in Stage 3b.1
-    slice 5 on top of PR #587's IR-temp register allocator and confirmed STILL
-    byte-regressing.  The legacy ``_emit_place_store`` computes the RHS
-    directly into the accumulator and stores it through the freshly
-    materialized address; lifting the RHS to an IR temp evaluated BEFORE the
-    address forces the allocator to spill the temp to a frame slot and reload
-    it, because resolving the store address — and any RHS sub-computation that
-    clobbers a scratch register, e.g.  ``div``'s ``edx`` — reuses the register
-    the temp would otherwise live in.  Measured deltas: ``BinaryOperation``
-    RHS ``tv->tv_sec = total_ms / 1000`` grew +21 bytes (an ``eax``
-    spill/reload plus a ``push``/``pop edx`` around the ``div``), with further
-    regressions in ``readdir`` / ``_emit_str`` / ``release`` / ``malloc`` /
-    ``symbol_add`` / ``strtol``; ``Index`` RHS grew ``readdir`` +2; ``Cast``
-    RHS grew ``readdir`` +6 even over a bare-leaf inner expression — the cast
-    picks the store width, which the bare ``Value`` round-trip drops.  Unlike
-    a compound subscript INDEX leaf (slice 4) — which the allocator keeps
-    register-resident because it is consumed IMMEDIATELY by the address scale —
-    a general compound RHS must stay live ACROSS the address resolution, so
-    its live range crosses the clobber and the allocator cannot save it.
-    These RHS classes keep the store on :class:`Access`.
+    *``PlaceLoad``*: the RHS member load lowers to its own ``Address`` +
+    ``Load`` whose temp lands in the accumulator immediately before the store
+    consumes it — exactly the register the legacy inline evaluation left it in
+    — and clobber-aware allocation (phase 2: emission's
+    ``_instruction_clobber_registers`` facts feeding
+    ``RegisterConstraints.allowed`` in ``_allocate_ir_temps``) keeps any
+    temp live across the store away from the registers the materialization
+    writes (the latent wrong-code bug where a BX-homed temp was destroyed
+    by the member-base load, fixed in phase 2).
 
-    Every excluded delta is an EXPECTED FUTURE BYTE REDUCTION, not a design
-    cost: the regressions are artifacts of re-seating shapes through the
-    opaque legacy emitter (invisible clobbers; width dropped by the ``Value``
-    round-trip) and are expected to fall to 0-delta-or-shrink once the
-    native-Address emission refactor lands.  The class-by-class ledger — each
-    with its re-admit-and-gate verification check — lives on ``design-specs``:
+    *``Index``* (ledger class 3): the store-terminal RHS sink (emission's
+    ``_collect_ir_sunk_store_values`` / ``_emit_sunk_store_value``)
+    suppresses the def and replays it at the terminal's legacy RHS slot,
+    so the pre-lowered temp never pays a spill/bounce across the address
+    resolution.
+
+    *Leaf-and-chain ``BinaryOperation``* (ledger class 1,
+    :func:`_is_byte_safe_binary_operation`): the same sink replays the def
+    — or the entire left-spine chain of defs — at the terminal's legacy
+    RHS slot, riding the accumulator between links; emission's DX pool
+    reservation in div/mod functions preserves the ``div``/``mod``
+    remainder fusion (``gettimeofday``'s ``(total_ms % 1000) * 1000``
+    chain).  Before the phase-2 mechanisms, pre-lowering
+    ``BinaryOperation`` grew ``gettimeofday`` +21 bytes and ``Index`` grew
+    ``readdir`` +2 bytes.
+
+    **Excluded classes** — remain on :class:`Access`:
+
+    *``Cast``* (ledger class 2): the cast selects the store width; the bare
+    ``Value`` round-trip drops that width, and phase 3's ``Store.width`` field
+    is the planned fix.
+
+    *``PlaceLoad``-operand ``BinaryOperation``* (``p->bytes += q->bytes`` —
+    ``stdlib.c`` ``release`` / ``malloc``): the legacy stack choreography
+    (1-byte ``push`` / ``pop`` around the member loads) cannot be replicated
+    with slot-resident temps; this is a documented residual, ledger annotated.
+
+    The class-by-class ledger with re-admit-and-gate verification checks lives
+    on ``design-specs``:
     ``2026-06-06-cc-native-address-emission-expected-byte-reductions.md``.
-
-    ``Index`` (ledger class 3) is re-admitted in phase 2: the store-terminal
-    RHS sink replays the def at the legacy post-materialization slot, so the
-    pre-lowered temp no longer pays the spill/bounce measured above.
-
-    ``BinaryOperation`` (ledger class 1) is re-admitted in phase 2 for the
-    leaf-operand and pure-binop-chain shapes
-    (:func:`_is_byte_safe_binary_operation`): the store-terminal RHS sink
-    replays the def — or the whole left-spine chain of defs — at the
-    terminal's legacy RHS slot, riding the accumulator between links (the
-    gettimeofday ``(total_ms % 1000) * 1000`` div→mod fusion).  The
-    PlaceLoad-operand subfamily (``p->bytes += q->bytes`` — stdlib.c
-    release/malloc) stays on :class:`Access`: its legacy stack choreography
-    (1-byte pushes around the member loads) cannot be matched by
-    slot-resident temps — documented residual, ledger annotated.
     """
     return (
         isinstance(node, (ast_nodes.Index, ast_nodes.Int, ast_nodes.PlaceLoad, ast_nodes.String, ast_nodes.Var))
