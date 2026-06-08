@@ -34,6 +34,18 @@ into the store-fold predicates and running the gate (then reverting).
 
 ### 1. `BinaryOperation` store RHS — ~18 sites, worst +21 bytes
 
+**CASHED (phase 2, 2026-06-07) — scoped.** Re-admitted for leaf-operand and
+pure-binop-chain shapes; all nine measured functions gate 0-delta
+(`gettimeofday` byte-exact legacy: one `div`, no `push edx`, no spills). Clobber
+visibility alone was NOT sufficient: the design's evaluation-order contract had
+to be implemented as store-RHS *sinking* (suppress the single-use def, replay it
+at the terminal's legacy RHS slot, including left-spine chains with accumulator
+continuity), plus a DX pool reservation in div/mod functions to preserve the
+remainder fusion.  RESIDUAL: the `PlaceLoad`-operand subfamily (`p->bytes +=
+q->bytes`, `release`/`malloc`) stays on `Access` — its legacy 1-byte push/pop
+stack choreography cannot be matched by slot-resident temps;
+`_is_byte_safe_binary_operation` documents the scope.
+
 - **Sites:** `tv->tv_sec = total_ms / 1000` family (worst case, +21);
   regressions also in `readdir` / `_emit_str` / `release` / `malloc` /
   `symbol_add` / `strtol`. Census: 7× `Member(Deref)`, 5× `Deref`, 5× multidim,
@@ -52,6 +64,8 @@ into the store-fold predicates and running the gate (then reverting).
 
 ### 2. `Cast` store RHS — 3 sites, +6 bytes in `readdir`
 
+**OPEN — phase 3** (`Store.width`).
+
 - **Sites:** `dirent.c` `readdir` (+6, the width-bearing `char` cast);
   `stdlib.c` `grow_heap` and `strtol` casts measured 0-delta in the same
   experiment (pointer-width casts — nothing to drop).
@@ -65,12 +79,23 @@ into the store-fold predicates and running the gate (then reverting).
 
 ### 3. `Index` store RHS — 1 site, +2 bytes in `readdir`
 
+**CASHED (phase 2, 2026-06-07).** `readdir` 248 → 248 via the store-RHS sink
+(the first re-admission attempt without the sink measured +6 — worse than the
+original +2 — because the consuming store's base materializes through the
+accumulator and a register home only adds a bounce).
+
 - **Mechanism:** same live-across-the-opaque-walk story as class 1, smaller
   because the RHS is a single load.
 - **Why it disappears:** same as class 1.
 - **Check:** re-admit `Index`; `readdir` must be 0-delta or shrink.
 
 ### 4. Compound-INDEX leaf-RHS stores — 2 sites, +6 / +12 bytes
+
+**CASHED (phase 2, 2026-06-07).** `_emit` and `vsnprintf` 0-delta via a new
+`member_index` AddressPlan flavor (mirroring the legacy `_resolve_member_index`
+resolver exactly) plus index-TERM sinking: the single-use index def (a planned
+`Load`, or an `ir.Block` conditional) is suppressed and replayed at the
+resolver's legacy index slot.
 
 - **Sites:** `stdio.c` `_emit` (+6, `s->buf[s->len] = c`) and `vsnprintf` (+12).
   Measured under a combined relaxation (compound indices + 1-subscript chains +

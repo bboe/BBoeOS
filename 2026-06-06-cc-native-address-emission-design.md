@@ -302,3 +302,39 @@ to phase 4 (3b.2), which adds the chain-splitting element-pointer-load plan
 extension. A controller-added slice (Task 9a) planned bare deref stores
 `*pointer = leaf` natively to narrow the census to the array-of-pointers family
 alone.
+
+## Phase-2 errata (2026-06-07, implementation `bboe/cc-native-address-phase2`)
+
+Phase 2 cashed ledger classes 1, 3, and 4 at byte parity (the full gate 0-delta;
+`gettimeofday` byte-exact legacy), but the mechanism inventory differs from the
+phase table's one-line summary:
+
+- **Clobber visibility alone was insufficient.** The declared clobber sets
+  (consumed as `RegisterConstraints.allowed` restrictions over per-instruction
+  live-across sets) fix correctness — including a REAL latent miscompile found
+  during implementation: a BX-homed temp live across a planned arrow-member load
+  was destroyed by `_load_member_base` on HEAD — but the ledger regressions are
+  dominated by the accumulator (AX), which is not allocatable.  The byte wins
+  came from implementing the design's *evaluation-order contract* as **def
+  sinking**: a single-use store-RHS def (or left-spine chain of defs, or
+  compound-index TERM def) is suppressed at its IR position and replayed at the
+  consuming terminal's legacy evaluation slot, reproducing the legacy bytes by
+  construction.  Accumulator-aware single-use pinning covers the complementary
+  preserve-AX orderings.
+- **DX is handled by pool reservation**, mirroring the member-index BX
+  precedent: in functions containing a DX-writing division, IR temps never home
+  in DX, because the `dx_pinned` guard is function-global and a single DX home
+  kills the div→mod remainder fusion everywhere.  The liveness-aware `dx_pinned`
+  alternative was not needed.
+- **Class 1 is scoped.** Leaf-operand and pure-binop-chain RHS are admitted; the
+  `PlaceLoad`-operand subfamily (`p->bytes += q->bytes`) stays on `Access`
+  permanently-for-now: legacy evaluates it with 1-byte push/pop stack
+  choreography that slot-resident temps cannot match.  Recorded in the ledger as
+  a residual.
+- **Class 4 required a new plan flavor** (`member_index`, mirroring the legacy
+  `_resolve_member_index` resolver) — the widened
+  `_is_mixed_subscript_chain_store` family had no plan model in phase 1.
+- **Pre-existing bugs surfaced by review** (not introduced, zero corpus
+  exposure, tracked for follow-up): the `division_remainder` fusion is never
+  invalidated by an intervening call or operand mutation between the fused div
+  and mod — both shapes miscompile on `main` today.
