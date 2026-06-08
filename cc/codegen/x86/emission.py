@@ -357,6 +357,70 @@ class EmissionMixin:
         return BinaryOperation(left=condition, line=condition.line, operation="!=", right=Int(line=condition.line, value=0))
 
     @staticmethod
+    def _plan_preserves_accumulator_for_store_rhs(plan: AddressPlan, /) -> bool:
+        """Return True when *plan*'s store materialization keeps AX intact up to the RHS read.
+
+        Consulted by :meth:`_collect_ir_deferred_single_use_temps` to decide
+        whether a folded ``ir.Address`` between a store-RHS temp's def and
+        its consuming ``ir.Store`` is transparent (the value rides EAX into
+        the rhs read — pinning would only add a ``mov reg, eax`` def bounce
+        plus a ``mov eax, reg`` read) or real (the materialization clobbers
+        AX first, so the rhs reload exists and a register home removes it).
+        Ordering table, one row per consuming-store shape, each read
+        directly from its emitter:
+
+        - ``deref_store`` (``_emit_planned_deref_store``): the rhs evaluates
+          FIRST; the pointer VALUE then loads into SI via a bare register
+          ``mov`` (``_emit_load_var``) that never touches AX; the store
+          writes from AX.  Preserves.
+        - ``subscript_terminal`` (``_emit_subscript_operand_store``): the
+          rhs evaluates FIRST and is pushed; the term accumulation that
+          clobbers AX runs entirely inside the ``push acc`` / ``pop acc``
+          bracket, AFTER the rhs read.  Preserves in the relevant sense:
+          the rhs read precedes every AX-clobbering materialization step.
+        - ``member_index`` (``_emit_planned_member_index_store``): the rhs
+          evaluates FIRST in both index orderings (the dynamic-index walk
+          brackets its AX traffic inside the rhs push/pop, the constant
+          walk never touches AX).  Preserves in the same relevant sense as
+          the subscript terminal.
+        - member store, ``base_is_static`` (ordering 1 of
+          ``_emit_planned_member_store``): the materialization emits
+          NOTHING (pure label/frame displacement), then the rhs evaluates.
+          Preserves.
+        - member store, ``base_preserves_accumulator`` (ordering 3 — the
+          arrow ``pointer->field`` base): the rhs evaluates FIRST, then the
+          bare ``mov bx, [pointer]`` base load.  Preserves.
+        - member store, chained ``base_kind == "plan"`` (ordering 4): the
+          base materializes FIRST and runs THROUGH the accumulator (the
+          inner decayed member address loads via ``_emit_resolved_load``
+          before seeding BX), destroying AX before the rhs read.  Does NOT
+          preserve.
+        - ``call_slot``: never a Store's plan (owned exclusively by the
+          ``ir.IndirectCall`` terminal); conservatively does not preserve.
+
+        Ordering 2 of ``_emit_planned_member_store`` (the 1-bit literal
+        bitfield write) never reads a temp rhs —
+        ``_bitfield_write_literal_value`` matches integer literals only —
+        so it has no row here.
+        """
+        if plan.call_slot:
+            return False
+        if plan.deref_store or plan.member_index or plan.subscript_terminal:
+            return True
+        if plan.base_kind == "plan":
+            return False
+        # Hardening against planner drift: today every terms-bearing plan
+        # routes through the subscript terminals (handled above), so the
+        # member orderings below never accumulate through AX — but a future
+        # terms-bearing non-subscript plan would (``_accumulate_subscript``
+        # evaluates each index through the accumulator).  Requiring an
+        # AX-free declared clobber set keeps the verdict sound by
+        # construction instead of by invariant.
+        if "ax" in plan.clobbers:
+            return False
+        return plan.base_is_static or plan.base_preserves_accumulator
+
+    @staticmethod
     def _rep_width_suffix(element_size: int, /) -> str:
         """Map element size 1/2/4 to the string-op mnemonic suffix."""
         return {1: "b", 2: "w", 4: "d"}[element_size]
@@ -3890,70 +3954,6 @@ class EmissionMixin:
             subscript_terminal=True,
             terms=terms,
         )
-
-    @staticmethod
-    def _plan_preserves_accumulator_for_store_rhs(plan: AddressPlan, /) -> bool:
-        """Return True when *plan*'s store materialization keeps AX intact up to the RHS read.
-
-        Consulted by :meth:`_collect_ir_deferred_single_use_temps` to decide
-        whether a folded ``ir.Address`` between a store-RHS temp's def and
-        its consuming ``ir.Store`` is transparent (the value rides EAX into
-        the rhs read — pinning would only add a ``mov reg, eax`` def bounce
-        plus a ``mov eax, reg`` read) or real (the materialization clobbers
-        AX first, so the rhs reload exists and a register home removes it).
-        Ordering table, one row per consuming-store shape, each read
-        directly from its emitter:
-
-        - ``deref_store`` (``_emit_planned_deref_store``): the rhs evaluates
-          FIRST; the pointer VALUE then loads into SI via a bare register
-          ``mov`` (``_emit_load_var``) that never touches AX; the store
-          writes from AX.  Preserves.
-        - ``subscript_terminal`` (``_emit_subscript_operand_store``): the
-          rhs evaluates FIRST and is pushed; the term accumulation that
-          clobbers AX runs entirely inside the ``push acc`` / ``pop acc``
-          bracket, AFTER the rhs read.  Preserves in the relevant sense:
-          the rhs read precedes every AX-clobbering materialization step.
-        - ``member_index`` (``_emit_planned_member_index_store``): the rhs
-          evaluates FIRST in both index orderings (the dynamic-index walk
-          brackets its AX traffic inside the rhs push/pop, the constant
-          walk never touches AX).  Preserves in the same relevant sense as
-          the subscript terminal.
-        - member store, ``base_is_static`` (ordering 1 of
-          ``_emit_planned_member_store``): the materialization emits
-          NOTHING (pure label/frame displacement), then the rhs evaluates.
-          Preserves.
-        - member store, ``base_preserves_accumulator`` (ordering 3 — the
-          arrow ``pointer->field`` base): the rhs evaluates FIRST, then the
-          bare ``mov bx, [pointer]`` base load.  Preserves.
-        - member store, chained ``base_kind == "plan"`` (ordering 4): the
-          base materializes FIRST and runs THROUGH the accumulator (the
-          inner decayed member address loads via ``_emit_resolved_load``
-          before seeding BX), destroying AX before the rhs read.  Does NOT
-          preserve.
-        - ``call_slot``: never a Store's plan (owned exclusively by the
-          ``ir.IndirectCall`` terminal); conservatively does not preserve.
-
-        Ordering 2 of ``_emit_planned_member_store`` (the 1-bit literal
-        bitfield write) never reads a temp rhs —
-        ``_bitfield_write_literal_value`` matches integer literals only —
-        so it has no row here.
-        """
-        if plan.call_slot:
-            return False
-        if plan.deref_store or plan.member_index or plan.subscript_terminal:
-            return True
-        if plan.base_kind == "plan":
-            return False
-        # Hardening against planner drift: today every terms-bearing plan
-        # routes through the subscript terminals (handled above), so the
-        # member orderings below never accumulate through AX — but a future
-        # terms-bearing non-subscript plan would (``_accumulate_subscript``
-        # evaluates each index through the accumulator).  Requiring an
-        # AX-free declared clobber set keeps the verdict sound by
-        # construction instead of by invariant.
-        if "ax" in plan.clobbers:
-            return False
-        return plan.base_is_static or plan.base_preserves_accumulator
 
     def _plan_struct_array_member(self, address: ir.Address, /) -> AddressPlan | None:
         """Plan the single-index struct-array member shape ``array[index].member`` (pure; no emission).
