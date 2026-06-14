@@ -46,8 +46,8 @@ def main() -> int:
         ["./make_os.sh"],
         check=True,
         cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
     )
 
     result = run_commands(["date", "ls"], floppy=True, snapshot=True)

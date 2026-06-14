@@ -15,7 +15,13 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# Keep ctypes arrays alive across mixer_render calls — the C side
+# stores raw pointers into voice->samples; if Python frees the array
+# before render reads from it, we read freed memory.
+_KEEPALIVE: list = []
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
 MIXER_SOURCE = REPO_ROOT / "ports" / "doom" / "audio_mixer.c"
 
 
@@ -58,11 +64,6 @@ def _build_shared_library() -> ctypes.CDLL:
 
 
 _LIBRARY = _build_shared_library()
-
-# Keep ctypes arrays alive across mixer_render calls — the C side
-# stores raw pointers into voice->samples; if Python frees the array
-# before render reads from it, we read freed memory.
-_KEEPALIVE: list = []
 
 
 def _render(*, length: int) -> list[int]:

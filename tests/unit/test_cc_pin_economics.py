@@ -12,12 +12,12 @@ def _generator() -> X86CodeGenerator:
 def test_address_taken_local_is_excluded_from_allocatable() -> None:
     """A local whose address is taken must not appear in the allocatable set."""
     body = [
-        VarDecl(name="slot", type_name="int", init=Int(value=0), line=1),
+        VarDecl(init=Int(value=0), line=1, name="slot", type_name="int"),
         VarDecl(
-            name="ptr",
-            type_name="int",
             init=PlaceAddressOf(place=VariablePlace(name="slot")),
             line=2,
+            name="ptr",
+            type_name="int",
         ),
     ]
     generator = _generator()
@@ -31,8 +31,8 @@ def test_reference_counts_and_allocatable_for_simple_body() -> None:
     """Economics bundle marks a simple local as allocatable with a non-zero reference count."""
     # int total = 0; total = 1;  -> 'total' referenced once (the Assign node), eligible, no index use.
     body = [
-        VarDecl(name="total", type_name="int", init=Int(value=0), line=1),
-        Assign(name="total", expr=Int(value=1), line=2),
+        VarDecl(init=Int(value=0), line=1, name="total", type_name="int"),
+        Assign(expr=Int(value=1), line=2, name="total"),
     ]
     generator = _generator()
     generator.safe_pin_registers = generator.compute_safe_pin_registers(body, parameters=[])

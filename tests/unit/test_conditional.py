@@ -112,12 +112,12 @@ def test_codegen_guarded_update_collapses_self_branch() -> None:
         }
     """)
     with tempfile.NamedTemporaryFile(
-        suffix=".c",
-        prefix="_test_guarded_update_",
-        dir=str(REPO_ROOT / "user" / "programs"),
-        mode="w",
-        encoding="utf-8",
         delete=True,
+        dir=str(REPO_ROOT / "user" / "programs"),
+        encoding="utf-8",
+        mode="w",
+        prefix="_test_guarded_update_",
+        suffix=".c",
     ) as src_file:
         src_file.write(test_source)
         src_file.flush()
@@ -174,12 +174,12 @@ def test_codegen_max_min_macro_avoids_redundant_subexpression() -> None:
         }
     """)
     with tempfile.NamedTemporaryFile(
-        suffix=".c",
-        prefix="_test_min_oneshot_",
-        dir=str(REPO_ROOT / "user" / "programs"),
-        mode="w",
-        encoding="utf-8",
         delete=True,
+        dir=str(REPO_ROOT / "user" / "programs"),
+        encoding="utf-8",
+        mode="w",
+        prefix="_test_min_oneshot_",
+        suffix=".c",
     ) as src_file:
         src_file.write(test_source)
         src_file.flush()
@@ -317,12 +317,12 @@ def test_macros_h_max_min_compile() -> None:
         }
     """)
     with tempfile.NamedTemporaryFile(
-        suffix=".c",
-        prefix="_test_macros_",
-        dir=str(REPO_ROOT / "user" / "programs"),
-        mode="w",
-        encoding="utf-8",
         delete=True,
+        dir=str(REPO_ROOT / "user" / "programs"),
+        encoding="utf-8",
+        mode="w",
+        prefix="_test_macros_",
+        suffix=".c",
     ) as src_file:
         src_file.write(test_source)
         src_file.flush()

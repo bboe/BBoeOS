@@ -111,7 +111,7 @@ def test_end_to_end_c_to_flat_binary(tmp_path: Path) -> None:
     die_object = tmp_path / "die.ccobj"
     _write_ccobj(
         die_object,
-        symbols={"die": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"die": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=bytes([0xC3]),
     )
 
@@ -284,15 +284,15 @@ def test_link_applies_abs32_relocation(tmp_path: Path) -> None:
         a,
         extern=["errno"],
         relocations=[
-            {"section": "text", "offset": 1, "symbol": "errno", "type": "abs32"},
+            {"offset": 1, "section": "text", "symbol": "errno", "type": "abs32"},
         ],
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=a_text,
     )
     _write_ccobj(
         b,
         bss_size=4,
-        symbols={"errno": {"section": "bss", "offset": 0, "binding": "global"}},
+        symbols={"errno": {"binding": "global", "offset": 0, "section": "bss"}},
     )
     output = tmp_path / "abs32.bin"
     subprocess.run(
@@ -320,15 +320,15 @@ def test_link_applies_rel32_relocation(tmp_path: Path) -> None:
         a,
         extern=["die"],
         relocations=[
-            {"section": "text", "offset": 1, "symbol": "die", "type": "rel32"},
+            {"offset": 1, "section": "text", "symbol": "die", "type": "rel32"},
         ],
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=a_text,
     )
     b_text = bytes([0xCC, 0xCC, 0xC3])  # int3 int3 ret
     _write_ccobj(
         b,
-        symbols={"die": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"die": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b_text,
     )
     output = tmp_path / "relocated.bin"
@@ -360,12 +360,12 @@ def test_link_concatenates_text_across_objects(tmp_path: Path) -> None:
     b_text = bytes([0xCC, 0xCC])  # 2 bytes
     _write_ccobj(
         a,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=a_text,
     )
     _write_ccobj(
         b,
-        symbols={"helper": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"helper": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b_text,
     )
     output = tmp_path / "concat.bin"
@@ -400,16 +400,16 @@ def test_link_duplicate_local_symbol_is_fine(tmp_path: Path) -> None:
     _write_ccobj(
         a,
         symbols={
-            "main": {"section": "text", "offset": 0, "binding": "global"},
-            "tmp": {"section": "text", "offset": 0, "binding": "local"},
+            "main": {"binding": "global", "offset": 0, "section": "text"},
+            "tmp": {"binding": "local", "offset": 0, "section": "text"},
         },
         text_bytes=b"\xc3",
     )
     _write_ccobj(
         b,
         symbols={
-            "helper": {"section": "text", "offset": 0, "binding": "global"},
-            "tmp": {"section": "text", "offset": 0, "binding": "local"},
+            "helper": {"binding": "global", "offset": 0, "section": "text"},
+            "tmp": {"binding": "local", "offset": 0, "section": "text"},
         },
         text_bytes=b"\xc3",
     )
@@ -430,21 +430,21 @@ def test_link_pulls_archive_member_on_demand(tmp_path: Path) -> None:
     _write_ccobj(
         main_object,
         extern=["die"],
-        relocations=[{"section": "text", "offset": 1, "symbol": "die", "type": "rel32"}],
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        relocations=[{"offset": 1, "section": "text", "symbol": "die", "type": "rel32"}],
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=bytes([0xE8, 0, 0, 0, 0, 0xC3]),
     )
     die_object = tmp_path / "die.ccobj"
     _write_ccobj(
         die_object,
-        symbols={"die": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"die": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=bytes([0xC3]),
     )
     errno_object = tmp_path / "errno.ccobj"
     _write_ccobj(
         errno_object,
         bss_size=4,
-        symbols={"errno": {"section": "bss", "offset": 0, "binding": "global"}},
+        symbols={"errno": {"binding": "global", "offset": 0, "section": "bss"}},
     )
     archive = tmp_path / "runtime.ccar"
     subprocess.run(
@@ -496,8 +496,8 @@ def test_link_records_bss_symbol_addresses(tmp_path: Path) -> None:
         object_payload,
         bss_size=128,
         symbols={
-            "main": {"section": "text", "offset": 0, "binding": "global"},
-            "scratch": {"section": "bss", "offset": 0, "binding": "global"},
+            "main": {"binding": "global", "offset": 0, "section": "text"},
+            "scratch": {"binding": "global", "offset": 0, "section": "bss"},
         },
         text_bytes=text,
     )
@@ -529,7 +529,7 @@ def test_link_rejects_base_negative(tmp_path: Path) -> None:
     object_payload = tmp_path / "x.ccobj"
     _write_ccobj(
         object_payload,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     result = subprocess.run(
@@ -547,7 +547,7 @@ def test_link_rejects_base_not_an_integer(tmp_path: Path) -> None:
     object_payload = tmp_path / "x.ccobj"
     _write_ccobj(
         object_payload,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     result = subprocess.run(
@@ -567,12 +567,12 @@ def test_link_rejects_duplicate_global_symbol(tmp_path: Path) -> None:
     b = tmp_path / "b.ccobj"
     _write_ccobj(
         a,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     _write_ccobj(
         b,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     result = subprocess.run(
@@ -598,13 +598,13 @@ def test_link_rejects_duplicate_global_symbol_without_source(tmp_path: Path) -> 
     _write_ccobj(
         a,
         omit_source=True,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     _write_ccobj(
         b,
         omit_source=True,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     result = subprocess.run(
@@ -624,7 +624,7 @@ def test_link_rejects_image_overflows_address_space(tmp_path: Path) -> None:
     _write_ccobj(
         object_payload,
         bss_size=0xFFFFFFFF,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     result = subprocess.run(
@@ -644,7 +644,7 @@ def test_link_rejects_unresolved_extern(tmp_path: Path) -> None:
     _write_ccobj(
         object_payload,
         extern=["die", "abort"],
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     result = subprocess.run(
@@ -665,7 +665,7 @@ def test_link_text_only_single_object(tmp_path: Path) -> None:
     text = bytes([0x90, 0x90, 0x90, 0xC3])  # nop nop nop ret
     _write_ccobj(
         object_payload,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=text,
     )
     output = tmp_path / "single.bin"
@@ -693,22 +693,22 @@ def test_link_transitive_archive_pull_in(tmp_path: Path) -> None:
     _write_ccobj(
         main_object,
         extern=["die"],
-        relocations=[{"section": "text", "offset": 1, "symbol": "die", "type": "rel32"}],
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        relocations=[{"offset": 1, "section": "text", "symbol": "die", "type": "rel32"}],
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=bytes([0xE8, 0, 0, 0, 0, 0xC3]),
     )
     die_object = tmp_path / "die.ccobj"
     _write_ccobj(
         die_object,
         extern=["_exit"],
-        relocations=[{"section": "text", "offset": 1, "symbol": "_exit", "type": "rel32"}],
-        symbols={"die": {"section": "text", "offset": 0, "binding": "global"}},
+        relocations=[{"offset": 1, "section": "text", "symbol": "_exit", "type": "rel32"}],
+        symbols={"die": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=bytes([0xE8, 0, 0, 0, 0, 0xC3]),
     )
     exit_object = tmp_path / "_exit.ccobj"
     _write_ccobj(
         exit_object,
-        symbols={"_exit": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"_exit": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=bytes([0xC3]),
     )
     archive = tmp_path / "runtime.ccar"
@@ -750,7 +750,7 @@ def test_load_rejects_ccar_duplicate_member_file(tmp_path: Path) -> None:
     object_payload = tmp_path / "x.ccobj"
     _write_ccobj(
         object_payload,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     archive = tmp_path / "lib.ccar"
@@ -780,7 +780,7 @@ def test_load_rejects_ccar_member_directory_traversal(tmp_path: Path) -> None:
     object_payload = tmp_path / "x.ccobj"
     _write_ccobj(
         object_payload,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     archive = tmp_path / "lib.ccar"
@@ -807,13 +807,13 @@ def test_load_rejects_ccar_member_missing_on_disk(tmp_path: Path) -> None:
     main_object = tmp_path / "main.ccobj"
     _write_ccobj(
         main_object,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     die_object = tmp_path / "die.ccobj"
     _write_ccobj(
         die_object,
-        symbols={"die": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"die": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     archive = tmp_path / "runtime.ccar"
@@ -839,7 +839,7 @@ def test_load_rejects_ccar_member_provides_not_list(tmp_path: Path) -> None:
     object_payload = tmp_path / "x.ccobj"
     _write_ccobj(
         object_payload,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     archive = tmp_path / "lib.ccar"
@@ -866,7 +866,7 @@ def test_load_rejects_ccar_top_level_not_object(tmp_path: Path) -> None:
     object_payload = tmp_path / "x.ccobj"
     _write_ccobj(
         object_payload,
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     archive = tmp_path / "lib.ccar"
@@ -888,7 +888,7 @@ def test_load_rejects_extern_duplicate_names(tmp_path: Path) -> None:
     _write_ccobj(
         object_payload,
         extern=["die", "die"],
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     result = subprocess.run(
@@ -924,10 +924,10 @@ def test_load_rejects_relocation_duplicate_patch_site(tmp_path: Path) -> None:
         object_payload,
         extern=["die", "_exit"],
         relocations=[
-            {"section": "text", "offset": 1, "symbol": "die", "type": "rel32"},
-            {"section": "text", "offset": 1, "symbol": "_exit", "type": "rel32"},
+            {"offset": 1, "section": "text", "symbol": "die", "type": "rel32"},
+            {"offset": 1, "section": "text", "symbol": "_exit", "type": "rel32"},
         ],
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=bytes([0xE8, 0, 0, 0, 0, 0xC3]),
     )
     result = subprocess.run(
@@ -946,8 +946,8 @@ def test_load_rejects_relocation_negative_offset(tmp_path: Path) -> None:
     _write_ccobj(
         object_payload,
         extern=["die"],
-        relocations=[{"section": "text", "offset": -1, "symbol": "die", "type": "rel32"}],
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        relocations=[{"offset": -1, "section": "text", "symbol": "die", "type": "rel32"}],
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     result = subprocess.run(
@@ -968,8 +968,8 @@ def test_load_rejects_relocation_offset_past_section_end(tmp_path: Path) -> None
         object_payload,
         extern=["die"],
         # Section is 4 bytes; rel32 at offset 2 would need bytes 2..5 — past the end.
-        relocations=[{"section": "text", "offset": 2, "symbol": "die", "type": "rel32"}],
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        relocations=[{"offset": 2, "section": "text", "symbol": "die", "type": "rel32"}],
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\x00\x00\x00\x00",
     )
     result = subprocess.run(
@@ -1137,7 +1137,7 @@ def test_load_rejects_symbol_empty_name(tmp_path: Path) -> None:
     object_payload = tmp_path / "bad.ccobj"
     _write_ccobj(
         object_payload,
-        symbols={"": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\xc3",
     )
     result = subprocess.run(
@@ -1155,7 +1155,7 @@ def test_load_rejects_symbol_negative_offset(tmp_path: Path) -> None:
     object_payload = tmp_path / "bad.ccobj"
     _write_ccobj(
         object_payload,
-        symbols={"main": {"section": "text", "offset": -1, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": -1, "section": "text"}},
         text_bytes=b"\xc3",
     )
     result = subprocess.run(
@@ -1175,7 +1175,7 @@ def test_load_rejects_symbol_offset_past_section_end(tmp_path: Path) -> None:
     _write_ccobj(
         object_payload,
         # text is 1 byte; offset 2 is past the end.
-        symbols={"main": {"section": "text", "offset": 2, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 2, "section": "text"}},
         text_bytes=b"\xc3",
     )
     result = subprocess.run(
@@ -1194,7 +1194,7 @@ def test_load_rejects_symbol_unknown_section(tmp_path: Path) -> None:
     object_payload = tmp_path / "bad.ccobj"
     _write_ccobj(
         object_payload,
-        symbols={"main": {"section": "ctors", "offset": 0, "binding": "global"}},
+        symbols={"main": {"binding": "global", "offset": 0, "section": "ctors"}},
         text_bytes=b"\xc3",
     )
     result = subprocess.run(
@@ -1214,8 +1214,8 @@ def test_load_rejects_unknown_relocation_type(tmp_path: Path) -> None:
     _write_ccobj(
         object_payload,
         extern=["foo"],
-        relocations=[{"section": "text", "offset": 0, "symbol": "foo", "type": "rel16"}],
-        symbols={"main": {"section": "text", "offset": 0, "binding": "global"}},
+        relocations=[{"offset": 0, "section": "text", "symbol": "foo", "type": "rel16"}],
+        symbols={"main": {"binding": "global", "offset": 0, "section": "text"}},
         text_bytes=b"\x00\x00\x00\x00",
     )
     result = subprocess.run(

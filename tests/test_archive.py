@@ -34,8 +34,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARCHIVE_DIR = REPO_ROOT / "archive"
-C_DIR = REPO_ROOT / "user" / "programs"
 CC_PY = REPO_ROOT / "cc.py"
+C_DIR = REPO_ROOT / "user" / "programs"
 INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 README_PATH = ARCHIVE_DIR / "README.md"
 
@@ -66,7 +66,7 @@ class Expected:
     delta: int
 
 
-def assemble(*, source: Path, output: Path) -> tuple[bool, str]:
+def assemble(*, output: Path, source: Path) -> tuple[bool, str]:
     """Run nasm on *source* writing to *output*.  Return (ok, stderr)."""
     result = subprocess.run(
         [
@@ -86,7 +86,7 @@ def assemble(*, source: Path, output: Path) -> tuple[bool, str]:
     return result.returncode == 0, result.stderr.strip()
 
 
-def check_program(*, name: str, expected: Expected | None, scratch: Path) -> tuple[bool, str]:
+def check_program(*, expected: Expected | None, name: str, scratch: Path) -> tuple[bool, str]:
     """Build both forms of *name* and diff their bytes against the README."""
     asm_source = ARCHIVE_DIR / f"{name}.asm"
     c_source = C_DIR / f"{name}.c"
@@ -96,10 +96,10 @@ def check_program(*, name: str, expected: Expected | None, scratch: Path) -> tup
         return False, "no README row"
     asm_output = scratch / f"{name}.asm.bin"
     c_output = scratch / f"{name}.c.bin"
-    ok, stderr = assemble(source=asm_source, output=asm_output)
+    ok, stderr = assemble(output=asm_output, source=asm_source)
     if not ok:
         return False, f"nasm failed on archive asm: {stderr}"
-    ok, stderr = compile_c(source=c_source, output=c_output, scratch=scratch)
+    ok, stderr = compile_c(output=c_output, scratch=scratch, source=c_source)
     if not ok:
         return False, stderr
     actual_asm = asm_output.stat().st_size
@@ -117,7 +117,7 @@ def check_program(*, name: str, expected: Expected | None, scratch: Path) -> tup
     return True, f"asm={actual_asm} c={actual_c} Δ={actual_delta:+d}"
 
 
-def compile_c(*, source: Path, output: Path, scratch: Path) -> tuple[bool, str]:
+def compile_c(*, output: Path, scratch: Path, source: Path) -> tuple[bool, str]:
     """Run cc.py + nasm on *source*, writing the binary to *output*."""
     asm_path = scratch / f"{source.stem}.asm"
     result = subprocess.run(
@@ -128,7 +128,7 @@ def compile_c(*, source: Path, output: Path, scratch: Path) -> tuple[bool, str]:
     )
     if result.returncode != 0:
         return False, f"cc.py failed: {result.stderr.strip() or result.stdout.strip()}"
-    return assemble(source=asm_path, output=output)
+    return assemble(output=output, source=asm_path)
 
 
 def main() -> int:
@@ -137,7 +137,7 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("program", nargs="?", help="restrict to one program (e.g. 'ping')")
+    parser.add_argument("program", help="restrict to one program (e.g. 'ping')", nargs="?")
     arguments = parser.parse_args()
 
     names = sorted(p.stem for p in ARCHIVE_DIR.glob("*.asm"))
@@ -156,8 +156,8 @@ def main() -> int:
         scratch = Path(temp_dir)
         for name in names:
             ok, message = check_program(
-                name=name,
                 expected=rows.get(name),
+                name=name,
                 scratch=scratch,
             )
             status = "PASS" if ok else "FAIL"
@@ -185,8 +185,8 @@ def parse_readme_table(*, readme: Path) -> dict[str, Expected]:
         if match.group("name") == "Program":
             continue
         rows[match.group("name")] = Expected(
-            asm_16=int(match.group("asm_16")),
             asm=int(match.group("asm")),
+            asm_16=int(match.group("asm_16")),
             c=int(match.group("c")),
             delta=int(match.group("delta")),
         )

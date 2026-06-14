@@ -17,15 +17,6 @@ BITWISE_OR_OPERATORS = frozenset({"PIPE"})
 
 BITWISE_XOR_OPERATORS = frozenset({"CARET"})
 
-#: Comparison operators as source strings (not token kinds).  Shared
-#: between the parser (deciding when to wrap a bare expression in
-#: ``!= 0``) and the IR builder (deciding which BinaryOperation nodes
-#: lower to :class:`cc.ir.IRBranchFalse`).
-COMPARISON_OPERATIONS = frozenset({"==", "!=", "<", "<=", ">", ">="})
-
-#: Invert a comparison operator (for ``_build_cond_true`` via :class:`cc.ir.IRBranchFalse`).
-INVERT_COMPARISON = {"==": "!=", "!=": "==", "<": ">=", "<=": ">", ">": "<=", ">=": "<"}
-
 CHARACTER_ESCAPES = {
     '"': 0x22,
     "'": 0x27,
@@ -38,7 +29,29 @@ CHARACTER_ESCAPES = {
     "t": 0x09,
 }
 
+#: Comparison operators as source strings (not token kinds).  Shared
+#: between the parser (deciding when to wrap a bare expression in
+#: ``!= 0``) and the IR builder (deciding which BinaryOperation nodes
+#: lower to :class:`cc.ir.IRBranchFalse`).
+COMPARISON_OPERATIONS = frozenset({"==", "!=", "<", "<=", ">", ">="})
+
 COMPARISON_OPERATORS = frozenset({"EQ", "GE", "GT", "LE", "LT", "NE"})
+
+COMPOUND_ASSIGN_OPERATORS = {
+    "AMP_ASSIGN": "&",
+    "CARET_ASSIGN": "^",
+    "MINUS_ASSIGN": "-",
+    "PERCENT_ASSIGN": "%",
+    "PIPE_ASSIGN": "|",
+    "PLUS_ASSIGN": "+",
+    "SHL_ASSIGN": "<<",
+    "SHR_ASSIGN": ">>",
+    "SLASH_ASSIGN": "/",
+    "STAR_ASSIGN": "*",
+}
+
+#: Invert a comparison operator (for ``_build_cond_true`` via :class:`cc.ir.IRBranchFalse`).
+INVERT_COMPARISON = {"!=": "==", "<": ">=", "<=": ">", "==": "!=", ">": "<=", ">=": "<"}
 
 KEYWORDS = frozenset({
     "break",
@@ -75,19 +88,6 @@ KEYWORDS = frozenset({
 MULTIPLICATIVE_OPERATORS = frozenset({"PERCENT", "SLASH", "STAR"})
 
 SHIFT_OPERATORS = frozenset({"SHL", "SHR"})
-
-COMPOUND_ASSIGN_OPERATORS = {
-    "AMP_ASSIGN": "&",
-    "CARET_ASSIGN": "^",
-    "MINUS_ASSIGN": "-",
-    "PERCENT_ASSIGN": "%",
-    "PIPE_ASSIGN": "|",
-    "PLUS_ASSIGN": "+",
-    "SHL_ASSIGN": "<<",
-    "SHR_ASSIGN": ">>",
-    "SLASH_ASSIGN": "/",
-    "STAR_ASSIGN": "*",
-}
 
 TOKEN_PATTERN = re.compile(
     r"""

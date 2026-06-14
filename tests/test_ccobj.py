@@ -338,7 +338,7 @@ def test_pack_ccobj_basic_fixture(tmp_path: Path) -> None:
 
     assert data["version"] == 1
     assert set(data["symbols"]) == {"main", "helper", "format_string", "counter", "scratch"}
-    assert data["symbols"]["main"] == {"section": "text", "offset": 0, "binding": "global"}
+    assert data["symbols"]["main"] == {"binding": "global", "offset": 0, "section": "text"}
     assert data["symbols"]["helper"]["section"] == "text"
     assert data["symbols"]["format_string"]["section"] == "rodata"
     assert data["symbols"]["counter"]["section"] == "data"

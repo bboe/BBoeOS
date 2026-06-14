@@ -24,7 +24,7 @@ CCREL_MACROS: dict[str, tuple[str, int]] = {
 
 # Default alignment per section.  Linker uses
 # max(per-object align, per-section default).
-DEFAULT_ALIGN: dict[str, int] = {"text": 16, "rodata": 4, "data": 4, "bss": 4}
+DEFAULT_ALIGN: dict[str, int] = {"bss": 4, "data": 4, "rodata": 4, "text": 16}
 
 # Sections the linker knows about.  Other sections in the .lst are an
 # error (keeps the format tight).
@@ -336,9 +336,9 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
         if label_name is not None:
             symbol_offset = offset if offset is not None else len(section_bytes.setdefault(current_section, bytearray()))
             symbols[label_name] = {
-                "section": current_section,
-                "offset": symbol_offset,
                 "binding": "global" if label_name in globals_declared else "local",
+                "offset": symbol_offset,
+                "section": current_section,
             }
 
         if offset is not None and bytes_column and current_section is not None:
@@ -346,8 +346,8 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
                 macro_name, symbol = pending_macro
                 reloc_type, opcode_length = CCREL_MACROS[macro_name]
                 relocations.append({
-                    "section": current_section,
                     "offset": offset + opcode_length,
+                    "section": current_section,
                     "symbol": symbol,
                     "type": reloc_type,
                 })
@@ -386,11 +386,11 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
                     signed=True,
                 )
                 relocations.append({
-                    "section": current_section,
+                    "_placeholder": placeholder_value,
                     "offset": offset + reloc_opcode_length,
+                    "section": current_section,
                     "symbol": symbol,
                     "type": "abs32",
-                    "_placeholder": placeholder_value,
                 })
             _accumulate_bytes(
                 bytes_column=bytes_column,
@@ -428,21 +428,21 @@ def pack_ccobj(*, bin_path: Path, lst_path: Path, output_path: Path) -> None:
     for name in KNOWN_SECTIONS:
         if name == "bss":
             if bss_size > 0:
-                sections["bss"] = {"size": bss_size, "align": DEFAULT_ALIGN["bss"]}
+                sections["bss"] = {"align": DEFAULT_ALIGN["bss"], "size": bss_size}
             continue
         if name in section_bytes and len(section_bytes[name]) > 0:
             sections[name] = {
-                "bytes": base64.b64encode(bytes(section_bytes[name])).decode("ascii"),
                 "align": DEFAULT_ALIGN[name],
+                "bytes": base64.b64encode(bytes(section_bytes[name])).decode("ascii"),
             }
 
     output = {
-        "version": 1,
-        "source": str(lst_path.with_suffix(".asm")),
-        "sections": sections,
-        "symbols": symbols,
         "extern": extern_set,
         "relocations": relocations,
+        "sections": sections,
+        "source": str(lst_path.with_suffix(".asm")),
+        "symbols": symbols,
+        "version": 1,
     }
     with output_path.open("w", encoding="utf-8") as output_file:
         json.dump(output, output_file, indent=2)

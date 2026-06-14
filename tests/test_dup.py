@@ -30,7 +30,7 @@ def _run(*, command: str) -> bytes:
 
 def main() -> int:
     """Build the OS image and run all dup smoke tests."""
-    subprocess.run(["./make_os.sh"], check=True, cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["./make_os.sh"], check=True, cwd=REPO_ROOT, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
     test_dup2_closes_target_first()
     test_dup2_self_is_noop()
     test_dup_console_writes()

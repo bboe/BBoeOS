@@ -38,15 +38,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--output",
+        help="Output path for the .ccar manifest.",
         required=True,
         type=Path,
-        help="Output path for the .ccar manifest.",
     )
     parser.add_argument(
         "inputs",
+        help="One or more .ccobj files (must live in the same directory as --output).",
         nargs="+",
         type=Path,
-        help="One or more .ccobj files (must live in the same directory as --output).",
     )
     arguments = parser.parse_args()
 

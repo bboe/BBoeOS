@@ -25,17 +25,17 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-CC = REPO_ROOT / "cc.py"
-INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
-LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
-
 # Auto-prepended to every inline C snippet compiled through the helpers
 # below so test sources can use ``unsigned char`` / ``unsigned short`` / ``unsigned int``
 # without each test snippet repeating the include.  The names come from
 # ``user/libbboeos/include/stdint.h`` (cc.py reaches it via the ``-I``
 # flag we add to every subprocess call).
 _STDINT_PREAMBLE = "#include <stdint.h>\n"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+CC = REPO_ROOT / "cc.py"
+INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
+
+LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
 sys.path.insert(0, str(REPO_ROOT))
 from cc import ast_nodes, ir  # noqa: E402
 from cc.codegen.x86.generator import X86CodeGenerator  # noqa: E402
@@ -62,7 +62,7 @@ FD_OFFSET_START = 2
 FD_OFFSET_TYPE = 0
 
 
-def _compile(source_text: str, /, *, target: str = "user", bits: int = 16) -> tuple[bool, str]:
+def _compile(source_text: str, /, *, bits: int = 16, target: str = "user") -> tuple[bool, str]:
     """Run cc.py on *source_text*; return (success, output_or_stderr)."""
     text = _STDINT_PREAMBLE + textwrap.dedent(source_text)
     with tempfile.TemporaryDirectory(prefix="test_kernel_") as work:
@@ -112,7 +112,7 @@ def _compile_and_assemble(source_text: str, /, *, bits: int = 16) -> None:
 
 def _kernel(source_text: str, /, *, bits: int = 16) -> str:
     """Compile *source_text* in kernel mode; fail the test on error."""
-    ok, output = _compile(source_text, target="kernel", bits=bits)
+    ok, output = _compile(source_text, bits=bits, target="kernel")
     if not ok:
         pytest.fail(f"cc.py --target kernel failed:\n{output}")
     return output
@@ -120,7 +120,7 @@ def _kernel(source_text: str, /, *, bits: int = 16) -> str:
 
 def _kernel_error(source_text: str, /, *, bits: int = 16) -> str:
     """Compile in kernel mode expecting failure; return the error message."""
-    ok, output = _compile(source_text, target="kernel", bits=bits)
+    ok, output = _compile(source_text, bits=bits, target="kernel")
     if ok:
         pytest.fail(f"Expected CompileError but compilation succeeded:\n{output}")
     return output
@@ -131,9 +131,30 @@ def _peephole_run(lines: list[str], /) -> list[str]:
     return Peepholer(lines=lines, target=X86CodegenTarget16()).run()
 
 
+def _rep_string_asm(instruction: ir.RepString, /) -> str:
+    """Lower a single :class:`ir.RepString` through a 32-bit generator and return the asm.
+
+    Drives :meth:`generate_rep_string` directly so a synthetic
+    ``RepString`` (e.g. a ``final_iv`` shape the matcher does not yet
+    emit) can be exercised in isolation; the end-to-end C-to-asm path is
+    covered separately by ``test_fill_loop_compiles_to_rep_stosb`` and
+    friends.  The base names referenced by the instruction (``dest`` /
+    ``source`` / ``count`` / the induction variable) are registered as
+    memory-resident locals so the value-load helper resolves them through
+    the frame-slot path rather than tripping the undefined-variable check.
+    """
+    generator = X86CodeGenerator(CompilerOptions(bits=32))
+    for offset, name in enumerate(("dst", "src", "n", "iv"), start=1):
+        generator.locals[name] = offset * 4
+        generator.visible_vars.add(name)
+        generator.variable_types[name] = "unsigned int"
+    generator.generate_rep_string(instruction)
+    return "\n".join(generator.lines)
+
+
 def _user(source_text: str, /, *, bits: int = 16) -> str:
     """Compile *source_text* in user mode; fail the test on error."""
-    ok, output = _compile(source_text, target="user", bits=bits)
+    ok, output = _compile(source_text, bits=bits, target="user")
     if not ok:
         pytest.fail(f"cc.py --target user failed:\n{output}")
     return output
@@ -3062,8 +3083,8 @@ def test_member_access_via_cast_arrow_rejects_non_struct_pointer() -> None:
             return ((int *)&raw)->value;
         }
         """,
-        target="user",
         bits=32,
+        target="user",
     )
     assert not ok, f"expected struct-pointer-cast rejection, got success:\n{message}"
     assert "requires a pointer to struct" in message, message
@@ -4901,8 +4922,8 @@ def test_rep_string_copy_dword_emits_rep_movsd() -> None:
     """A dword-wide copy RepString lowers to ``rep movsd``."""
     asm = _rep_string_asm(
         ir.RepString(
-            counter_signed=False,
             count="n",
+            counter_signed=False,
             dest="dst",
             element_size=4,
             fill_value=None,
@@ -4918,8 +4939,8 @@ def test_rep_string_fill_byte_emits_rep_stosb() -> None:
     """A byte-wide fill RepString lowers to ``cld`` + ``rep stosb``."""
     asm = _rep_string_asm(
         ir.RepString(
-            counter_signed=False,
             count="n",
+            counter_signed=False,
             dest="dst",
             element_size=1,
             fill_value=0,
@@ -4936,8 +4957,8 @@ def test_rep_string_final_iv_stores_post_loop_value() -> None:
     """``final_iv`` materializes the induction variable's post-loop value."""
     asm = _rep_string_asm(
         ir.RepString(
-            counter_signed=False,
             count="n",
+            counter_signed=False,
             dest="dst",
             element_size=2,
             fill_value=None,
@@ -5009,8 +5030,8 @@ def test_rep_string_signed_counter_emits_guard() -> None:
     """A signed-counter RepString guards the rep with ``test`` + ``jle``."""
     asm = _rep_string_asm(
         ir.RepString(
-            counter_signed=True,
             count="n",
+            counter_signed=True,
             dest="dst",
             element_size=1,
             fill_value=0,
@@ -5029,8 +5050,8 @@ def test_rep_string_unsigned_counter_has_no_guard() -> None:
     """An unsigned-counter RepString emits no ``jle`` guard."""
     asm = _rep_string_asm(
         ir.RepString(
-            counter_signed=False,
             count="n",
+            counter_signed=False,
             dest="dst",
             element_size=1,
             fill_value=None,
@@ -5953,8 +5974,8 @@ def test_user_asm_register_pins_global_to_register() -> None:
             return cursor[0];
         }
         """,
-        target="user",
         bits=32,
+        target="user",
     )
     assert ok, f"compile failed:\n{asm}"
     assert "_g_cursor" not in asm, f"asm_register global should have no storage slot:\n{asm}"
@@ -5976,8 +5997,8 @@ def test_user_brace_init_global_array_emits_dd_table() -> None:
             return fib[9];
         }
         """,
-        target="user",
         bits=32,
+        target="user",
     )
     assert ok, f"compile failed:\n{asm}"
     assert "_g_fib: dd 1, 1, 2, 3, 5, 8, 13, 21, 34, 55" in asm, f"missing brace-init dd table:\n{asm}"
@@ -6101,8 +6122,8 @@ def test_user_double_subscript_into_array_of_pointers() -> None:
             return first + second;
         }
         """,
-        target="user",
         bits=32,
+        target="user",
     )
     assert ok, f"compile failed:\n{asm}"
     assert "_g_pointers" in asm, f"missing _g_pointers reference:\n{asm}"
@@ -6242,8 +6263,8 @@ def test_user_file_scope_asm_escape() -> None:
             return 0;
         }
         """,
-        target="user",
         bits=32,
+        target="user",
     )
     assert ok, f"compile failed:\n{asm}"
     assert "asmesc_table: db 42, 99, 7, 11" in asm, f"missing file-scope asm() emission:\n{asm}"
@@ -6272,8 +6293,8 @@ def test_user_file_scope_bss_globals() -> None:
             return counter + history[0] + label[0];
         }
         """,
-        target="user",
         bits=32,
+        target="user",
     )
     assert ok, f"compile failed:\n{asm}"
     assert "_g_counter" in asm, f"missing _g_counter reference:\n{asm}"
@@ -6293,8 +6314,8 @@ def test_user_global_array_accepts_uint16_element() -> None:
             return 0;
         }
         """,
-        target="user",
         bits=32,
+        target="user",
     )
     assert ok, f"unexpected compile error:\n{output}"
     assert "mov dword" not in output, f"unsigned short global must not store dword:\n{output}"
@@ -6323,8 +6344,8 @@ def test_user_global_array_pointer_and_uint32_elements() -> None:
             return c;
         }
         """,
-        target="user",
         bits=32,
+        target="user",
     )
     assert ok, f"compile failed:\n{asm}"
     assert "_g_slots equ _program_end" in asm, f"slots missing from BSS:\n{asm}"
@@ -6944,27 +6965,6 @@ def test_user_switch_nested_in_loop_lowers_break_to_switch_end() -> None:
     # switch end and the surrounding loop continues to its own end.
     assert ".switch_" in asm and "_end" in asm, f"missing switch end label:\n{asm}"
     assert ".while_" in asm or "._ir_wend" in asm, f"missing while end:\n{asm}"
-
-
-def _rep_string_asm(instruction: ir.RepString, /) -> str:
-    """Lower a single :class:`ir.RepString` through a 32-bit generator and return the asm.
-
-    Drives :meth:`generate_rep_string` directly so a synthetic
-    ``RepString`` (e.g. a ``final_iv`` shape the matcher does not yet
-    emit) can be exercised in isolation; the end-to-end C-to-asm path is
-    covered separately by ``test_fill_loop_compiles_to_rep_stosb`` and
-    friends.  The base names referenced by the instruction (``dest`` /
-    ``source`` / ``count`` / the induction variable) are registered as
-    memory-resident locals so the value-load helper resolves them through
-    the frame-slot path rather than tripping the undefined-variable check.
-    """
-    generator = X86CodeGenerator(CompilerOptions(bits=32))
-    for offset, name in enumerate(("dst", "src", "n", "iv"), start=1):
-        generator.locals[name] = offset * 4
-        generator.visible_vars.add(name)
-        generator.variable_types[name] = "unsigned int"
-    generator.generate_rep_string(instruction)
-    return "\n".join(generator.lines)
 
 
 def test_user_switch_on_char_discriminant_accepts_char_literal_cases() -> None:

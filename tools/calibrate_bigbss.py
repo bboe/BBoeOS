@@ -42,9 +42,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+DEFINE_PATTERN = re.compile(r"^(#define BIGBSS_PAGES )(\d+)[ \t]*(?=\r?\n|$)", re.MULTILINE)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HEADER_PATH = REPO_ROOT / "tests" / "programs" / "bigbss_size.h"
-DEFINE_PATTERN = re.compile(r"^(#define BIGBSS_PAGES )(\d+)[ \t]*(?=\r?\n|$)", re.MULTILINE)
+
+
+def _bisect(*, high: int, low: int) -> int:
+    """Binary-search for largest passing N in (low, high)."""
+    while high - low > 1:
+        middle = (low + high) // 2
+        if _probe(pages=middle):
+            low = middle
+        else:
+            high = middle
+    return low
 
 
 def _bracket(*, start: int) -> tuple[int, int]:
@@ -62,61 +73,6 @@ def _bracket(*, start: int) -> tuple[int, int]:
         step *= 2
         low = high
     return high - step, high
-
-
-def _bisect(*, high: int, low: int) -> int:
-    """Binary-search for largest passing N in (low, high)."""
-    while high - low > 1:
-        middle = (low + high) // 2
-        if _probe(pages=middle):
-            low = middle
-        else:
-            high = middle
-    return low
-
-
-def _verify(*, pages: int) -> int:
-    """Run the full tripwire trio.  Return 0 on success, 2 on failure."""
-    _set_pages(pages=pages)
-    for name, requirement in [("bigbss", "pass @ -m 2048"), ("bigbss_fail", "OOM @ -m 2048"), ("bigbss_oom", "OOM @ -m 2047")]:
-        print(f"verify: {name} must {requirement}")
-        if not _run_test(name=name):
-            print(f"verify FAILED: {name} did not {requirement}", file=sys.stderr)
-            return 2
-    print("verify: tripwire trio OK")
-    return 0
-
-
-def main() -> int:
-    """Entry point."""
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--dry-run", action="store_true", help="print result without editing the header")
-    parser.add_argument("--start", type=int, default=None, help="starting page count (default: current BIGBSS_PAGES)")
-    parser.add_argument("--verify", action="store_true", help="after calibration, run the full tripwire trio")
-    arguments = parser.parse_args()
-
-    header_text = HEADER_PATH.read_text()
-    match = DEFINE_PATTERN.search(header_text)
-    if not match:
-        print(f"could not find `#define BIGBSS_PAGES <n>` in {HEADER_PATH}", file=sys.stderr)
-        return 1
-    current = int(match.group(2))
-    start = arguments.start if arguments.start is not None else current
-    print(f"current BIGBSS_PAGES = {current}; searching from {start}")
-
-    low, high = _bracket(start=start)
-    print(f"bracketed: pass at {low}, fail at {high}")
-    ceiling = _bisect(high=high, low=low)
-    print(f"page-precise ceiling: BIGBSS_PAGES = {ceiling}")
-
-    if not arguments.dry_run and ceiling != current:
-        new_text = DEFINE_PATTERN.sub(rf"\g<1>{ceiling}", header_text)
-        HEADER_PATH.write_text(new_text)
-        print(f"updated {HEADER_PATH.relative_to(REPO_ROOT)}: {current} -> {ceiling}")
-
-    if arguments.verify:
-        return _verify(pages=ceiling)
-    return 0
 
 
 def _probe(*, pages: int) -> bool:
@@ -145,6 +101,50 @@ def _set_pages(*, pages: int) -> None:
     header_text = HEADER_PATH.read_text()
     new_text = DEFINE_PATTERN.sub(rf"\g<1>{pages}", header_text)
     HEADER_PATH.write_text(new_text)
+
+
+def _verify(*, pages: int) -> int:
+    """Run the full tripwire trio.  Return 0 on success, 2 on failure."""
+    _set_pages(pages=pages)
+    for name, requirement in [("bigbss", "pass @ -m 2048"), ("bigbss_fail", "OOM @ -m 2048"), ("bigbss_oom", "OOM @ -m 2047")]:
+        print(f"verify: {name} must {requirement}")
+        if not _run_test(name=name):
+            print(f"verify FAILED: {name} did not {requirement}", file=sys.stderr)
+            return 2
+    print("verify: tripwire trio OK")
+    return 0
+
+
+def main() -> int:
+    """Entry point."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--dry-run", action="store_true", help="print result without editing the header")
+    parser.add_argument("--start", default=None, help="starting page count (default: current BIGBSS_PAGES)", type=int)
+    parser.add_argument("--verify", action="store_true", help="after calibration, run the full tripwire trio")
+    arguments = parser.parse_args()
+
+    header_text = HEADER_PATH.read_text()
+    match = DEFINE_PATTERN.search(header_text)
+    if not match:
+        print(f"could not find `#define BIGBSS_PAGES <n>` in {HEADER_PATH}", file=sys.stderr)
+        return 1
+    current = int(match.group(2))
+    start = arguments.start if arguments.start is not None else current
+    print(f"current BIGBSS_PAGES = {current}; searching from {start}")
+
+    low, high = _bracket(start=start)
+    print(f"bracketed: pass at {low}, fail at {high}")
+    ceiling = _bisect(high=high, low=low)
+    print(f"page-precise ceiling: BIGBSS_PAGES = {ceiling}")
+
+    if not arguments.dry_run and ceiling != current:
+        new_text = DEFINE_PATTERN.sub(rf"\g<1>{ceiling}", header_text)
+        HEADER_PATH.write_text(new_text)
+        print(f"updated {HEADER_PATH.relative_to(REPO_ROOT)}: {current} -> {ceiling}")
+
+    if arguments.verify:
+        return _verify(pages=ceiling)
+    return 0
 
 
 if __name__ == "__main__":

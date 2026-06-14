@@ -13,18 +13,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-def address_of_variable_name(node: object, /) -> str | None:
-    """Return the variable name of an ``&name`` expression, else ``None``.
+class IntegerOperand:
+    """Marker mixin: instances classify as ``"integer"`` in comparison-operand typing.
 
-    ``&name`` is a ``PlaceAddressOf`` over a ``VariablePlace``.
-    Call-argument detection (``out_register`` capture), SSA address-taken
-    analysis, loop induction-variable scanning and the ``*(T *)&local``
-    fast paths all need to recognise this exact shape and recover the bare
-    name; centralising the check keeps every consumer in lock-step.
+    Used by ``_type_of_operand`` in ``cc.codegen.base`` to short-circuit
+    classification for AST nodes whose value is unconditionally integer
+    in a comparison context — function calls, sizeof shapes, logical
+    operators (which yield 0/1), and the increment/decrement family.
+
+    Placed directly after :class:`Node` because the inheriting node
+    classes are scattered throughout the file (alphabetical order),
+    so the marker must be defined before the first user.
     """
-    if isinstance(node, PlaceAddressOf) and isinstance(node.place, VariablePlace):
-        return node.place.name
-    return None
+
+    __slots__ = ()
 
 
 @dataclass(kw_only=True, slots=True)
@@ -41,22 +43,6 @@ class Node:
     """
 
     line: int = field(compare=False, default=0)
-
-
-class IntegerOperand:
-    """Marker mixin: instances classify as ``"integer"`` in comparison-operand typing.
-
-    Used by ``_type_of_operand`` in ``cc.codegen.base`` to short-circuit
-    classification for AST nodes whose value is unconditionally integer
-    in a comparison context — function calls, sizeof shapes, logical
-    operators (which yield 0/1), and the increment/decrement family.
-
-    Placed directly after :class:`Node` because the inheriting node
-    classes are scattered throughout the file (alphabetical order),
-    so the marker must be defined before the first user.
-    """
-
-    __slots__ = ()
 
 
 @dataclass(kw_only=True, slots=True)
@@ -230,29 +216,6 @@ class DerefIncrementAssign(Node):
     expr: Node
     is_postfix: bool
     target_name: str
-
-
-@dataclass(kw_only=True, slots=True)
-class Place(Node):
-    """Base class for an addressable location ("place" / lvalue).
-
-    A recursive description of *where* a value lives.  Operation nodes say
-    *what* to do there: read it (:class:`PlaceLoad`), write it
-    (:class:`PlaceStore`), take its address (:class:`PlaceAddressOf`),
-    increment/decrement it (:class:`PlaceIncrementDecrement`), or call through the
-    function pointer it holds (:class:`PlaceCall`).
-
-    Placed before :class:`DereferencePlace` (alphabetically later) because
-    the subclass relationship requires the base to be defined first — the
-    same pattern :class:`Char` follows relative to :class:`Int`.
-    """
-
-
-@dataclass(kw_only=True, slots=True)
-class DereferencePlace(Place):
-    """The pointee of an arbitrary pointer expression: ``*pointer``."""
-
-    pointer: Node
 
 
 @dataclass(kw_only=True, slots=True)
@@ -458,14 +421,6 @@ class LogicalOr(IntegerOperand, Node):
 
 
 @dataclass(kw_only=True, slots=True)
-class MemberPlace(Place):
-    """A member ``base.member_name``; ``base->m`` is ``.m`` on a :class:`DereferencePlace`."""
-
-    base: Place
-    member_name: str
-
-
-@dataclass(kw_only=True, slots=True)
 class Param:
     """A function parameter: type, name, and whether it was declared with ``[]``.
 
@@ -493,6 +448,37 @@ class Param:
     out_register: str | None = field(default=None, kw_only=True)
     pointer_array_dimensions: list | None = field(default=None, kw_only=True)  # list[Node], pointer-to-array only
     type: str
+
+
+@dataclass(kw_only=True, slots=True)
+class Place(Node):
+    """Base class for an addressable location ("place" / lvalue).
+
+    A recursive description of *where* a value lives.  Operation nodes say
+    *what* to do there: read it (:class:`PlaceLoad`), write it
+    (:class:`PlaceStore`), take its address (:class:`PlaceAddressOf`),
+    increment/decrement it (:class:`PlaceIncrementDecrement`), or call through the
+    function pointer it holds (:class:`PlaceCall`).
+
+    Placed before :class:`DereferencePlace` (alphabetically later) because
+    the subclass relationship requires the base to be defined first — the
+    same pattern :class:`Char` follows relative to :class:`Int`.
+    """
+
+
+@dataclass(kw_only=True, slots=True)
+class DereferencePlace(Place):
+    """The pointee of an arbitrary pointer expression: ``*pointer``."""
+
+    pointer: Node
+
+
+@dataclass(kw_only=True, slots=True)
+class MemberPlace(Place):
+    """A member ``base.member_name``; ``base->m`` is ``.m`` on a :class:`DereferencePlace`."""
+
+    base: Place
+    member_name: str
 
 
 @dataclass(kw_only=True, slots=True)
@@ -774,3 +760,17 @@ class While(Node):
 
     body: list[Node]
     cond: Node
+
+
+def address_of_variable_name(node: object, /) -> str | None:
+    """Return the variable name of an ``&name`` expression, else ``None``.
+
+    ``&name`` is a ``PlaceAddressOf`` over a ``VariablePlace``.
+    Call-argument detection (``out_register`` capture), SSA address-taken
+    analysis, loop induction-variable scanning and the ``*(T *)&local``
+    fast paths all need to recognise this exact shape and recover the bare
+    name; centralising the check keeps every consumer in lock-step.
+    """
+    if isinstance(node, PlaceAddressOf) and isinstance(node.place, VariablePlace):
+        return node.place.name
+    return None

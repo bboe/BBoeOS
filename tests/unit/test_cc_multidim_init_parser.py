@@ -74,15 +74,6 @@ def test_nested_multidim_global() -> None:
     assert second_row.elements[2] == ast_nodes.Int(value=6)
 
 
-def test_single_element_multidim_global() -> None:
-    """``int m[2][3] = {0};`` → ArrayInit with a single Int(0)."""
-    declaration = _only_global("int m[2][3] = {0};")
-    initializer = declaration.init
-    assert isinstance(initializer, ast_nodes.ArrayInit)
-    assert len(initializer.elements) == 1
-    assert initializer.elements[0] == ast_nodes.Int(value=0)
-
-
 def test_single_dim_array_unchanged() -> None:
     """``int a[3] = {1,2,3};`` still uses the old flat ArrayInit path."""
     declaration = _only_global("int a[3] = {1,2,3};")
@@ -91,6 +82,15 @@ def test_single_dim_array_unchanged() -> None:
     assert len(initializer.elements) == 3
     assert initializer.elements[0] == ast_nodes.Int(value=1)
     assert initializer.elements[2] == ast_nodes.Int(value=3)
+
+
+def test_single_element_multidim_global() -> None:
+    """``int m[2][3] = {0};`` → ArrayInit with a single Int(0)."""
+    declaration = _only_global("int m[2][3] = {0};")
+    initializer = declaration.init
+    assert isinstance(initializer, ast_nodes.ArrayInit)
+    assert len(initializer.elements) == 1
+    assert initializer.elements[0] == ast_nodes.Int(value=0)
 
 
 def test_three_dimensional_nested() -> None:

@@ -69,6 +69,39 @@ _SPLIT_LABEL_TEMPLATE = ".ssa_split_{counter}"
 _SSA_VERSION_SEPARATOR = "_ssa"
 
 
+@dataclass(eq=False, kw_only=True, slots=True)
+class Phi:
+    """A phi node attached to the start of a basic block.
+
+    ``original_name`` is the un-versioned variable name (the SSA pre-image).
+    ``destination`` is the versioned name after renaming (``original_name``
+    initially, ``original_name_ssaN`` after :func:`_rename_variables`).
+    ``sources`` maps each predecessor block to the value of that variable
+    at the end of the predecessor — initially empty, populated during
+    renaming.
+    """
+
+    destination: str
+    original_name: str
+    sources: dict[BasicBlock, ir.Value] = field(default_factory=dict)
+
+
+@dataclass(eq=False, kw_only=True, slots=True)
+class SSAForm:
+    """A control-flow graph in SSA form, with phi nodes maintained separately.
+
+    ``cfg`` is the underlying :class:`cc.cfg.ControlFlowGraph` with
+    block instructions / terminators rewritten to use versioned names.
+    ``phis`` maps each block to the list of phi nodes at its start.
+    ``ssa_safe_names`` records which un-versioned names participated in
+    SSA conversion — destruction uses this to know what to coalesce.
+    """
+
+    cfg: ControlFlowGraph
+    phis: dict[BasicBlock, list[Phi]]
+    ssa_safe_names: set[str]
+
+
 def _address_taken_names(body: list[ir.Instruction], /) -> set[str]:
     """Return every name whose address is taken (``&name``) in *body*.
 
@@ -709,39 +742,6 @@ def _substitute_value_operands(
     return _map_value_operands(
         instruction, rewrite=lambda value: lookup(value) if isinstance(value, str) and value in ssa_safe_names else value
     )
-
-
-@dataclass(eq=False, kw_only=True, slots=True)
-class Phi:
-    """A phi node attached to the start of a basic block.
-
-    ``original_name`` is the un-versioned variable name (the SSA pre-image).
-    ``destination`` is the versioned name after renaming (``original_name``
-    initially, ``original_name_ssaN`` after :func:`_rename_variables`).
-    ``sources`` maps each predecessor block to the value of that variable
-    at the end of the predecessor — initially empty, populated during
-    renaming.
-    """
-
-    destination: str
-    original_name: str
-    sources: dict[BasicBlock, ir.Value] = field(default_factory=dict)
-
-
-@dataclass(eq=False, kw_only=True, slots=True)
-class SSAForm:
-    """A control-flow graph in SSA form, with phi nodes maintained separately.
-
-    ``cfg`` is the underlying :class:`cc.cfg.ControlFlowGraph` with
-    block instructions / terminators rewritten to use versioned names.
-    ``phis`` maps each block to the list of phi nodes at its start.
-    ``ssa_safe_names`` records which un-versioned names participated in
-    SSA conversion — destruction uses this to know what to coalesce.
-    """
-
-    cfg: ControlFlowGraph
-    phis: dict[BasicBlock, list[Phi]]
-    ssa_safe_names: set[str]
 
 
 def convert_from_ssa(ssa: SSAForm, /) -> ControlFlowGraph:

@@ -16,16 +16,6 @@ from cc.codegen.address_plan import AddressPlan, AddressTerm, scale_encodes_in_o
 from cc.codegen.x86.generator import X86CodeGenerator
 from cc.options import CompilerOptions
 
-#: Userland translation units the residual census compiles — the same corpus
-#: ``tests/test_cc_function_sizes.py`` gates byte-for-byte.
-CORPUS_SOURCE_GLOBS = ("user/libbboeos/*.c", "user/programs/*.c")
-
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-
-#: The locked residual census: repo-relative source -> unplanned Address count.
-#: Files with zero residuals are omitted.
-RESIDUAL_CENSUS_ALLOWLIST = {"user/programs/shell.c": 6}
-
 # Member accesses live in helper functions (not ``main``) because ``main``
 # bypasses the IR lowering path — only IR-lowered bodies record Address ops.
 ADDRESS_OF_SOURCE = """
@@ -66,6 +56,10 @@ int main() {
     return reader();
 }
 """
+
+#: Userland translation units the residual census compiles — the same corpus
+#: ``tests/test_cc_function_sizes.py`` gates byte-for-byte.
+CORPUS_SOURCE_GLOBS = ("user/libbboeos/*.c", "user/programs/*.c")
 
 DEREF_STORE_BYTE_SOURCE = """
 void write_byte(char *target, int value) {
@@ -188,7 +182,6 @@ int reader(struct outer *p) {
 }
 """
 
-
 POINTER_TO_ARRAY_SOURCE = """
 int read_cell(int (*p)[3], int i, int j) {
     int out;
@@ -196,6 +189,13 @@ int read_cell(int (*p)[3], int i, int j) {
     return out;
 }
 """
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+#: The locked residual census: repo-relative source -> unplanned Address count.
+#: Files with zero residuals are omitted.
+RESIDUAL_CENSUS_ALLOWLIST = {"user/programs/shell.c": 6}
 
 STRUCT_ARRAY_CONSTANT_SOURCE = """
 struct entry { int key; int payload; };

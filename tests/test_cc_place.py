@@ -58,11 +58,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-CC = REPO_ROOT / "cc.py"
-LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
-GOLDEN = REPO_ROOT / "tests" / "golden" / "cc_place_index_member.asm"
-
 FIXTURE = """\
 struct point { int x; int y; char tag; char path[4]; };
 struct point points[8];
@@ -228,6 +223,11 @@ int probe_call_through_ptr(int (*fp)(int), int x) { return (*fp)(x); }
 struct flags_wrapper { struct flags inner_flags; };
 int probe_chained_bitfield_store(int v) { struct flags_wrapper w; w.inner_flags.b = v; return w.inner_flags.b; }
 """
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CC = REPO_ROOT / "cc.py"
+GOLDEN = REPO_ROOT / "tests" / "golden" / "cc_place_index_member.asm"
+
+LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
 
 
 def emit_asm(*, work: Path) -> str:
@@ -249,7 +249,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="test_cc_place_") as temporary_directory:
         asm = emit_asm(work=Path(temporary_directory))
     if os.environ.get("BBOE_UPDATE_GOLDEN") == "1":
-        GOLDEN.parent.mkdir(parents=True, exist_ok=True)
+        GOLDEN.parent.mkdir(exist_ok=True, parents=True)
         GOLDEN.write_text(asm)
         print(f"WROTE golden {GOLDEN}")
         return 0

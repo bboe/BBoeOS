@@ -48,12 +48,6 @@ if TYPE_CHECKING:
 
     from cc.target import X86CodegenTarget
 
-#: Synthetic-label template used for preheader blocks inserted by
-#: :func:`insert_preheaders`.  The leading ``.`` matches the IR-level
-#: convention for branch targets so backend label resolution treats the
-#: preheader like any other compiler-generated label.
-_PREHEADER_LABEL_TEMPLATE = ".licm_preheader_{counter}"
-
 #: Local-name template for accumulators introduced by
 #: :func:`reduce_loop_strength`.  Each multiplicative reduction allocates
 #: a fresh accumulator whose name is guaranteed unique across the
@@ -63,6 +57,33 @@ _PREHEADER_LABEL_TEMPLATE = ".licm_preheader_{counter}"
 #: see the accumulator as an undeclared name and fail to emit a frame
 #: slot for it.
 _ACCUMULATOR_NAME_TEMPLATE = "_ir_lsr_acc_{counter}"
+
+#: Synthetic-label template used for preheader blocks inserted by
+#: :func:`insert_preheaders`.  The leading ``.`` matches the IR-level
+#: convention for branch targets so backend label resolution treats the
+#: preheader like any other compiler-generated label.
+_PREHEADER_LABEL_TEMPLATE = ".licm_preheader_{counter}"
+
+
+@dataclass(eq=False, frozen=True, kw_only=True, slots=True)
+class NaturalLoop:
+    """One natural loop in a function's CFG.
+
+    A natural loop is uniquely identified by its *header*: the single block
+    dominating every block in *body*.  *latches* are the body blocks with
+    a back-edge to *header* (multiple latches happen when a loop has
+    several ``continue`` paths or a do-while inside a for).  *exits* are
+    body blocks with at least one successor outside *body*.
+
+    All collection fields are :class:`frozenset` so the loop record is
+    hashable by identity and safe to share between analyses without
+    accidental mutation.
+    """
+
+    body: frozenset[BasicBlock]
+    exits: frozenset[BasicBlock]
+    header: BasicBlock
+    latches: frozenset[BasicBlock]
 
 
 def _apply_string_rewrites(
@@ -849,14 +870,14 @@ def _match_copy_body(
     if element_size not in (1, 2, 4):
         return None
     return ir.RepString(
-        operation="copy",
-        element_size=element_size,
-        dest=store.base,
-        source=load.base,
         count=bound,
-        fill_value=None,
         counter_signed=counter_signed,
+        dest=store.base,
+        element_size=element_size,
+        fill_value=None,
         final_iv=None,
+        operation="copy",
+        source=load.base,
     )
 
 
@@ -905,14 +926,14 @@ def _match_fill_body(
         # matcher's identical guard.
         return None
     return ir.RepString(
-        operation="fill",
-        element_size=element_size,
-        dest=store.base,
-        source=None,
         count=bound,
-        fill_value=fill_value,
         counter_signed=counter_signed,
+        dest=store.base,
+        element_size=element_size,
+        fill_value=fill_value,
         final_iv=None,
+        operation="fill",
+        source=None,
     )
 
 
@@ -920,8 +941,8 @@ def _match_string_loop(
     loop: NaturalLoop,
     /,
     *,
-    body: list[ir.Instruction],
     block_index: dict[BasicBlock, int],
+    body: list[ir.Instruction],
     cfg: ControlFlowGraph,
     dominator_sets: dict[BasicBlock, frozenset[BasicBlock]],
     signed_counters: dict[str, bool] | None,
@@ -1279,27 +1300,6 @@ def _value_starts_at_zero(
     return outside_defining_blocks[0] in dominator_sets[header]
 
 
-@dataclass(eq=False, frozen=True, kw_only=True, slots=True)
-class NaturalLoop:
-    """One natural loop in a function's CFG.
-
-    A natural loop is uniquely identified by its *header*: the single block
-    dominating every block in *body*.  *latches* are the body blocks with
-    a back-edge to *header* (multiple latches happen when a loop has
-    several ``continue`` paths or a do-while inside a for).  *exits* are
-    body blocks with at least one successor outside *body*.
-
-    All collection fields are :class:`frozenset` so the loop record is
-    hashable by identity and safe to share between analyses without
-    accidental mutation.
-    """
-
-    body: frozenset[BasicBlock]
-    exits: frozenset[BasicBlock]
-    header: BasicBlock
-    latches: frozenset[BasicBlock]
-
-
 def hoist_loop_invariants(body: list[ir.Instruction], /, *, excluded_names: frozenset[str] = frozenset()) -> list[ir.Instruction]:
     """Hoist loop-invariant instructions to preheaders inserted ahead of each loop.
 
@@ -1488,8 +1488,8 @@ def recognize_string_loops(
     for loop in loops_in_function:
         match = _match_string_loop(
             loop,
-            body=body,
             block_index=block_index,
+            body=body,
             cfg=cfg,
             dominator_sets=dominator_sets,
             signed_counters=signed_counters,

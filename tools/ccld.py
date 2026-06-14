@@ -509,20 +509,20 @@ def main() -> int:
     )
     parser.add_argument(
         "--emit-map",
-        type=Path,
         help="Optional output path for a JSON symbol map (debug aid).",
+        type=Path,
     )
     parser.add_argument(
         "--output",
+        help="Output path for the flat binary.",
         required=True,
         type=Path,
-        help="Output path for the flat binary.",
     )
     parser.add_argument(
         "inputs",
+        help="One or more .ccobj or .ccar files.  Positional order determines section layout.",
         nargs="+",
         type=Path,
-        help="One or more .ccobj or .ccar files.  Positional order determines section layout.",
     )
     arguments = parser.parse_args()
 

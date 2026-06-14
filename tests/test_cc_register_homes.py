@@ -20,12 +20,12 @@ sys.path.insert(0, str(ROOT))
 from cc.cli import compile_source_homes  # noqa: E402 — needs ROOT on sys.path first
 
 GOLDEN = ROOT / "tests" / "golden" / "cc_register_homes_baseline.json"
-SOURCES = sorted({*ROOT.glob("user/libbboeos/*.c"), *ROOT.glob("user/programs/*.c")})
-
 # Keys are repo-relative POSIX paths matching the baseline JSON keys
 # (e.g. "user/libbboeos/stdio.c").  Inner dict maps function name -> reason string.
 # Documented byte-neutral register-identity exceptions: {source: {function: reason}}.
 IDENTITY_EXCEPTIONS: dict[str, dict[str, str]] = {}
+
+SOURCES = sorted({*ROOT.glob("user/libbboeos/*.c"), *ROOT.glob("user/programs/*.c")})
 
 
 def _check_baseline(
@@ -70,7 +70,7 @@ def main() -> int:
     """Run the parity gate, or refresh the golden when BBOE_UPDATE_HOMES=1."""
     current = current_homes()
     if os.environ.get("BBOE_UPDATE_HOMES") == "1":
-        GOLDEN.parent.mkdir(parents=True, exist_ok=True)
+        GOLDEN.parent.mkdir(exist_ok=True, parents=True)
         GOLDEN.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
         print(f"wrote {GOLDEN}")
         return 0

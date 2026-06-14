@@ -92,8 +92,8 @@ from cc.utils import decode_string_escapes, string_byte_length
 # K (the canonical frame-offset key) is N - M.
 RE_AND_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*and byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
 RE_LOCAL_BYTE_ADDR = re.compile(r"^\[ebp-(\d+)(?:\+(\d+))?\]$")
-RE_MOV_EAX_IMMEDIATE = re.compile(r"^\s*mov eax, (\d+)\s*$")
 RE_MOV_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*mov byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
+RE_MOV_EAX_IMMEDIATE = re.compile(r"^\s*mov eax, (\d+)\s*$")
 RE_NON_BYTE_WRITE = re.compile(r"^\s*mov\b.*\[(?!ebp\b)")
 RE_OR_BYTE_LOCAL_IMMEDIATE = re.compile(r"^\s*or byte \[ebp-(\d+)(?:\+(\d+))?\], (\d+)\s*$")
 
@@ -275,6 +275,280 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
 
     ERROR_RETURNING_BUILTINS: ClassVar[frozenset[str]] = frozenset({"chmod", "mac", "mkdir", "parse_ip", "rename", "rmdir", "unlink"})
 
+    @staticmethod
+    def _bitfield_write_literal_value(info: FieldInfo | None, value: Node, /) -> int | None:
+        """Return the 0/1 literal for a 1-bit bitfield store of an ``Int``, else None.
+
+        The pure eligibility core shared by the place-driven
+        :meth:`_member_bitfield_literal` wrapper and the plan-driven native
+        ``ir.Store`` path (which carries the member's bitfield
+        :class:`FieldInfo` on its ``AddressPlan`` rather than a place).
+        """
+        if info is not None and info.bit_width == 1 and isinstance(value, Int) and value.value in (0, 1):
+            return value.value
+        return None
+
+    @staticmethod
+    def _build_address(base: str, offset: int, /, *, index: str = "") -> str:
+        """Return ``[base+offset+index]``, collapsing zero ``offset``.
+
+        Every NASM memory-operand site that adds a literal byte offset
+        to a base operand (frame slot, register, label) goes through
+        here so the ``[base+0]`` case stays out of the emitted text.
+        ``index`` is appended after ``offset`` for the constant-base /
+        register-index addresses emitted by the ``resolve_address`` /
+        ``_emit_place_*`` struct-array path (``[label+12+bx]``).
+        """
+        parts = [base]
+        if offset:
+            parts.append(str(offset))
+        if index:
+            parts.append(index)
+        return f"[{'+'.join(parts)}]"
+
+    @staticmethod
+    def _collect_asm_operand_vars(body: list[Node], /) -> set[str]:
+        """Return variable names that appear in ExtendedAsm operands.
+
+        Variables referenced by inline asm operands (especially memory
+        constraints ``=m`` / ``m``) must not be auto-pinned to registers
+        because the asm template may require a memory operand.
+        """
+        result: set[str] = set()
+
+        def _walk(statements: list[Node]) -> None:
+            for statement in statements:
+                if isinstance(statement, ExtendedAsm):
+                    for operand in (*statement.inputs, *statement.outputs):
+                        if isinstance(operand.expression, Var):
+                            result.add(operand.expression.name)
+                elif isinstance(statement, (Compound, DoWhile, While)):
+                    _walk(statement.body)
+                elif isinstance(statement, For):
+                    _walk(statement.init)
+                    _walk(statement.body)
+                elif isinstance(statement, If):
+                    _walk(statement.body)
+                    if statement.else_body is not None:
+                        _walk(statement.else_body)
+                elif isinstance(statement, Switch):
+                    for case in statement.cases:
+                        _walk(case.body)
+
+        _walk(body)
+        return result
+
+    @staticmethod
+    def _derive_row_major_strides(dimension_counts: list[int], /, *, element_size: int) -> list[int]:
+        """Return the per-position byte strides for a row-major multidim array.
+
+        ``strides[p]`` is the product of the dimension counts after position
+        *p*, times the element size — the byte distance one step of index *p*
+        moves (the Horner expansion's per-position scale).  Pure; shared by
+        the three multidim layout halves and hence by both the legacy
+        ``resolve_address`` emitters and the AddressPlan planner.
+        """
+        strides: list[int] = []
+        running = element_size
+        for count in reversed(dimension_counts):
+            strides.append(running)
+            running *= count
+        strides.reverse()
+        return strides
+
+    @staticmethod
+    def _is_candidate_expression_temporary(
+        name: str,
+        /,
+        *,
+        ax_resident_uses: dict[str, int],
+        init_count: dict[str, int],
+        init_expr: dict[str, Node],
+        other_uses: dict[str, int],
+    ) -> bool:
+        """Skip pinning vars whose value lives in AX between assignment and consumer.
+
+        A var assigned exactly once from a non-trivial expression
+        (Call/Index/BinaryOperation — all leave the value in AX) and consumed
+        only as the LEFT operand of a comparison against an integer
+        literal naturally lives in AX through its lifetime.
+        ``emit_comparison``'s fast path emits ``cmp ax, imm`` for
+        those uses without re-loading the value, so pinning the
+        var would only add a redundant ``mov pin, ax`` after the
+        assignment.  Vars used as right-of-cmp or in arithmetic
+        still benefit from a pin (the left operand's eval clobbers
+        AX before reaching them) so they're left alone here.
+        """
+        if init_count.get(name, 0) != 1:
+            return False
+        if other_uses.get(name, 0) != 0:
+            return False
+        if ax_resident_uses.get(name, 0) == 0:
+            return False
+        return isinstance(init_expr.get(name), (Call, Index, BinaryOperation))
+
+    @staticmethod
+    def _loop_assigned_names(statements: list[Node], /) -> set[str]:
+        """Return the set of names assigned anywhere within *statements*.
+
+        Pre-merge stores from loop bodies into the written set before
+        walking the body, mirroring the liveness pre-pass's loop-pre-
+        merge (a store inside a loop is live on every iteration
+        including the first, so calls BEFORE that store inside the body
+        still see a live pin).
+        """
+        found: set[str] = set()
+        for statement in statements:
+            if isinstance(statement, Assign) or (isinstance(statement, VarDecl) and statement.init is not None):
+                found.add(statement.name)
+            elif isinstance(statement, If):
+                found |= X86CodeGenerator._loop_assigned_names(statement.body)
+                if statement.else_body is not None:
+                    found |= X86CodeGenerator._loop_assigned_names(statement.else_body)
+            elif isinstance(statement, (Compound, DoWhile, While)):
+                found |= X86CodeGenerator._loop_assigned_names(statement.body)
+            elif isinstance(statement, Switch):
+                for case in statement.cases:
+                    found |= X86CodeGenerator._loop_assigned_names(case.body)
+        return found
+
+    @staticmethod
+    def _match_struct_array_member(place: Place, /) -> tuple[str, Node, str] | None:
+        """Recognize the one struct-array access shape the Place codegen handles.
+
+        If *place* is ``arr[i].member`` — a :class:`MemberPlace` whose base is a
+        :class:`SubscriptPlace` of a :class:`VariablePlace` — return
+        ``(array_name, index, member_name)``; otherwise ``None``.  The
+        ``arr[i].member[j]`` element shape is this same match applied to the
+        outer subscript's base.
+        """
+        if isinstance(place, MemberPlace) and isinstance(place.base, SubscriptPlace) and isinstance(place.base.base, VariablePlace):
+            return place.base.base.name, place.base.index, place.member_name
+        return None
+
+    @staticmethod
+    def _member_index_arrow_object(member: MemberPlace, /) -> tuple[bool, str] | None:
+        """Return ``(arrow, object_name)`` for a named member-index base.
+
+        ``ptr->field[i]`` has base ``MemberPlace(DereferencePlace(Var), field)``
+        → ``(True, ptr)``; ``obj.field[i]`` has base
+        ``MemberPlace(Var, field)`` → ``(False, obj)``.  Returns ``None`` for
+        any other base shape (handled elsewhere).
+        """
+        base = member.base
+        if isinstance(base, DereferencePlace) and isinstance(base.pointer, VariablePlace):
+            return True, base.pointer.name
+        if isinstance(base, VariablePlace):
+            return False, base.name
+        return None
+
+    @staticmethod
+    def _parse_local_byte_addr(addr: str) -> int | None:
+        """Return the frame slot K if addr is ``[ebp-N]`` or ``[ebp-N+M]``; otherwise None.
+
+        K is the absolute frame offset of the targeted byte: K = N - M
+        for the +M form, K = N otherwise.
+        """
+        match = RE_LOCAL_BYTE_ADDR.match(addr.strip())
+        if match is None:
+            return None
+        base = int(match.group(1))
+        offset = int(match.group(2) or 0)
+        return base - offset
+
+    @staticmethod
+    def _rank_candidates(items: list[tuple[str, int]], /, *, counts: dict[str, int]) -> list[tuple[str, int]]:
+        """Sort *items* by descending ref count then ascending declaration order.
+
+        The auto-pin allocator ranks each candidate class (body locals
+        first, parameters second) by ``counts`` so the top entry gets
+        the cheapest register; ties break by declaration order so the
+        result is deterministic across runs.
+        """
+        return sorted(items, key=lambda item: (-counts.get(item[0], 0), item[1]))
+
+    @staticmethod
+    def _reconstruct_double_index_place(base_name: str, indices: list[Node], /, *, line: int) -> SubscriptPlace:
+        """Rebuild the legacy array-of-pointers ``name[i0][i1]`` node from a uniform chain.
+
+        The parser now emits one uniform shape
+        (``SubscriptPlace(SubscriptPlace(VariablePlace, i0), i1)``) for
+        every 2+-subscript access.  For a NON-multidim base (an array of
+        pointers or a pointer), reconstruct the deref-rooted node
+        — ``SubscriptPlace(DereferencePlace(Index(Var, i0)), i1)`` — which
+        :meth:`resolve_address` then lowers like any other lvalue address
+        (the dereference materializes the element pointer into ESI; the
+        outer subscript folds onto it).
+
+        For an arbitrary-depth array-of-pointers chain (``grid[i0]..[iN]``,
+        each level a deref+index), the pointer feeding the outermost
+        dereference is the rvalue of the first ``N-1`` indices — a
+        left-nested ``Index`` EXPRESSION ``Index(Index(...Index(Var, i0)...,
+        i_{N-2}))``.  :meth:`generate_expression` over that nested ``Index``
+        evaluates the array-of-pointers read as an rvalue (each inner
+        subscript loads one pointer level); the :class:`DereferencePlace`
+        materializes the result as the base register and the final
+        ``[i_{N-1}]`` subscript folds on top, so any depth resolves through
+        the one recursive :meth:`resolve_address` / index-expression path.
+        """
+        if len(indices) < 2:
+            message = "array-of-pointers reconstruct requires at least two subscripts"
+            raise CompileError(message, line=line)
+        *outer_indices, last_index = indices
+        pointer: Node = Var(line=line, name=base_name)
+        for outer_index in outer_indices:
+            pointer = Index(array=pointer, index=outer_index, line=line)
+        return SubscriptPlace(
+            base=DereferencePlace(line=line, pointer=pointer),
+            index=last_index,
+            line=line,
+        )
+
+    @staticmethod
+    def _tally_subscript_var_uses(node: Node, /, *, index_uses: dict[str, int]) -> None:
+        """Tally Var occurrences inside Index/IndexAssign subscripts.
+
+        Each subscript pays a 2-byte ``mov si, bp`` penalty when its
+        index variable is BP-pinned, since BP can't index DS-relative
+        memory in real mode.  The auto-pin cost model uses this tally
+        (mutated through *index_uses*) to decide whether a candidate's
+        BP-clobber-savings outweigh that per-subscript penalty.
+        """
+        if isinstance(node, Var):
+            index_uses[node.name] = index_uses.get(node.name, 0) + 1
+        for node_field in fields(node):
+            value = getattr(node, node_field.name)
+            if isinstance(value, Node):
+                X86CodeGenerator._tally_subscript_var_uses(value, index_uses=index_uses)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, Node):
+                        X86CodeGenerator._tally_subscript_var_uses(item, index_uses=index_uses)
+
+    @staticmethod
+    def _uniform_subscript_chain(place: Place, /) -> tuple[str, list[Node]] | None:
+        """Flatten a uniform multi-subscript ``name[i0][i1]...`` place.
+
+        Returns ``(base_name, [i0, i1, ...])`` when *place* is a
+        left-nested :class:`SubscriptPlace` chain (2+ levels) bottoming out
+        in a :class:`VariablePlace`, with NO :class:`DereferencePlace` in
+        the chain — the single uniform shape the parser now emits for every
+        ``name[i][j]`` access.  Returns ``None`` for any other shape
+        (single subscript, member-rooted, deref-rooted) so existing
+        dispatch arms keep ownership.
+        """
+        if not (isinstance(place, SubscriptPlace) and isinstance(place.base, SubscriptPlace)):
+            return None
+        indices: list[Node] = []
+        current: Place = place
+        while isinstance(current, SubscriptPlace):
+            indices.append(current.index)
+            current = current.base
+        if not isinstance(current, VariablePlace):
+            return None
+        indices.reverse()
+        return current.name, indices
+
     def __init__(
         self,
         options: CompilerOptions | None = None,
@@ -440,7 +714,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.use_regalloc: bool = os.environ.get("BBOE_REGALLOC") == "1"
         self.regalloc_liveness_fallbacks: int = 0
 
-    def _accumulate_subscript(self, operand: MemoryOperand, /, *, index: Node, element_size: int) -> None:
+    def _accumulate_subscript(self, operand: MemoryOperand, /, *, element_size: int, index: Node) -> None:
         """Add *index * element_size* into *operand*, folding constants into displacement.
 
         Constant indices (ast_nodes.Int) fold into *operand.displacement*.
@@ -695,37 +969,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return self.target.type_size(base)
         return 1
 
-    @staticmethod
-    def _bitfield_write_literal_value(info: FieldInfo | None, value: Node, /) -> int | None:
-        """Return the 0/1 literal for a 1-bit bitfield store of an ``Int``, else None.
-
-        The pure eligibility core shared by the place-driven
-        :meth:`_member_bitfield_literal` wrapper and the plan-driven native
-        ``ir.Store`` path (which carries the member's bitfield
-        :class:`FieldInfo` on its ``AddressPlan`` rather than a place).
-        """
-        if info is not None and info.bit_width == 1 and isinstance(value, Int) and value.value in (0, 1):
-            return value.value
-        return None
-
-    @staticmethod
-    def _build_address(base: str, offset: int, /, *, index: str = "") -> str:
-        """Return ``[base+offset+index]``, collapsing zero ``offset``.
-
-        Every NASM memory-operand site that adds a literal byte offset
-        to a base operand (frame slot, register, label) goes through
-        here so the ``[base+0]`` case stays out of the emitted text.
-        ``index`` is appended after ``offset`` for the constant-base /
-        register-index addresses emitted by the ``resolve_address`` /
-        ``_emit_place_*`` struct-array path (``[label+12+bx]``).
-        """
-        parts = [base]
-        if offset:
-            parts.append(str(offset))
-        if index:
-            parts.append(index)
-        return f"[{'+'.join(parts)}]"
-
     def _bx_holds_pinned_var(self) -> bool:
         """Return True if any variable is auto-pinned to BX/EBX.
 
@@ -762,38 +1005,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if call_node.name in self._builtin_clobbers:
             return self._builtin_clobbers[call_node.name]
         return ()
-
-    @staticmethod
-    def _collect_asm_operand_vars(body: list[Node], /) -> set[str]:
-        """Return variable names that appear in ExtendedAsm operands.
-
-        Variables referenced by inline asm operands (especially memory
-        constraints ``=m`` / ``m``) must not be auto-pinned to registers
-        because the asm template may require a memory operand.
-        """
-        result: set[str] = set()
-
-        def _walk(statements: list[Node]) -> None:
-            for statement in statements:
-                if isinstance(statement, ExtendedAsm):
-                    for operand in (*statement.inputs, *statement.outputs):
-                        if isinstance(operand.expression, Var):
-                            result.add(operand.expression.name)
-                elif isinstance(statement, (Compound, DoWhile, While)):
-                    _walk(statement.body)
-                elif isinstance(statement, For):
-                    _walk(statement.init)
-                    _walk(statement.body)
-                elif isinstance(statement, If):
-                    _walk(statement.body)
-                    if statement.else_body is not None:
-                        _walk(statement.else_body)
-                elif isinstance(statement, Switch):
-                    for case in statement.cases:
-                        _walk(case.body)
-
-        _walk(body)
-        return result
 
     def _collect_auto_pin_body_candidates(
         self, statements: list[Node], /, *, body_candidates: list[tuple[str, int]], top_level: bool
@@ -834,21 +1045,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 for case in statement.cases:
                     self._collect_auto_pin_body_candidates(case.body, body_candidates=body_candidates, top_level=False)
 
-    def _collect_byte_typed_locals(self, statements: list[Node], /, *, byte_types: set[str], byte_typed: set[str]) -> None:
+    def _collect_byte_typed_locals(self, statements: list[Node], /, *, byte_typed: set[str], byte_types: set[str]) -> None:
         """Record names of VarDecl locals whose declared type has no high-register byte alias."""
         for statement in statements:
             if isinstance(statement, (Compound, DoWhile, While)):
-                self._collect_byte_typed_locals(statement.body, byte_types=byte_types, byte_typed=byte_typed)
+                self._collect_byte_typed_locals(statement.body, byte_typed=byte_typed, byte_types=byte_types)
             elif isinstance(statement, For):
-                self._collect_byte_typed_locals(statement.init, byte_types=byte_types, byte_typed=byte_typed)
-                self._collect_byte_typed_locals(statement.body, byte_types=byte_types, byte_typed=byte_typed)
+                self._collect_byte_typed_locals(statement.init, byte_typed=byte_typed, byte_types=byte_types)
+                self._collect_byte_typed_locals(statement.body, byte_typed=byte_typed, byte_types=byte_types)
             elif isinstance(statement, If):
-                self._collect_byte_typed_locals(statement.body, byte_types=byte_types, byte_typed=byte_typed)
+                self._collect_byte_typed_locals(statement.body, byte_typed=byte_typed, byte_types=byte_types)
                 if statement.else_body is not None:
-                    self._collect_byte_typed_locals(statement.else_body, byte_types=byte_types, byte_typed=byte_typed)
+                    self._collect_byte_typed_locals(statement.else_body, byte_typed=byte_typed, byte_types=byte_types)
             elif isinstance(statement, Switch):
                 for case in statement.cases:
-                    self._collect_byte_typed_locals(case.body, byte_types=byte_types, byte_typed=byte_typed)
+                    self._collect_byte_typed_locals(case.body, byte_typed=byte_typed, byte_types=byte_types)
             elif isinstance(statement, VarDecl) and statement.type_name in byte_types:
                 byte_typed.add(statement.name)
 
@@ -1051,7 +1262,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 written=written,
             )
 
-        self._collect_byte_typed_locals(body, byte_types=byte_types, byte_typed=byte_typed)
+        self._collect_byte_typed_locals(body, byte_typed=byte_typed, byte_types=byte_types)
 
         combined = self._rank_candidates(body_candidates, counts=counts) + self._rank_candidates(param_candidates, counts=counts)
         combined = [
@@ -1286,24 +1497,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         base_operand = self._resolve_struct_value_base(base.name, line=line)
         return base_operand, info
 
-    @staticmethod
-    def _derive_row_major_strides(dimension_counts: list[int], /, *, element_size: int) -> list[int]:
-        """Return the per-position byte strides for a row-major multidim array.
-
-        ``strides[p]`` is the product of the dimension counts after position
-        *p*, times the element size — the byte distance one step of index *p*
-        moves (the Horner expansion's per-position scale).  Pure; shared by
-        the three multidim layout halves and hence by both the legacy
-        ``resolve_address`` emitters and the AddressPlan planner.
-        """
-        strides: list[int] = []
-        running = element_size
-        for count in reversed(dimension_counts):
-            strides.append(running)
-            running *= count
-        strides.reverse()
-        return strides
-
     def _emit_bitfield_read(self, info: FieldInfo, /, *, addr: str) -> None:
         """Emit the load-shift-mask-extend sequence for a bitfield read.
 
@@ -1492,11 +1685,11 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         """
         items = [
             {
-                "target": target,
                 "arg": arg,
                 "reads": self._collect_pinned_reads(arg),
                 "scratch": self._estimate_scratch_clobbers(arg),
                 "spilled": False,
+                "target": target,
             }
             for target, arg in register_args
         ]
@@ -1935,7 +2128,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             while isinstance(dimension, ArrayType):
                 total_elements *= dimension.count
                 dimension = dimension.pointee
-            flat = self._flatten_array_init(declaration.init, name=name, total=total_elements, line=declaration.line)
+            flat = self._flatten_array_init(declaration.init, line=declaration.line, name=name, total=total_elements)
             int_directive = "dd" if self.target.int_size == 4 else "dw"
             if is_byte:
                 directive = "db"
@@ -2339,7 +2532,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         Costs ~4 extra bytes per site relative to the flat form.
         """
         if self.object_mode:
-            inverse = {"jc": "jnc", "jnc": "jc", "je": "jne", "jne": "je"}[condition]
+            inverse = {"jc": "jnc", "je": "jne", "jnc": "jc", "jne": "je"}[condition]
             skip_label = f".libbboeos_skip_{self.new_label()}"
             self.emit(f"        {inverse} {skip_label}")
             self.emit(f"        jmp [{name}_PTR]")
@@ -2443,7 +2636,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         for instruction in getattr(self.target, "LONG_TO_EAX", ()):
             self.emit(f"        {instruction}")
 
-    def _emit_member_address(self, *, const_base: str, base_is_register: bool, is_global_label: bool, offset: int) -> None:
+    def _emit_member_address(self, *, base_is_register: bool, const_base: str, is_global_label: bool, offset: int) -> None:
         """Emit the address-yielding terminal for a bare struct-value / array member.
 
         Reproduces the three legacy sequences: a global label folds the offset
@@ -2756,8 +2949,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         place = node.place
         if isinstance(place, SubscriptPlace) and isinstance(place.base, VariablePlace):
             self.generate_indexed_call(
-                array_name=place.base.name,
                 arguments=node.args,
+                array_name=place.base.name,
                 discard_return=discard_return,
                 index=place.index,
                 line=node.line,
@@ -3152,7 +3345,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 primary_source = self.pinned_register[arg.name]
             elif isinstance(arg, Var) and arg.name in self.param_in_register:
                 primary_source = self.param_in_register[arg.name]
-            items.append({"target": target, "arg": arg, "source": primary_source, "sources": sources})
+            items.append({"arg": arg, "source": primary_source, "sources": sources, "target": target})
         while items:
             progress_index = None
             for index, item in enumerate(items):
@@ -3183,7 +3376,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                         other["source"] = self.target.acc
                         other["arg"] = None  # mark as "load from acc"
 
-    def _emit_register_arg_single(self, *, target: str, arg: Node, source: str | None) -> None:
+    def _emit_register_arg_single(self, *, arg: Node, source: str | None, target: str) -> None:
         """Emit a single register-arg load for :meth:`_emit_register_arg_moves`.
 
         *source* is the register currently holding the value to move
@@ -3304,8 +3497,8 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             # into a label-immediate ``mov``; a register base with no offset is
             # a bare ``mov``; a frame / offset-bearing register base uses ``lea``.
             self._emit_member_address(
-                const_base=operand.base,
                 base_is_register=operand.base_kind == "register",
+                const_base=operand.base,
                 is_global_label=operand.base_kind == "label",
                 offset=operand.displacement,
             )
@@ -3492,6 +3685,21 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     stack.extend(item for item in child if isinstance(item, Node))
         return clobbers
 
+    def _eval_constant_dimension(self, dimension: Node, /, *, line: int) -> int:
+        """Return the integer value of a compile-time-constant array dimension.
+
+        Delegates to :meth:`_eval_local_array_size` with ``stride=1`` so that
+        only :class:`Int` literals and :attr:`NAMED_CONSTANT_VALUES` entries
+        resolve.  Raises :class:`CompileError` for any other expression (e.g.
+        a runtime variable) since multidimensional array sizes must be known
+        at compile time.
+        """
+        result = self._eval_local_array_size(dimension, stride=1)
+        if result is None:
+            message = "multidimensional array dimension must be a compile-time constant"
+            raise CompileError(message, line=line)
+        return result
+
     def _eval_local_array_size(self, size: Node, /, *, stride: int) -> int | None:
         """Return the byte count for a local array declaration, or ``None``.
 
@@ -3507,21 +3715,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if isinstance(size, Var) and size.name in self.NAMED_CONSTANT_VALUES:
             return self.NAMED_CONSTANT_VALUES[size.name] * stride
         return None
-
-    def _eval_constant_dimension(self, dimension: Node, /, *, line: int) -> int:
-        """Return the integer value of a compile-time-constant array dimension.
-
-        Delegates to :meth:`_eval_local_array_size` with ``stride=1`` so that
-        only :class:`Int` literals and :attr:`NAMED_CONSTANT_VALUES` entries
-        resolve.  Raises :class:`CompileError` for any other expression (e.g.
-        a runtime variable) since multidimensional array sizes must be known
-        at compile time.
-        """
-        result = self._eval_local_array_size(dimension, stride=1)
-        if result is None:
-            message = "multidimensional array dimension must be a compile-time constant"
-            raise CompileError(message, line=line)
-        return result
 
     def _expression_type(self, node: Node, /) -> str:
         """Infer the compile-time type of *node* for ``sizeof(expression)``.
@@ -3590,7 +3783,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         message = f"sizeof: cannot determine type of {type(node).__name__}"
         raise CompileError(message, line=node.line)
 
-    def _flatten_array_init(self, init: ArrayInit, /, *, name: str, total: int, line: int) -> list[Node]:  # noqa: PLR6301
+    def _flatten_array_init(self, init: ArrayInit, /, *, line: int, name: str, total: int) -> list[Node]:  # noqa: PLR6301
         """Flatten a (possibly nested) ArrayInit into a row-major element list.
 
         Walks the nested ``ArrayInit`` tree depth-first, collecting leaf
@@ -3705,37 +3898,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return []
         return []
 
-    @staticmethod
-    def _is_candidate_expression_temporary(
-        name: str,
-        /,
-        *,
-        ax_resident_uses: dict[str, int],
-        init_count: dict[str, int],
-        init_expr: dict[str, Node],
-        other_uses: dict[str, int],
-    ) -> bool:
-        """Skip pinning vars whose value lives in AX between assignment and consumer.
-
-        A var assigned exactly once from a non-trivial expression
-        (Call/Index/BinaryOperation — all leave the value in AX) and consumed
-        only as the LEFT operand of a comparison against an integer
-        literal naturally lives in AX through its lifetime.
-        ``emit_comparison``'s fast path emits ``cmp ax, imm`` for
-        those uses without re-loading the value, so pinning the
-        var would only add a redundant ``mov pin, ax`` after the
-        assignment.  Vars used as right-of-cmp or in arithmetic
-        still benefit from a pin (the left operand's eval clobbers
-        AX before reaching them) so they're left alone here.
-        """
-        if init_count.get(name, 0) != 1:
-            return False
-        if other_uses.get(name, 0) != 0:
-            return False
-        if ax_resident_uses.get(name, 0) == 0:
-            return False
-        return isinstance(init_expr.get(name), (Call, Index, BinaryOperation))
-
     def _is_member_index_place(self, place: Place, /) -> bool:
         """Return True if *place* is ``base.field[index]`` (member-index, not struct-array)."""
         return (
@@ -3814,45 +3976,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             message = f"struct '{tag}' has no field '{member_name}'"
             raise CompileError(message, line=line)
         return layout[member_name]
-
-    @staticmethod
-    def _loop_assigned_names(statements: list[Node], /) -> set[str]:
-        """Return the set of names assigned anywhere within *statements*.
-
-        Pre-merge stores from loop bodies into the written set before
-        walking the body, mirroring the liveness pre-pass's loop-pre-
-        merge (a store inside a loop is live on every iteration
-        including the first, so calls BEFORE that store inside the body
-        still see a live pin).
-        """
-        found: set[str] = set()
-        for statement in statements:
-            if isinstance(statement, Assign) or (isinstance(statement, VarDecl) and statement.init is not None):
-                found.add(statement.name)
-            elif isinstance(statement, If):
-                found |= X86CodeGenerator._loop_assigned_names(statement.body)
-                if statement.else_body is not None:
-                    found |= X86CodeGenerator._loop_assigned_names(statement.else_body)
-            elif isinstance(statement, (Compound, DoWhile, While)):
-                found |= X86CodeGenerator._loop_assigned_names(statement.body)
-            elif isinstance(statement, Switch):
-                for case in statement.cases:
-                    found |= X86CodeGenerator._loop_assigned_names(case.body)
-        return found
-
-    @staticmethod
-    def _match_struct_array_member(place: Place, /) -> tuple[str, Node, str] | None:
-        """Recognize the one struct-array access shape the Place codegen handles.
-
-        If *place* is ``arr[i].member`` — a :class:`MemberPlace` whose base is a
-        :class:`SubscriptPlace` of a :class:`VariablePlace` — return
-        ``(array_name, index, member_name)``; otherwise ``None``.  The
-        ``arr[i].member[j]`` element shape is this same match applied to the
-        outer subscript's base.
-        """
-        if isinstance(place, MemberPlace) and isinstance(place.base, SubscriptPlace) and isinstance(place.base.base, VariablePlace):
-            return place.base.base.name, place.base.index, place.member_name
-        return None
 
     def _match_multidim_member_chain(self, place: Place, /) -> tuple[str, bool, str, list[Node]] | None:
         """Recognize ``g.field[i][j]...`` / ``p->field[i][j]...`` over a multidim field.
@@ -4018,22 +4141,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         message = "unsupported member Place base in _member_field_info"
         raise CompileError(message, line=line)
 
-    @staticmethod
-    def _member_index_arrow_object(member: MemberPlace, /) -> tuple[bool, str] | None:
-        """Return ``(arrow, object_name)`` for a named member-index base.
-
-        ``ptr->field[i]`` has base ``MemberPlace(DereferencePlace(Var), field)``
-        → ``(True, ptr)``; ``obj.field[i]`` has base
-        ``MemberPlace(Var, field)`` → ``(False, obj)``.  Returns ``None`` for
-        any other base shape (handled elsewhere).
-        """
-        base = member.base
-        if isinstance(base, DereferencePlace) and isinstance(base.pointer, VariablePlace):
-            return True, base.pointer.name
-        if isinstance(base, VariablePlace):
-            return False, base.name
-        return None
-
     def _member_index_element_size(self, info: FieldInfo, /) -> tuple[int, bool]:
         """Return ``(element_size, is_pointer_field)`` for an indexed field access.
 
@@ -4068,7 +4175,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         count for array-typed members.
         """
         # Struct-array base: arr[i].member — layout from _resolve_index_member_layout.
-        if (matched := self._match_struct_array_member(MemberPlace(base=base, member_name=member_name, line=line))) is not None:
+        if (matched := self._match_struct_array_member(MemberPlace(base=base, line=line, member_name=member_name))) is not None:
             array_name, _index_node, matched_member_name = matched
             _const_base, _struct_size, field_offset, field_size, element_size = self._resolve_index_member_layout(
                 array_name, matched_member_name, line
@@ -4162,20 +4269,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             return None
         pointee_type = holder_type[:-1]
         return 1 if pointee_type in self.BYTE_TYPES else self.target.int_size
-
-    @staticmethod
-    def _parse_local_byte_addr(addr: str) -> int | None:
-        """Return the frame slot K if addr is ``[ebp-N]`` or ``[ebp-N+M]``; otherwise None.
-
-        K is the absolute frame offset of the targeted byte: K = N - M
-        for the +M form, K = N otherwise.
-        """
-        match = RE_LOCAL_BYTE_ADDR.match(addr.strip())
-        if match is None:
-            return None
-        base = int(match.group(1))
-        offset = int(match.group(2) or 0)
-        return base - offset
 
     def _peephole_will_strand_ax(self) -> bool:
         """Return True if the last emitted lines form a fusion target.
@@ -4409,17 +4502,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             if name in self.pinned_register:
                 initialized.add(self.pinned_register[name])
         return initialized
-
-    @staticmethod
-    def _rank_candidates(items: list[tuple[str, int]], /, *, counts: dict[str, int]) -> list[tuple[str, int]]:
-        """Sort *items* by descending ref count then ascending declaration order.
-
-        The auto-pin allocator ranks each candidate class (body locals
-        first, parameters second) by ``counts`` so the top entry gets
-        the cheapest register; ties break by declaration order so the
-        result is deterministic across runs.
-        """
-        return sorted(items, key=lambda item: (-counts.get(item[0], 0), item[1]))
 
     def _register_array_type(self, name: str, /, *, dimensions: list | None, line: int, type_name: str) -> None:
         """Record the structured ArrayType for array variable *name* (row-major).
@@ -4990,43 +5072,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         message = "unsupported member Place base in _resolve_member_place_info"
         raise CompileError(message, line=line)
 
-    @staticmethod
-    def _reconstruct_double_index_place(base_name: str, indices: list[Node], /, *, line: int) -> SubscriptPlace:
-        """Rebuild the legacy array-of-pointers ``name[i0][i1]`` node from a uniform chain.
-
-        The parser now emits one uniform shape
-        (``SubscriptPlace(SubscriptPlace(VariablePlace, i0), i1)``) for
-        every 2+-subscript access.  For a NON-multidim base (an array of
-        pointers or a pointer), reconstruct the deref-rooted node
-        — ``SubscriptPlace(DereferencePlace(Index(Var, i0)), i1)`` — which
-        :meth:`resolve_address` then lowers like any other lvalue address
-        (the dereference materializes the element pointer into ESI; the
-        outer subscript folds onto it).
-
-        For an arbitrary-depth array-of-pointers chain (``grid[i0]..[iN]``,
-        each level a deref+index), the pointer feeding the outermost
-        dereference is the rvalue of the first ``N-1`` indices — a
-        left-nested ``Index`` EXPRESSION ``Index(Index(...Index(Var, i0)...,
-        i_{N-2}))``.  :meth:`generate_expression` over that nested ``Index``
-        evaluates the array-of-pointers read as an rvalue (each inner
-        subscript loads one pointer level); the :class:`DereferencePlace`
-        materializes the result as the base register and the final
-        ``[i_{N-1}]`` subscript folds on top, so any depth resolves through
-        the one recursive :meth:`resolve_address` / index-expression path.
-        """
-        if len(indices) < 2:
-            message = "array-of-pointers reconstruct requires at least two subscripts"
-            raise CompileError(message, line=line)
-        *outer_indices, last_index = indices
-        pointer: Node = Var(line=line, name=base_name)
-        for outer_index in outer_indices:
-            pointer = Index(array=pointer, index=outer_index, line=line)
-        return SubscriptPlace(
-            base=DereferencePlace(line=line, pointer=pointer),
-            index=last_index,
-            line=line,
-        )
-
     def _resolve_struct_value_base(self, name: str, /, *, line: int) -> str:
         """Return the memory operand naming the base of struct-value *name*.
 
@@ -5044,7 +5089,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         message = f"undefined variable '{name}'"
         raise CompileError(message, line=line)
 
-    def _select_auto_pin_candidates(self, *, body: list[Node], parameters: list, apply_liveness_elision: bool = True) -> dict[str, str]:
+    def _select_auto_pin_candidates(self, *, apply_liveness_elision: bool = True, body: list[Node], parameters: list) -> dict[str, str]:
         """Choose locals/parameters to auto-pin and match them to registers.
 
         Body locals win slots before parameters — pinning a body local
@@ -5505,28 +5550,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                             written=written,
                         )
 
-    @staticmethod
-    def _tally_subscript_var_uses(node: Node, /, *, index_uses: dict[str, int]) -> None:
-        """Tally Var occurrences inside Index/IndexAssign subscripts.
-
-        Each subscript pays a 2-byte ``mov si, bp`` penalty when its
-        index variable is BP-pinned, since BP can't index DS-relative
-        memory in real mode.  The auto-pin cost model uses this tally
-        (mutated through *index_uses*) to decide whether a candidate's
-        BP-clobber-savings outweigh that per-subscript penalty.
-        """
-        if isinstance(node, Var):
-            index_uses[node.name] = index_uses.get(node.name, 0) + 1
-        for node_field in fields(node):
-            value = getattr(node, node_field.name)
-            if isinstance(value, Node):
-                X86CodeGenerator._tally_subscript_var_uses(value, index_uses=index_uses)
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, Node):
-                        X86CodeGenerator._tally_subscript_var_uses(item, index_uses=index_uses)
-
-    def _try_direct_load(self, *, argument: Node, register: str, optimize_zero: bool = False) -> bool:
+    def _try_direct_load(self, *, argument: Node, optimize_zero: bool = False, register: str) -> bool:
         """Emit a direct load of a constant-or-address *argument* into *register*.
 
         Covers integer literals, string literals, named kernel
@@ -5677,7 +5701,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.emit(f"        mov byte {address}, {new_byte}")
         return True
 
-    def _try_fuse_word_conditions(self, leaves: list[Node], /, *, fail_label: str, context: str) -> None:
+    def _try_fuse_word_conditions(self, leaves: list[Node], /, *, context: str, fail_label: str) -> None:
         """Emit a flattened ``&&`` chain, fusing adjacent byte comparisons.
 
         Scans *leaves* for consecutive pairs where both sides are
@@ -5845,30 +5869,6 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         if line.rstrip().endswith(":") and not line.lstrip().startswith(";"):
             self.known_local_bytes.clear()
             return
-
-    @staticmethod
-    def _uniform_subscript_chain(place: Place, /) -> tuple[str, list[Node]] | None:
-        """Flatten a uniform multi-subscript ``name[i0][i1]...`` place.
-
-        Returns ``(base_name, [i0, i1, ...])`` when *place* is a
-        left-nested :class:`SubscriptPlace` chain (2+ levels) bottoming out
-        in a :class:`VariablePlace`, with NO :class:`DereferencePlace` in
-        the chain — the single uniform shape the parser now emits for every
-        ``name[i][j]`` access.  Returns ``None`` for any other shape
-        (single subscript, member-rooted, deref-rooted) so existing
-        dispatch arms keep ownership.
-        """
-        if not (isinstance(place, SubscriptPlace) and isinstance(place.base, SubscriptPlace)):
-            return None
-        indices: list[Node] = []
-        current: Place = place
-        while isinstance(current, SubscriptPlace):
-            indices.append(current.index)
-            current = current.base
-        if not isinstance(current, VariablePlace):
-            return None
-        indices.reverse()
-        return current.name, indices
 
     def _validate_array_init(self, elements: list[Node]) -> None:
         """Validate global array initializer elements are all constant expressions."""
@@ -6328,7 +6328,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             literal = right.name
             is_zero = right.name == "NULL"
         if literal is not None:
-            self._emit_comparison_against_constant(left=left, literal=literal, is_zero=is_zero)
+            self._emit_comparison_against_constant(is_zero=is_zero, left=left, literal=literal)
         else:
             self._emit_comparison_general(left=left, right=right)
 
@@ -6379,7 +6379,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         self.emit_comparison(condition.left, condition.right)
         return condition.operation, self._is_unsigned_comparison(condition.left, condition.right)
 
-    def emit_condition_false_jump(self, *, condition: Node, fail_label: str, context: str) -> None:
+    def emit_condition_false_jump(self, *, condition: Node, context: str, fail_label: str) -> None:
         """Emit a condition that jumps to ``fail_label`` when false.
 
         For ``&&``, short-circuits by recursing on each operand with
@@ -6406,7 +6406,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         table = JUMP_WHEN_FALSE_UNSIGNED if unsigned else JUMP_WHEN_FALSE
         self.emit(f"        {table[operator]} {fail_label}")
 
-    def emit_condition_true_jump(self, *, condition: Node, success_label: str, context: str) -> None:
+    def emit_condition_true_jump(self, *, condition: Node, context: str, success_label: str) -> None:
         """Emit a condition that jumps to ``success_label`` when true.
 
         Dual of :meth:`emit_condition_false_jump`; used for the ``||``
@@ -6596,7 +6596,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
             direct_register = self.pinned_register[name]
         elif name in self.register_aliased_globals:
             direct_register = self.register_aliased_globals[name]
-        if direct_register is not None and self._try_direct_load(argument=expression, register=direct_register, optimize_zero=True):
+        if direct_register is not None and self._try_direct_load(argument=expression, optimize_zero=True, register=direct_register):
             return
         # Tell nested expression handling that the pinned destination
         # register (if any) will be overwritten at end of this store, so
@@ -6691,7 +6691,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                     element_size = operand.element_size or operand.field_size
                     if element_size == 0 and isinstance(base, VariablePlace):
                         element_size = self._arithmetic_element_size(base.name)
-                    self._accumulate_subscript(operand, index=index, element_size=element_size)
+                    self._accumulate_subscript(operand, element_size=element_size, index=index)
                 # Subscripting reads a scalar element: the terminal is sized at
                 # the element width and never decays to an address (an
                 # array-typed member's decay flag, set when its base resolved,
@@ -6701,7 +6701,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
                 return operand
             case VariablePlace(name=name):
                 base_kind, base = self._variable_base(name, line=place.line)
-                return MemoryOperand(base_kind=base_kind, base=base)
+                return MemoryOperand(base=base, base_kind=base_kind)
             case _:
                 message = "unsupported Place shape in resolve_address"
                 raise CompileError(message, line=place.line)

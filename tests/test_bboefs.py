@@ -38,7 +38,7 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("test", nargs="?", help="run only the named test")
+    parser.add_argument("test", help="run only the named test", nargs="?")
     parser.add_argument(
         "--fail-fast",
         action="store_true",
@@ -76,8 +76,8 @@ def main() -> int:
         subprocess.run(
             ["./make_os.sh", str(image)],
             check=True,
-            stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
         )
         directory_sector = compute_directory_sector(image_path=str(image))
         for name, test_function in tests:

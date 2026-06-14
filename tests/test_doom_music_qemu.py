@@ -112,13 +112,13 @@ def _measure_wav(*, wav_path: Path) -> dict:
 def _run_music_check(*, wav_path: Path) -> None:
     """Boot doom under QEMU+SB16, drain serial, and assert the music marker + non-silent WAV."""
     with qemu_session(
-        memory="64",
         extra_qemu_args=[
             "-audiodev",
             f"wav,id=a,path={wav_path}",
             "-device",
             "sb16,audiodev=a",
         ],
+        memory="64",
     ) as session:
         session.write_serial("doom\r")
         # Drain serial for the same window as the sound test.
@@ -154,7 +154,7 @@ def _test_music_with_wad() -> None:
         print(f"SKIP doom-music test: {WAD_FILE} not present (run ports/doom/fetch_wad.sh)")
         return
     _install_doom_and_wad()
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_handle:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_handle:
         wav_path = Path(temp_handle.name)
     # QEMU's wav backend writes a WAV header at start and refuses to
     # overwrite an existing file; drop the empty placeholder mkstemp

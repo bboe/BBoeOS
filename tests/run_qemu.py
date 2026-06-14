@@ -71,6 +71,11 @@ class QemuSession:
 
     """
 
+    @property
+    def output(self) -> str:
+        """Captured serial output decoded as UTF-8 (lossy)."""
+        return self.buffer.decode(errors="replace")
+
     def __init__(
         self,
         *,
@@ -141,11 +146,6 @@ class QemuSession:
                     chunk = monitor.recv(4096)
                     if chunk:
                         buffer.extend(chunk)
-
-    @property
-    def output(self) -> str:
-        """Captured serial output decoded as UTF-8 (lossy)."""
-        return self.buffer.decode(errors="replace")
 
     def screendump(self, output_path: Path) -> None:
         """Take a VGA screendump via the monitor and write it to *output_path* (PPM)."""
@@ -343,18 +343,18 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("commands", nargs="+", help="shell command to run")
+    parser.add_argument("commands", help="shell command to run", nargs="+")
     parser.add_argument(
         "--boot-timeout",
-        type=float,
         default=BOOT_TIMEOUT,
         help=f"seconds to wait for initial boot prompt (default: {BOOT_TIMEOUT})",
+        type=float,
     )
     parser.add_argument(
         "--drive",
-        type=Path,
         default=DEFAULT_IMAGE,
         help=f"path to drive image (default: {DEFAULT_IMAGE})",
+        type=Path,
     )
     parser.add_argument(
         "--floppy",
@@ -363,15 +363,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--machine",
-        type=str,
         default=None,
         help="value for -machine (e.g. 'acpi=off'); falls back to $BBOE_QEMU_MACHINE",
+        type=str,
     )
     parser.add_argument(
         "--memory",
-        type=str,
         default=None,
         help="value for -m (e.g. '32M'); falls back to $BBOE_QEMU_MEMORY, then '1' (1 MB)",
+        type=str,
     )
     parser.add_argument(
         "--net",
@@ -380,9 +380,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--pcap",
-        type=Path,
         default=None,
         help="capture NIC traffic to this pcap file (requires --net)",
+        type=Path,
     )
     parser.add_argument(
         "--snapshot",
@@ -391,9 +391,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--timeout",
-        type=float,
         default=COMMAND_TIMEOUT,
         help=f"per-command timeout in seconds (default: {COMMAND_TIMEOUT})",
+        type=float,
     )
     arguments = parser.parse_args()
     result = run_commands(
@@ -414,6 +414,9 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+_PROMPT_SETTLE_SECONDS = 0.05
 
 
 @contextlib.contextmanager
@@ -572,6 +575,3 @@ def run_commands(
             snapshot=snapshot,
             with_net=with_net,
         )
-
-
-_PROMPT_SETTLE_SECONDS = 0.05

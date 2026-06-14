@@ -60,19 +60,6 @@ CAPTURE_DIR = REPO / "_demo_capture_doom"
 DOOM_AUDIO_READY_NEEDLE = b"[bboeos doom] OPL music"
 DRIVE = REPO / "drive.img"
 GAMEPLAY_SECONDS = 20  # title + demo loop visible after audio init completes
-INITIAL_LINGER_SECONDS = 2.5  # welcome banner visible before typing "doom"
-POST_DOOM_LINGER_SECONDS = 2.0  # post-Doom shell prompt visible before typing "reboot"
-QUIT_KEY_DELAY = 0.5  # gap between menu keystrokes so Doom can re-render
-WELCOME_LINGER_SECONDS = 2.5  # post-reboot welcome banner visible before stopping
-WELCOME_NEEDLE = b"Welcome to BBoeOS!"
-
-# MP4: H.264 + AAC for maximum browser compatibility.  30 fps captures
-# the full motion of the Doom demo; original capture size is preserved
-# (text mode 720x400 dominates after _normalize_to_max_size scales the
-# 320x200 Doom frames up + pads them).
-MP4_FRAMERATE = 30
-MP4_OUTPUT = REPO / "docs" / "gifs" / "doom.mp4"
-
 # GIF: 5 fps over the full clip; downscale to 480x270 so the
 # README-embedded gif stays around 1-2 MB even with the wider text-mode
 # frames in the boot + shell-return segments.  640x400 + gifsicle -O3
@@ -81,6 +68,19 @@ GIF_FRAMERATE = 5
 GIF_HEIGHT = 270
 GIF_OUTPUT = REPO / "docs" / "gifs" / "doom.gif"
 GIF_WIDTH = 480
+INITIAL_LINGER_SECONDS = 2.5  # welcome banner visible before typing "doom"
+
+# MP4: H.264 + AAC for maximum browser compatibility.  30 fps captures
+# the full motion of the Doom demo; original capture size is preserved
+# (text mode 720x400 dominates after _normalize_to_max_size scales the
+# 320x200 Doom frames up + pads them).
+MP4_FRAMERATE = 30
+MP4_OUTPUT = REPO / "docs" / "gifs" / "doom.mp4"
+
+POST_DOOM_LINGER_SECONDS = 2.0  # post-Doom shell prompt visible before typing "reboot"
+QUIT_KEY_DELAY = 0.5  # gap between menu keystrokes so Doom can re-render
+WELCOME_LINGER_SECONDS = 2.5  # post-reboot welcome banner visible before stopping
+WELCOME_NEEDLE = b"Welcome to BBoeOS!"
 
 
 def _audio_qemu_args(*, audio_path: Path) -> list[str]:
@@ -272,7 +272,7 @@ def _encode_doom_gif(
     pattern = frame_directory / "frame_%05d.ppm"
     fps_drop = f"fps={GIF_FRAMERATE}"
     scale = f"scale={GIF_WIDTH}:{GIF_HEIGHT}:flags=neighbor"
-    GIF_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    GIF_OUTPUT.parent.mkdir(exist_ok=True, parents=True)
     trim = _build_trim_concat_filter(
         audio_index=None,
         bios_end_seconds=bios_end_seconds,
@@ -393,7 +393,7 @@ def _encode_doom_mp4(
     if _normalize_to_max_size(frame_directory=frame_directory) == 0:
         message = f"no frames found in {frame_directory}"
         raise RuntimeError(message)
-    MP4_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    MP4_OUTPUT.parent.mkdir(exist_ok=True, parents=True)
     pattern = frame_directory / "frame_%05d.ppm"
     has_audio = audio_path.is_file() and audio_path.stat().st_size > 44  # noqa: PLR2004
     if not has_audio:
@@ -483,8 +483,8 @@ def _normalize_to_max_size(*, frame_directory: Path) -> int:
         scaled = frame.with_suffix(".scaled.ppm")
         subprocess.run(
             ["ffmpeg", "-y", "-i", str(frame), "-vf", scale_pad, str(scaled)],
-            check=True,
             capture_output=True,
+            check=True,
         )
         scaled.replace(frame)
     _renumber_frames(frame_directory=frame_directory, kept=frames)
@@ -545,14 +545,14 @@ def main() -> int:
         # (not monotonic) because bios_window_* are time.time() too.
         t0 = time.time()
         capture = threading.Thread(
-            target=capture_loop,
+            daemon=True,
             kwargs={
                 "frame_directory": CAPTURE_DIR,
                 "framerate": capture_framerate,
                 "session": session,
                 "stop": stop,
             },
-            daemon=True,
+            target=capture_loop,
         )
         capture.start()
         try:

@@ -18,7 +18,7 @@ def test_block_referenced_variable_excluded_from_ssa() -> None:
     # so the Copy destination is NOT renamed.
     body = [
         ir.Copy(destination="x", source=1),
-        ir.Block(node=ast_nodes.Var(name="x", line=1)),
+        ir.Block(node=ast_nodes.Var(line=1, name="x")),
         ir.Return(value="x"),
     ]
     form = ssa.convert_to_ssa(body)
@@ -29,7 +29,7 @@ def test_block_referenced_variable_excluded_from_ssa() -> None:
 
 def test_carry_branch_call_ast_variables_excluded() -> None:
     """Vars used inside a :class:`cc.ir.CarryBranch`'s ``call_ast`` stay un-versioned."""
-    call_ast = ast_nodes.Call(args=[ast_nodes.Var(name="arg", line=1)], line=1, name="helper")
+    call_ast = ast_nodes.Call(args=[ast_nodes.Var(line=1, name="arg")], line=1, name="helper")
     body = [
         ir.Copy(destination="arg", source=5),
         ir.CarryBranch(call_ast=call_ast, target=".end", when="set"),
@@ -580,14 +580,14 @@ def test_ssa_copy_propagation_chains_through_versions() -> None:
 
 def test_switch_discriminant_and_case_body_vars_excluded() -> None:
     """Variables referenced inside :class:`cc.ir.Switch` discriminant or case bodies stay un-versioned."""
-    ast_switch = ast_nodes.Switch(cases=[], discriminant=ast_nodes.Var(name="disc", line=1), line=1)
-    case_body = [ir.Block(node=ast_nodes.Var(name="case_var", line=1))]
+    ast_switch = ast_nodes.Switch(cases=[], discriminant=ast_nodes.Var(line=1, name="disc"), line=1)
+    case_body = [ir.Block(node=ast_nodes.Var(line=1, name="case_var"))]
     body = [
         ir.Copy(destination="disc", source=0),
         ir.Copy(destination="case_var", source=0),
         ir.Switch(
             cases=[ir.SwitchCase(body=case_body, value=1)],
-            discriminant=ast_nodes.Var(name="disc", line=1),
+            discriminant=ast_nodes.Var(line=1, name="disc"),
             end_label=".swend",
             original_ast=ast_switch,
         ),

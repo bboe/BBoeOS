@@ -25,17 +25,17 @@ import re
 import sys
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parent.parent
+DESTINATION = REPO / "user" / "libbboeos" / "libbboeos_stubs.asm"
+INCLUDE_DIRECTORY = REPO / "user" / "libbboeos" / "include"
 RE_ASM_HEX = re.compile(r"\b([0-9A-Fa-f]+)h\b")
+
 RE_ASSIGN = re.compile(r"^\s*%assign\s+(?P<name>\w+)\s+(?P<value>.+?)\s*(?:;.*)?$")
 RE_PROTOTYPE = re.compile(
     r"^[\w\s\*]+?\b(\w+)\s*\(([^)]*)\)\s*;",
     re.MULTILINE,
 )
 RE_TOKENS = re.compile(r"\w+|[+\-*/()]")
-
-REPO = Path(__file__).resolve().parent.parent
-INCLUDE_DIRECTORY = REPO / "user" / "libbboeos" / "include"
-DESTINATION = REPO / "user" / "libbboeos" / "libbboeos_stubs.asm"
 SOURCE = REPO / "kernel" / "include" / "constants.asm"
 
 

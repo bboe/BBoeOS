@@ -22,9 +22,6 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from run_qemu import QemuSession, qemu_session  # noqa: E402
 
-MARKER = "ZZSCROLLMARK"
-NUM_FILLER = 30
-
 # pmemsave resolves paths relative to QEMU's cwd (the repo root).
 # Using an absolute path trips QEMU's HMP expression parser (the
 # leading slash is interpreted as division), so we use a short
@@ -32,6 +29,9 @@ NUM_FILLER = 30
 # reading.
 _FB_DUMP_RELPATH = "fb_scrollback_dump.bin"
 _FB_DUMP_ABSPATH = REPO_ROOT / _FB_DUMP_RELPATH
+
+MARKER = "ZZSCROLLMARK"
+NUM_FILLER = 30
 
 
 def framebuffer_text(*, session: QemuSession) -> str:
@@ -63,8 +63,8 @@ def main() -> int:
         ["./make_os.sh"],
         check=True,
         cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
     )
     test_shift_pgup_reveals_scrolled_off_line()
     print("1 passed, 0 failed")

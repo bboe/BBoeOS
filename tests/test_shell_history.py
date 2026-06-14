@@ -34,8 +34,8 @@ def main() -> int:
         ["./make_os.sh"],
         check=True,
         cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
     )
     test_ctrl_p_recalls_previous_command()
     test_down_at_live_line_is_noop()

@@ -31,8 +31,8 @@ from add_file import (  # noqa: E402
 )
 
 _DIRECTORY_SECTORS = 3
-_PROBE_NAME = "dirty_probe"
 _PROBE_BODY = b"hello-dirty\n"
+_PROBE_NAME = "dirty_probe"
 
 
 def _read_size_from_image(*, image_path: Path, name: str) -> int:
@@ -64,8 +64,8 @@ def test_open_wronly_no_write_preserves_size() -> None:
         ["./make_os.sh"],
         check=True,
         cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
     )
     image = REPO_ROOT / "drive.img"
     with tempfile.TemporaryDirectory() as temporary_directory:

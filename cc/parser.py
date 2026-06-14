@@ -107,6 +107,123 @@ class Parser:
         "preserve_register",
     })
 
+    @staticmethod
+    def _delta_from_operator(operator_kind: str) -> int:
+        """Map a ``++``/``--`` token kind to a signed step.
+
+        Used everywhere the parser lowers pre/post-increment forms into
+        an explicit ``delta=±1`` field on the AST node.
+        """
+        return 1 if operator_kind == "PLUS_PLUS" else -1
+
+    @staticmethod
+    def _evaluate_constant_int(node: Node, /) -> int:
+        """Resolve *node* to a Python ``int`` at parse time, or raise.
+
+        ``parse_expression`` already runs :meth:`fold_binop` on every
+        binary operator it builds, so an expression composed entirely
+        of integer / char literals (including enum variant references,
+        which :meth:`parse_primary` substitutes to :class:`Int` leaves)
+        collapses to a single :class:`Int` before it reaches here.
+        Anything that hasn't folded down isn't a compile-time integer
+        constant — the caller wants ``enum`` initializers and ``case``
+        labels to be exactly that.
+        """
+        if isinstance(node, Int):
+            return node.value
+        message = "expected compile-time integer constant expression"
+        raise CompileError(message, line=node.line)
+
+    @staticmethod
+    def _member_place_base(*, arrow: bool, line: int, object_name: str) -> Node:
+        """Build the base :class:`Place` for a named member access.
+
+        ``obj.field`` (dot) bases on the bare :class:`VariablePlace`;
+        ``ptr->field`` (arrow) bases on a :class:`DereferencePlace` of the
+        variable, since ``p->f`` is exactly ``(*p).f``.
+        """
+        variable = VariablePlace(line=line, name=object_name)
+        if arrow:
+            return DereferencePlace(line=line, pointer=variable)
+        return variable
+
+    @staticmethod
+    def _pointee_type_from_cast(*, context: str, line: int, operand: Node) -> str:
+        """Validate ``*(T *)expr`` shapes and return the pointee type ``T``.
+
+        Shared by the lvalue (``*(T *)expr = value``) and rvalue
+        (``*(T *)expr``) paths; raises ``CompileError`` if the operand
+        is not a cast to a pointer type.  ``context`` is interleaved into
+        the error message so the caller's syntax is reflected back
+        verbatim (e.g. ``"*(T *)expr = ..."`` vs ``"*(T *)expr"``).
+        """
+        if not isinstance(operand, Cast):
+            message = "expected pointer cast after '*'"
+            raise CompileError(message, line=line)
+        cast_type = operand.target_type.rstrip()
+        if not cast_type.endswith("*"):
+            message = f"expected pointer type in '{context}', got '{cast_type}'"
+            raise CompileError(message, line=line)
+        return cast_type[:-1].rstrip()
+
+    @staticmethod
+    def fold_binop(operator: str, left: Node, right: Node, /) -> Node:
+        """Return a folded node when operands (or a left-subtree tail) are constant.
+
+        Handles two shapes:
+
+        1. ``Int operation Int`` collapses to a single ``Int`` — lets
+           ``COLUMNS - 1`` become ``39`` at parse time.
+        2. ``(X op1 Int1) op2 Int2`` with ``op1, op2`` both additive
+           folds the trailing constants through so
+           ``(column + 40) - 1`` becomes ``column + 39`` and
+           ``(column + 1) % 40`` keeps the ``%`` outer but the inner
+           addition is already a tight pair.
+        """
+        line = left.line
+        if isinstance(left, Int) and isinstance(right, Int):
+            a, b = left.value, right.value
+            if operator == "+":
+                return Int(line=line, value=a + b)
+            if operator == "-":
+                return Int(line=line, value=a - b)
+            if operator == "*":
+                return Int(line=line, value=a * b)
+            if operator == "&":
+                return Int(line=line, value=a & b)
+            if operator == "|":
+                return Int(line=line, value=a | b)
+            if operator == "^":
+                return Int(line=line, value=a ^ b)
+            if operator == "/" and b != 0:
+                return Int(line=line, value=a // b)
+            if operator == "%" and b != 0:
+                return Int(line=line, value=a % b)
+            if operator == "<<":
+                return Int(line=line, value=(a & 65535) << (b & 31) & 65535)
+            if operator == ">>":
+                return Int(line=line, value=(a & 65535) >> (b & 31))
+        # Rewrite `x / 2^N` as `x >> N` — a single shr replaces a ~10-byte
+        # div sequence and avoids the slow div instruction.  Only kicks
+        # in when N is a positive power of two; other divisions stay as-is.
+        if operator == "/" and isinstance(right, Int) and right.value > 0 and (right.value & (right.value - 1)) == 0:
+            shift = right.value.bit_length() - 1
+            return BinaryOperation(left=left, line=line, operation=">>", right=Int(line=line, value=shift))
+        if (
+            operator in ("+", "-")
+            and isinstance(right, Int)
+            and isinstance(left, BinaryOperation)
+            and left.operation in ("+", "-")
+            and isinstance(left.right, Int)
+        ):
+            inner_sign = 1 if left.operation == "+" else -1
+            outer_sign = 1 if operator == "+" else -1
+            combined = inner_sign * left.right.value + outer_sign * right.value
+            if combined >= 0:
+                return BinaryOperation(left=left.left, line=line, operation="+", right=Int(line=line, value=combined))
+            return BinaryOperation(left=left.left, line=line, operation="-", right=Int(line=line, value=-combined))
+        return BinaryOperation(left=left, line=line, operation=operator, right=right)
+
     def __init__(self, tokens: list[tuple[str, str, int]], /, *, bits: int = 32) -> None:
         """Initialize the parser with a token list.
 
@@ -159,33 +276,6 @@ class Parser:
             content += self.eat()[1][1:-1]
         return content
 
-    @staticmethod
-    def _delta_from_operator(operator_kind: str) -> int:
-        """Map a ``++``/``--`` token kind to a signed step.
-
-        Used everywhere the parser lowers pre/post-increment forms into
-        an explicit ``delta=±1`` field on the AST node.
-        """
-        return 1 if operator_kind == "PLUS_PLUS" else -1
-
-    @staticmethod
-    def _evaluate_constant_int(node: Node, /) -> int:
-        """Resolve *node* to a Python ``int`` at parse time, or raise.
-
-        ``parse_expression`` already runs :meth:`fold_binop` on every
-        binary operator it builds, so an expression composed entirely
-        of integer / char literals (including enum variant references,
-        which :meth:`parse_primary` substitutes to :class:`Int` leaves)
-        collapses to a single :class:`Int` before it reaches here.
-        Anything that hasn't folded down isn't a compile-time integer
-        constant — the caller wants ``enum`` initializers and ``case``
-        labels to be exactly that.
-        """
-        if isinstance(node, Int):
-            return node.value
-        message = "expected compile-time integer constant expression"
-        raise CompileError(message, line=node.line)
-
     def _extend_subscript_chain(self, place: Node, /, *, line: int) -> Node:
         """Left-nest every remaining ``[expr]`` bracket onto *place*.
 
@@ -217,19 +307,6 @@ class Parser:
         if token[0] in TYPE_TOKENS:
             return True
         return token[0] == "IDENT" and token[1] in self.typedef_aliases
-
-    @staticmethod
-    def _member_place_base(*, arrow: bool, line: int, object_name: str) -> Node:
-        """Build the base :class:`Place` for a named member access.
-
-        ``obj.field`` (dot) bases on the bare :class:`VariablePlace`;
-        ``ptr->field`` (arrow) bases on a :class:`DereferencePlace` of the
-        variable, since ``p->f`` is exactly ``(*p).f``.
-        """
-        variable = VariablePlace(line=line, name=object_name)
-        if arrow:
-            return DereferencePlace(line=line, pointer=variable)
-        return variable
 
     def _parse_asm_clobbers(self) -> list[str]:
         """Parse a comma-separated list of clobber string literals."""
@@ -889,20 +966,20 @@ class Parser:
                     return PlaceLoad(
                         line=line,
                         place=SubscriptPlace(
-                            line=line,
                             base=MemberPlace(
+                                base=SubscriptPlace(base=VariablePlace(line=line, name=name), index=index, line=line),
                                 line=line,
-                                base=SubscriptPlace(line=line, base=VariablePlace(line=line, name=name), index=index),
                                 member_name=member_name,
                             ),
                             index=elem_index,
+                            line=line,
                         ),
                     )
                 return PlaceLoad(
                     line=line,
                     place=MemberPlace(
+                        base=SubscriptPlace(base=VariablePlace(line=line, name=name), index=index, line=line),
                         line=line,
-                        base=SubscriptPlace(line=line, base=VariablePlace(line=line, name=name), index=index),
                         member_name=member_name,
                     ),
                 )
@@ -1147,13 +1224,13 @@ class Parser:
                 return PlaceStore(
                     line=token[2],
                     place=SubscriptPlace(
-                        line=token[2],
                         base=MemberPlace(
+                            base=SubscriptPlace(base=VariablePlace(line=token[2], name=name), index=index, line=token[2]),
                             line=token[2],
-                            base=SubscriptPlace(line=token[2], base=VariablePlace(line=token[2], name=name), index=index),
                             member_name=member_name,
                         ),
                         index=elem_index,
+                        line=token[2],
                     ),
                     value=expr,
                 )
@@ -1162,8 +1239,8 @@ class Parser:
             return PlaceStore(
                 line=token[2],
                 place=MemberPlace(
+                    base=SubscriptPlace(base=VariablePlace(line=token[2], name=name), index=index, line=token[2]),
                     line=token[2],
-                    base=SubscriptPlace(line=token[2], base=VariablePlace(line=token[2], name=name), index=index),
                     member_name=member_name,
                 ),
                 value=expr,
@@ -1871,25 +1948,6 @@ class Parser:
         self.typedef_aliases[alias_name] = f"struct {struct_name}"
         return decl
 
-    @staticmethod
-    def _pointee_type_from_cast(*, context: str, line: int, operand: Node) -> str:
-        """Validate ``*(T *)expr`` shapes and return the pointee type ``T``.
-
-        Shared by the lvalue (``*(T *)expr = value``) and rvalue
-        (``*(T *)expr``) paths; raises ``CompileError`` if the operand
-        is not a cast to a pointer type.  ``context`` is interleaved into
-        the error message so the caller's syntax is reflected back
-        verbatim (e.g. ``"*(T *)expr = ..."`` vs ``"*(T *)expr"``).
-        """
-        if not isinstance(operand, Cast):
-            message = "expected pointer cast after '*'"
-            raise CompileError(message, line=line)
-        cast_type = operand.target_type.rstrip()
-        if not cast_type.endswith("*"):
-            message = f"expected pointer type in '{context}', got '{cast_type}'"
-            raise CompileError(message, line=line)
-        return cast_type[:-1].rstrip()
-
     def eat(self, kind: str | None = None) -> tuple[str, str, int]:
         """Consume and return the current token, optionally checking its kind.
 
@@ -1906,64 +1964,6 @@ class Parser:
             raise CompileError(message, line=token[2])
         self.position += 1
         return token
-
-    @staticmethod
-    def fold_binop(operator: str, left: Node, right: Node, /) -> Node:
-        """Return a folded node when operands (or a left-subtree tail) are constant.
-
-        Handles two shapes:
-
-        1. ``Int operation Int`` collapses to a single ``Int`` — lets
-           ``COLUMNS - 1`` become ``39`` at parse time.
-        2. ``(X op1 Int1) op2 Int2`` with ``op1, op2`` both additive
-           folds the trailing constants through so
-           ``(column + 40) - 1`` becomes ``column + 39`` and
-           ``(column + 1) % 40`` keeps the ``%`` outer but the inner
-           addition is already a tight pair.
-        """
-        line = left.line
-        if isinstance(left, Int) and isinstance(right, Int):
-            a, b = left.value, right.value
-            if operator == "+":
-                return Int(line=line, value=a + b)
-            if operator == "-":
-                return Int(line=line, value=a - b)
-            if operator == "*":
-                return Int(line=line, value=a * b)
-            if operator == "&":
-                return Int(line=line, value=a & b)
-            if operator == "|":
-                return Int(line=line, value=a | b)
-            if operator == "^":
-                return Int(line=line, value=a ^ b)
-            if operator == "/" and b != 0:
-                return Int(line=line, value=a // b)
-            if operator == "%" and b != 0:
-                return Int(line=line, value=a % b)
-            if operator == "<<":
-                return Int(line=line, value=(a & 65535) << (b & 31) & 65535)
-            if operator == ">>":
-                return Int(line=line, value=(a & 65535) >> (b & 31))
-        # Rewrite `x / 2^N` as `x >> N` — a single shr replaces a ~10-byte
-        # div sequence and avoids the slow div instruction.  Only kicks
-        # in when N is a positive power of two; other divisions stay as-is.
-        if operator == "/" and isinstance(right, Int) and right.value > 0 and (right.value & (right.value - 1)) == 0:
-            shift = right.value.bit_length() - 1
-            return BinaryOperation(left=left, line=line, operation=">>", right=Int(line=line, value=shift))
-        if (
-            operator in ("+", "-")
-            and isinstance(right, Int)
-            and isinstance(left, BinaryOperation)
-            and left.operation in ("+", "-")
-            and isinstance(left.right, Int)
-        ):
-            inner_sign = 1 if left.operation == "+" else -1
-            outer_sign = 1 if operator == "+" else -1
-            combined = inner_sign * left.right.value + outer_sign * right.value
-            if combined >= 0:
-                return BinaryOperation(left=left.left, line=line, operation="+", right=Int(line=line, value=combined))
-            return BinaryOperation(left=left.left, line=line, operation="-", right=Int(line=line, value=-combined))
-        return BinaryOperation(left=left, line=line, operation=operator, right=right)
 
     def parse_additive(self) -> Node:
         """Parse an additive expression (addition and subtraction).
@@ -2822,12 +2822,12 @@ class Parser:
                         is_postfix=False,
                         line=token[2],
                         place=SubscriptPlace(
-                            line=token[2],
                             base=DereferencePlace(
                                 line=token[2],
                                 pointer=Index(array=Var(line=token[2], name=name_token[1]), index=index, line=token[2]),
                             ),
                             index=inner_index,
+                            line=token[2],
                         ),
                     )
                 self.eat("SEMI")
@@ -3104,8 +3104,8 @@ class Parser:
                 return self._parse_pointer_suffix("void", max_stars=2)
             return "void"
         pointer_bases = {
-            "INT": "int",
             "CHAR": "char",
+            "INT": "int",
         }
         if token[0] in pointer_bases:
             self.eat()

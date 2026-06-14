@@ -37,11 +37,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-BASE_IMAGE = "drive.img"
 _DEFAULT_PROGRAM_TIMEOUT = float(os.environ.get("BBOE_PROGRAM_TIMEOUT", "1.0"))
-_LARGE_FILE_TIMEOUT = float(os.environ.get("BBOE_LARGE_FILE_TIMEOUT", "6.0"))
 _DOUBLY_INDIRECT_TIMEOUT = float(os.environ.get("BBOE_DOUBLY_INDIRECT_TIMEOUT", "12.0"))
+_LARGE_FILE_TIMEOUT = float(os.environ.get("BBOE_LARGE_FILE_TIMEOUT", "6.0"))
+BASE_IMAGE = "drive.img"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -63,9 +63,48 @@ from add_file import (  # noqa: E402
 _ALL_FILESYSTEMS = frozenset({"bbfs", "ext2"})
 _BBFS_DIRECTORY_SECTORS = 4
 _BBFS_DIRECTORY_MAX_ENTRIES = _BBFS_DIRECTORY_SECTORS * ENTRIES_PER_SECTOR  # 64
+_BBFS_ONLY = frozenset({"bbfs"})
 _DOUBLY_INDIRECT_SENTINEL = b"EXT2_DOUBLY_INDIRECT_OK"
 _DOUBLY_INDIRECT_START = (12 + 256) * 1024  # byte 274432 = first doubly-indirect block
+
+
+# Subset of ext2 tests re-run with 2 KB blocks (exercises variable-block-size
+# paths).  Only ext2 tests that actually touch the filesystem are included —
+# CPU/network/cc.py tests don't change behavior with block size.  cat_large
+# and the doubly_indirect_* trio are 1 KB-only because src/large.bin is
+# injected exclusively into the 1 KB image (the doubly-indirect threshold
+# is 268 KB at 1 KB blocks; the same data layout doesn't reach the doubly-
+# indirect region at 2 KB blocks, where the threshold is 1 MB).
+_EXT2_BLOCK_SIZE_2K_TEST_NAMES = frozenset({
+    "cat",
+    "chmod",
+    "cp",
+    "cp_into_subdir",
+    "cp_overwrite_shrink",
+    "exec_first_middle_last",
+    "ls",
+    "mkdir",
+    "mkdir_ls_root",
+    "mkdir_nested",
+    "multi_sector_dir",
+    "rename",
+    "rename_dir",
+    "rm",
+    "rmdir",
+    "rmdir_nonempty",
+    "straddle_dir",  # 2 KB-only test; needs the larger block to stage a straddle
+})
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by both filesystems
+# ---------------------------------------------------------------------------
+
+
 _EXT2_DIRECT_BLOCKS = 12  # ext2 directory blocks ext2_search_dir walks (i_block[0..11])
+
+
+_EXT2_ONLY = frozenset({"ext2"})
 
 
 @dataclass
@@ -97,11 +136,6 @@ class ProgramTest:
     with_net: bool = False
 
 
-# ---------------------------------------------------------------------------
-# Helpers shared by both filesystems
-# ---------------------------------------------------------------------------
-
-
 def _add_exec_probe(*, image: Path, name: str) -> None:
     """Compile a tiny C program that prints ``EXEC <name>`` and add it to bin/."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -127,340 +161,12 @@ def _add_exec_probe(*, image: Path, name: str) -> None:
         )
 
 
-def _compile_and_add_depth_probe(*, image: Path, name: str, source: str) -> None:
-    """Attempt to compile *source* and add the resulting binary to bin/.
-
-    Uses the cc.py ``--object`` pipeline (cc.py → nasm → pack-ccobj → ccld).
-    If cc.py or nasm rejects the source — as is expected for the Stage 3a
-    depth probes before their lvalue patterns are supported — the function
-    returns silently without modifying the image.  The test then fails
-    because the shell prints ``unknown command`` instead of the expected
-    numeric output, giving a clean red baseline.
-
-    When Stage 3a makes the compiler accept the pattern, this function will
-    succeed, the binary will reach the image, and the test will turn green.
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        source_path = Path(tmpdir) / f"{name}.c"
-        source_path.write_text(source)
-        asm_path = Path(tmpdir) / f"{name}.asm"
-        compile_result = subprocess.run(
-            ["./cc.py", "--bits", "32", "--object", str(source_path), str(asm_path)],
-            capture_output=True,
-            check=False,
-            cwd=str(REPO_ROOT),
-        )
-        if compile_result.returncode != 0:
-            return  # expected compile failure; program deliberately not added
-        list_path = Path(tmpdir) / f"{name}.lst"
-        object_binary_path = Path(tmpdir) / f"{name}.obin"
-        nasm_result = subprocess.run(
-            [
-                "nasm",
-                "-f",
-                "bin",
-                "-i",
-                "kernel/include/",
-                "-l",
-                str(list_path),
-                "-o",
-                str(object_binary_path),
-                str(asm_path),
-            ],
-            capture_output=True,
-            check=False,
-            cwd=str(REPO_ROOT),
-        )
-        if nasm_result.returncode != 0:
-            return  # unexpected assemble failure; skip rather than crash
-        ccobj_path = Path(tmpdir) / f"{name}.ccobj"
-        subprocess.run(
-            ["./cc.py", "pack-ccobj", str(object_binary_path), str(list_path), str(ccobj_path)],
-            check=True,
-            cwd=str(REPO_ROOT),
-        )
-        binary_path = Path(tmpdir) / name
-        subprocess.run(
-            ["python3", "tools/ccld.py", "--output", str(binary_path), str(ccobj_path)],
-            check=True,
-            cwd=str(REPO_ROOT),
-        )
-        add_file(
-            executable=True,
-            file_path=str(binary_path),
-            image_path=str(image),
-            subdirectory="bin",
-        )
-
-
-def _chain_bitfield_store_setup(*, image: Path, test: ProgramTest) -> None:
-    """Runtime oracle: store to a bitfield through a chained dot (``outer.inner.field = v``).
-
-    Exercises the new ``_emit_member_scalar_resolved_store`` path where the
-    base is a ``MemberPlace`` (chained dot on a struct-value member), which is
-    an accumulator-clobbering register base: ``resolve_address`` materialises
-    the intermediate struct address into BX first, then the rhs is evaluated
-    into EAX, then ``_emit_resolved_field_store`` dispatches to
-    ``_emit_bitfield_write``.  The legacy ``_emit_member_chained_store`` had no
-    bitfield branch — this is strictly more correct, but was previously
-    untested.  The struct is file-scope (global) to avoid the pre-existing
-    ``_resolve_struct_value_base`` EBP-vs-BSS mismatch for local structs in
-    ``main`` (a separate issue not introduced by this commit).
-    Expected output: 5.
-    """
-    _compile_and_add_depth_probe(
-        image=image,
-        name=test.name,
-        source="""\
-struct inner_bits { int padding; unsigned char flag : 3; };
-struct outer_bits { struct inner_bits part; };
-struct outer_bits obj;
-int main() {
-    obj.part.padding = 0;
-    obj.part.flag = 5;
-    printf("%d\\n", obj.part.flag);
-    return 0;
-}
-""",
-    )
-
-
-def _depth_arrow_index_setup(*, image: Path, test: ProgramTest) -> None:
-    """Stage 3a probe: ``p->v[1][2]`` where ``v`` is a multidim array field.
-
-    Fails today with a parse error on the ``int v[3][4]`` struct field
-    declaration (multidimensional array struct fields not yet supported in
-    codegen).  Expected value when fixed: 77.
-    """
-    _compile_and_add_depth_probe(
-        image=image,
-        name=test.name,
-        source="""\
-struct inner { int v[3][4]; };
-struct inner obj;
-struct inner *p;
-int main() {
-    p = &obj;
-    obj.v[1][2] = 77;
-    printf("%d\\n", p->v[1][2]);
-    return 0;
-}
-""",
-    )
-
-
 # Two Stage 3a depth shapes are deferred to FRONTEND/parser work, NOT codegen:
 # pointer-to-multidim-array declarations (``int (*pm)[2][3]``, needed for
 # ``(*pm)[1][2]``) and subscript-then-member access (``arr[i][j].member``, e.g.
 # ``b.grid[1][0].f[1]``) both fail in the PARSER before any address resolution.
 # The recursive resolve_address(place) cannot reach them on its own, so their
 # probes were dropped here; re-add them once the parser accepts the syntax.
-
-
-def _depth_triple_setup(*, image: Path, test: ProgramTest) -> None:
-    """Stage 3a probe: ``grid[0][1][0]`` through an array-of-pointer chain.
-
-    The arbitrary-depth array-of-pointers reconstruct lowers this as a
-    left-nested ``Index`` rvalue feeding a final deref+subscript, so the
-    recursive resolver reaches any depth.  Expected value: 20.
-    """
-    _compile_and_add_depth_probe(
-        image=image,
-        name=test.name,
-        source="""\
-int r0[2];
-int r1[2];
-int *rows[2];
-int **grid[1];
-int main() {
-    r0[0] = 10;
-    r0[1] = 11;
-    r1[0] = 20;
-    r1[1] = 21;
-    rows[0] = r0;
-    rows[1] = r1;
-    grid[0] = rows;
-    printf("%d\\n", grid[0][1][0]);
-    return 0;
-}
-""",
-    )
-
-
-def _depth_triple_store_setup(*, image: Path, test: ProgramTest) -> None:
-    """Stage 3a probe: STORE + read at depth through an array-of-pointer chain.
-
-    Writes ``grid[0][1][0]`` and ``grid[0][0][1]`` through the arbitrary-depth
-    array-of-pointers lvalue path (``_emit_place_store`` -> reconstruct ->
-    ``_emit_resolved_address_store``), then reads both back.  Expected value:
-    39 (30 + 9).
-    """
-    _compile_and_add_depth_probe(
-        image=image,
-        name=test.name,
-        source="""\
-int a0[2];
-int a1[2];
-int *rows[2];
-int **grid[1];
-int main() {
-    a0[0] = 1;
-    a0[1] = 2;
-    a1[0] = 3;
-    a1[1] = 4;
-    rows[0] = a0;
-    rows[1] = a1;
-    grid[0] = rows;
-    grid[0][1][0] = 30;
-    grid[0][0][1] = 9;
-    printf("%d\\n", grid[0][1][0] + grid[0][0][1]);
-    return 0;
-}
-""",
-    )
-
-
-def _double_index_ptr_store_setup(*, image: Path, test: ProgramTest) -> None:
-    """Runtime oracle: store through an array-of-pointers double subscript.
-
-    Verifies that the ``_emit_resolved_address_store`` path (the pure store
-    rewrite that replaced the old bespoke double-index store emitter) writes
-    the correct value at runtime.  Expected output: 77.
-    """
-    _compile_and_add_depth_probe(
-        image=image,
-        name=test.name,
-        source="""\
-int a[2]; int b[2]; int *rows[2];
-int main() {
-    rows[0] = a;
-    rows[1] = b;
-    rows[1][0] = 33;
-    rows[1][1] = 44;
-    printf("%d\\n", rows[1][0] + rows[1][1]);
-    return 0;
-}
-""",
-    )
-
-
-def _member_store_via_expr_setup(*, image: Path, test: ProgramTest) -> None:
-    """Runtime oracle: store through a pointer field accessed via general expression.
-
-    Exercises the new ``_emit_member_scalar_resolved_store`` path where the
-    base is a ``DereferencePlace`` of a general pointer expression (a
-    ``PlaceLoad`` of a member — not a named ``VariablePlace`` pointer and not
-    the ``Cast(&local)`` fast path).  ``node_a.leaf_ptr->data = 42`` parses as
-    ``MemberPlace(DereferencePlace(PlaceLoad(MemberPlace(VariablePlace("node_a"),
-    "leaf_ptr"))), "data")``: the pointer expression is a ``PlaceLoad``, so
-    ``_member_base_preserves_accumulator`` returns False and the
-    accumulator-clobbering path runs — ``resolve_address`` evaluates the
-    pointer expression into EAX and moves it to BX; then the rhs is evaluated
-    and stored.  Both the struct and its target are file-scope (global) to
-    avoid the pre-existing ``_resolve_struct_value_base`` EBP-vs-BSS mismatch
-    for local struct values in ``main``.  Expected output: 42.
-    """
-    _compile_and_add_depth_probe(
-        image=image,
-        name=test.name,
-        source="""\
-struct leaf { int data; };
-struct node { struct leaf *leaf_ptr; };
-struct leaf leaf_target;
-struct node node_a;
-int main() {
-    node_a.leaf_ptr = &leaf_target;
-    node_a.leaf_ptr->data = 42;
-    printf("%d\\n", node_a.leaf_ptr->data);
-    return 0;
-}
-""",
-    )
-
-
-def _struct_array_int_member_setup(*, image: Path, test: ProgramTest) -> None:
-    """Runtime oracle: ``arr[i].member[j]`` over an int (4-byte element) member.
-
-    Exercises the shape-B struct-array path now routed through
-    ``resolve_address``.  The legacy ``_resolve_place`` restricted the element
-    index to 1- / 2-byte members and raised for anything larger; the recursive
-    resolver scales the inner subscript through ``_emit_scale_index`` (``shl
-    eax, 2`` for a 4-byte int element), so the larger-element case now compiles.
-    This probe proves it computes the correct address: it fills
-    ``items[i].values[j]`` with ``i*10 + j`` and reads back
-    ``items[1].values[2]`` (== 12).  Both struct and array are file-scope
-    (global) to avoid the pre-existing EBP-vs-BSS mismatch for local struct
-    values in ``main``.  Expected output: 12.
-    """
-    _compile_and_add_depth_probe(
-        image=image,
-        name=test.name,
-        source="""\
-struct cell { int values[3]; };
-struct cell items[2];
-int main() {
-    int i;
-    int j;
-    i = 0;
-    while (i < 2) {
-        j = 0;
-        while (j < 3) {
-            items[i].values[j] = i * 10 + j;
-            j++;
-        }
-        i++;
-    }
-    printf("%d\\n", items[1].values[2]);
-    return 0;
-}
-""",
-    )
-
-
-def _struct_array_stride_imul_setup(*, image: Path, test: ProgramTest) -> None:
-    """Regression oracle: struct-array stride that lowers to ``imul``.
-
-    Direct guard for the asm.c self-host miscompile fixed in
-    ``fix(cc): correct struct-array stride/decay in resolve_address``.  When
-    the struct size is not 1 / 2 / 4 the dynamic-index scaling in
-    ``resolve_address`` falls through ``_emit_scale_index`` to an ``imul``.
-    f9c82859 emitted the *three*-operand ``imul reg, reg, stride`` form, which
-    the self-hosted assembler in ``user/programs/asm.c`` cannot parse (its
-    ``handle_imul`` only accepts ``imul reg, imm``); it silently encoded the
-    immediate as 0, so every ``symbol_table[index]`` access read the wrong
-    entry.  The struct here mirrors asm.c's ``struct Symbol`` exactly — a
-    38-byte (= 0x26) layout, the very stride whose immediate was zeroed.
-
-    The probe fills ``entries[i].value`` with ``i * 7 + 1`` over a dynamic
-    index loop (forcing the imul-scaled address rather than a constant fold)
-    and reads back ``entries[3].value`` (== 22).  A wrong stride would read a
-    neighbouring entry and print something else.  File-scope to dodge the
-    pre-existing EBP-vs-BSS mismatch for local struct values in ``main``.
-    Expected output: 22.
-    """
-    _compile_and_add_depth_probe(
-        image=image,
-        name=test.name,
-        source="""\
-struct symbol_entry { char name[32]; int value; char type; char scope; };
-struct symbol_entry entries[5];
-int main() {
-    int i;
-    i = 0;
-    while (i < 5) {
-        entries[i].value = i * 7 + 1;
-        i++;
-    }
-    printf("%d\\n", entries[3].value);
-    return 0;
-}
-""",
-    )
-
-
-# ---------------------------------------------------------------------------
-# bbfs helpers (exec_first_middle_last setup)
-# ---------------------------------------------------------------------------
 
 
 def _bbfs_bin_entry_names(*, image: Path) -> list[str | None]:
@@ -566,9 +272,238 @@ def _bbfs_pick_sector_probe(*, names: list[str | None], slot_end: int, slot_star
     raise RuntimeError(msg)
 
 
+def _build_os(*, block_size: int, filesystem: str, large_file: bool, temporary_directory: Path) -> None:
+    """Run make_os.sh with --with-test-programs and the right FS flags."""
+    image = temporary_directory / BASE_IMAGE
+    command = ["./make_os.sh", "--with-test-programs"]
+    if filesystem == "ext2":
+        command += ["--ext2", f"--ext2-block-size={block_size}", "--ext2-inode-count=1024"]
+    command.append(str(image))
+    result = subprocess.run(command, capture_output=True, check=False, text=True)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        sys.exit(1)
+    if filesystem == "ext2" and large_file and block_size == 1024:
+        _ext2_add_large_test_file(image=image)
+
+
+def _chain_bitfield_store_setup(*, image: Path, test: ProgramTest) -> None:
+    """Runtime oracle: store to a bitfield through a chained dot (``outer.inner.field = v``).
+
+    Exercises the new ``_emit_member_scalar_resolved_store`` path where the
+    base is a ``MemberPlace`` (chained dot on a struct-value member), which is
+    an accumulator-clobbering register base: ``resolve_address`` materialises
+    the intermediate struct address into BX first, then the rhs is evaluated
+    into EAX, then ``_emit_resolved_field_store`` dispatches to
+    ``_emit_bitfield_write``.  The legacy ``_emit_member_chained_store`` had no
+    bitfield branch — this is strictly more correct, but was previously
+    untested.  The struct is file-scope (global) to avoid the pre-existing
+    ``_resolve_struct_value_base`` EBP-vs-BSS mismatch for local structs in
+    ``main`` (a separate issue not introduced by this commit).
+    Expected output: 5.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+struct inner_bits { int padding; unsigned char flag : 3; };
+struct outer_bits { struct inner_bits part; };
+struct outer_bits obj;
+int main() {
+    obj.part.padding = 0;
+    obj.part.flag = 5;
+    printf("%d\\n", obj.part.flag);
+    return 0;
+}
+""",
+    )
+
+
+# ---------------------------------------------------------------------------
+# bbfs helpers (exec_first_middle_last setup)
+# ---------------------------------------------------------------------------
+
+
+def _compile_and_add_depth_probe(*, image: Path, name: str, source: str) -> None:
+    """Attempt to compile *source* and add the resulting binary to bin/.
+
+    Uses the cc.py ``--object`` pipeline (cc.py → nasm → pack-ccobj → ccld).
+    If cc.py or nasm rejects the source — as is expected for the Stage 3a
+    depth probes before their lvalue patterns are supported — the function
+    returns silently without modifying the image.  The test then fails
+    because the shell prints ``unknown command`` instead of the expected
+    numeric output, giving a clean red baseline.
+
+    When Stage 3a makes the compiler accept the pattern, this function will
+    succeed, the binary will reach the image, and the test will turn green.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_path = Path(tmpdir) / f"{name}.c"
+        source_path.write_text(source)
+        asm_path = Path(tmpdir) / f"{name}.asm"
+        compile_result = subprocess.run(
+            ["./cc.py", "--bits", "32", "--object", str(source_path), str(asm_path)],
+            capture_output=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+        )
+        if compile_result.returncode != 0:
+            return  # expected compile failure; program deliberately not added
+        list_path = Path(tmpdir) / f"{name}.lst"
+        object_binary_path = Path(tmpdir) / f"{name}.obin"
+        nasm_result = subprocess.run(
+            [
+                "nasm",
+                "-f",
+                "bin",
+                "-i",
+                "kernel/include/",
+                "-l",
+                str(list_path),
+                "-o",
+                str(object_binary_path),
+                str(asm_path),
+            ],
+            capture_output=True,
+            check=False,
+            cwd=str(REPO_ROOT),
+        )
+        if nasm_result.returncode != 0:
+            return  # unexpected assemble failure; skip rather than crash
+        ccobj_path = Path(tmpdir) / f"{name}.ccobj"
+        subprocess.run(
+            ["./cc.py", "pack-ccobj", str(object_binary_path), str(list_path), str(ccobj_path)],
+            check=True,
+            cwd=str(REPO_ROOT),
+        )
+        binary_path = Path(tmpdir) / name
+        subprocess.run(
+            ["python3", "tools/ccld.py", "--output", str(binary_path), str(ccobj_path)],
+            check=True,
+            cwd=str(REPO_ROOT),
+        )
+        add_file(
+            executable=True,
+            file_path=str(binary_path),
+            image_path=str(image),
+            subdirectory="bin",
+        )
+
+
+def _depth_arrow_index_setup(*, image: Path, test: ProgramTest) -> None:
+    """Stage 3a probe: ``p->v[1][2]`` where ``v`` is a multidim array field.
+
+    Fails today with a parse error on the ``int v[3][4]`` struct field
+    declaration (multidimensional array struct fields not yet supported in
+    codegen).  Expected value when fixed: 77.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+struct inner { int v[3][4]; };
+struct inner obj;
+struct inner *p;
+int main() {
+    p = &obj;
+    obj.v[1][2] = 77;
+    printf("%d\\n", p->v[1][2]);
+    return 0;
+}
+""",
+    )
+
+
+def _depth_triple_setup(*, image: Path, test: ProgramTest) -> None:
+    """Stage 3a probe: ``grid[0][1][0]`` through an array-of-pointer chain.
+
+    The arbitrary-depth array-of-pointers reconstruct lowers this as a
+    left-nested ``Index`` rvalue feeding a final deref+subscript, so the
+    recursive resolver reaches any depth.  Expected value: 20.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+int r0[2];
+int r1[2];
+int *rows[2];
+int **grid[1];
+int main() {
+    r0[0] = 10;
+    r0[1] = 11;
+    r1[0] = 20;
+    r1[1] = 21;
+    rows[0] = r0;
+    rows[1] = r1;
+    grid[0] = rows;
+    printf("%d\\n", grid[0][1][0]);
+    return 0;
+}
+""",
+    )
+
+
+def _depth_triple_store_setup(*, image: Path, test: ProgramTest) -> None:
+    """Stage 3a probe: STORE + read at depth through an array-of-pointer chain.
+
+    Writes ``grid[0][1][0]`` and ``grid[0][0][1]`` through the arbitrary-depth
+    array-of-pointers lvalue path (``_emit_place_store`` -> reconstruct ->
+    ``_emit_resolved_address_store``), then reads both back.  Expected value:
+    39 (30 + 9).
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+int a0[2];
+int a1[2];
+int *rows[2];
+int **grid[1];
+int main() {
+    a0[0] = 1;
+    a0[1] = 2;
+    a1[0] = 3;
+    a1[1] = 4;
+    rows[0] = a0;
+    rows[1] = a1;
+    grid[0] = rows;
+    grid[0][1][0] = 30;
+    grid[0][0][1] = 9;
+    printf("%d\\n", grid[0][1][0] + grid[0][0][1]);
+    return 0;
+}
+""",
+    )
+
+
 # ---------------------------------------------------------------------------
 # ext2 helpers (large-file injection, fsck, directory-walk setups)
 # ---------------------------------------------------------------------------
+
+
+def _double_index_ptr_store_setup(*, image: Path, test: ProgramTest) -> None:
+    """Runtime oracle: store through an array-of-pointers double subscript.
+
+    Verifies that the ``_emit_resolved_address_store`` path (the pure store
+    rewrite that replaced the old bespoke double-index store emitter) writes
+    the correct value at runtime.  Expected output: 77.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+int a[2]; int b[2]; int *rows[2];
+int main() {
+    rows[0] = a;
+    rows[1] = b;
+    rows[1][0] = 33;
+    rows[1][1] = 44;
+    printf("%d\\n", rows[1][0] + rows[1][1]);
+    return 0;
+}
+""",
+    )
 
 
 def _ext2_add_large_test_file(*, image: Path) -> None:
@@ -633,9 +568,9 @@ def _ext2_add_multi_sector_dir_filler(*, image: Path, test: ProgramTest) -> None
         script = "".join(f"write {stub} /bin/{stub.name}\n" for stub in stubs)
         result = subprocess.run(
             ["debugfs", "-w", str(partition)],
-            input=script.encode(),
             capture_output=True,
             check=False,
+            input=script.encode(),
         )
         stderr_text = result.stderr.decode()
         stderr_failed = any(
@@ -689,9 +624,9 @@ def _ext2_add_straddle_dir_filler(*, image: Path, test: ProgramTest) -> None:
         script = "\n".join(script_lines) + "\n"
         result = subprocess.run(
             ["debugfs", "-w", str(partition)],
-            input=script.encode(),
             capture_output=True,
             check=False,
+            input=script.encode(),
         )
         stderr_text = result.stderr.decode()
         stderr_failed = any(
@@ -729,8 +664,8 @@ def _ext2_bin_block0_used_bytes(*, image: Path) -> int:
         result = subprocess.run(
             ["debugfs", "-R", "stat <12>", str(tmp_path)],
             capture_output=True,
-            text=True,
             check=True,
+            text=True,
         )
         block_num = _ext2_bin_block0_first_block_num(debugfs_output=result.stdout)
         with tmp_path.open("rb") as f:
@@ -759,8 +694,8 @@ def _ext2_bin_dir_blocks(*, image: Path) -> int:
         result = subprocess.run(
             ["debugfs", "-R", "stat <12>", str(tmp_path)],
             capture_output=True,
-            text=True,
             check=True,
+            text=True,
         )
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -779,8 +714,8 @@ def _ext2_block_size(*, image: Path) -> int:
         result = subprocess.run(
             ["dumpe2fs", "-h", str(tmp_path)],
             capture_output=True,
-            text=True,
             check=True,
+            text=True,
         )
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -831,15 +766,15 @@ def _ext2_fsck(*, image: Path) -> str | None:
     with Path(image).open("rb") as f:
         f.seek(ext2_offset)
         ext2_data = f.read()
-    with tempfile.NamedTemporaryFile(suffix=".ext2", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".ext2") as tmp:
         tmp.write(ext2_data)
         ext2_path = Path(tmp.name)
     try:
         result = subprocess.run(
             ["e2fsck", "-f", "-n", str(ext2_path)],
             capture_output=True,
-            text=True,
             check=False,
+            text=True,
         )
         if result.returncode != 0:
             for line in result.stdout.splitlines():
@@ -902,6 +837,11 @@ def _ext2_pad_bin_to_full_directory(*, image: Path, test: ProgramTest) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Test catalogue
+# ---------------------------------------------------------------------------
+
+
 def _ext2_pick_straddle_target_offset(*, block_size: int, initial_offset: int) -> int:
     """Return the smallest reachable header offset that straddles a 512-byte sector boundary inside a block.
 
@@ -921,12 +861,202 @@ def _ext2_pick_straddle_target_offset(*, block_size: int, initial_offset: int) -
     raise RuntimeError(msg)
 
 
+def _member_store_via_expr_setup(*, image: Path, test: ProgramTest) -> None:
+    """Runtime oracle: store through a pointer field accessed via general expression.
+
+    Exercises the new ``_emit_member_scalar_resolved_store`` path where the
+    base is a ``DereferencePlace`` of a general pointer expression (a
+    ``PlaceLoad`` of a member — not a named ``VariablePlace`` pointer and not
+    the ``Cast(&local)`` fast path).  ``node_a.leaf_ptr->data = 42`` parses as
+    ``MemberPlace(DereferencePlace(PlaceLoad(MemberPlace(VariablePlace("node_a"),
+    "leaf_ptr"))), "data")``: the pointer expression is a ``PlaceLoad``, so
+    ``_member_base_preserves_accumulator`` returns False and the
+    accumulator-clobbering path runs — ``resolve_address`` evaluates the
+    pointer expression into EAX and moves it to BX; then the rhs is evaluated
+    and stored.  Both the struct and its target are file-scope (global) to
+    avoid the pre-existing ``_resolve_struct_value_base`` EBP-vs-BSS mismatch
+    for local struct values in ``main``.  Expected output: 42.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+struct leaf { int data; };
+struct node { struct leaf *leaf_ptr; };
+struct leaf leaf_target;
+struct node node_a;
+int main() {
+    node_a.leaf_ptr = &leaf_target;
+    node_a.leaf_ptr->data = 42;
+    printf("%d\\n", node_a.leaf_ptr->data);
+    return 0;
+}
+""",
+    )
+
+
+def _run_suite(
+    *,
+    fail_fast: bool,
+    filesystem: str,
+    floppy: bool,
+    label: str,
+    temporary_directory: Path,
+    tests: list[ProgramTest],
+) -> tuple[int, int, list[str]]:
+    """Run a list of ProgramTests; return (pass_count, fail_count, failed_names)."""
+    pass_count = 0
+    fail_count = 0
+    failed: list[str] = []
+    for test in tests:
+        display_name = f"{label}{test.name}" if label else test.name
+        if test.skip is not None:
+            print(f"  SKIP  {display_name:<24} ({test.skip})")
+            continue
+        ok, message, boot_time, command_time = _run_test(
+            filesystem=filesystem,
+            floppy=floppy,
+            temporary_directory=temporary_directory,
+            test=test,
+        )
+        timing = f"boot {boot_time:.2f}s  cmd {command_time:.2f}s"
+        if ok:
+            print(f"  PASS  {display_name:<24}              {timing}")
+            pass_count += 1
+        else:
+            print(f"  FAIL  {display_name:<24}  {message}   {timing}")
+            fail_count += 1
+            failed.append(display_name)
+            if fail_fast:
+                break
+    return pass_count, fail_count, failed
+
+
+def _run_test(*, filesystem: str, floppy: bool, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str, float, float]:
+    """Run one ProgramTest; return (passed, message, boot_time, command_time).
+
+    ext2 tests always copy the image (so e2fsck can inspect post-test state)
+    and run with snapshot=False; bbfs tests reuse the base image with
+    snapshot=True unless the test has a setup hook that mutates it.
+    """
+    if filesystem == "ext2" or test.setup is not None:
+        drive = temporary_directory / f"test_{test.name}.img"
+        shutil.copy2(temporary_directory / BASE_IMAGE, drive)
+        if test.setup is not None:
+            test.setup(image=drive, test=test)
+        snapshot = False
+    else:
+        drive = temporary_directory / BASE_IMAGE
+        snapshot = True
+    try:
+        result = run_commands(
+            test.commands,
+            command_timeout=test.timeout,
+            drive=drive,
+            extra_qemu_args=test.extra_qemu_args or None,
+            floppy=floppy,
+            memory=test.memory,
+            snapshot=snapshot,
+            with_net=test.with_net,
+        )
+    except TimeoutError as error:
+        return False, f"timeout: {error}", 0.0, 0.0
+    except RuntimeError as error:
+        return False, f"qemu error: {error}", 0.0, 0.0
+    command_time = sum(result.command_times)
+    failures: list[str] = []
+    if not re.search(test.expect, result.output.replace("\r", ""), re.MULTILINE):
+        failures.append(f"expected regex {test.expect!r} not found in output")
+    if filesystem == "ext2":
+        fsck_error = _ext2_fsck(image=drive)
+        if fsck_error:
+            failures.append(f"fsck: {fsck_error}")
+    return (not failures), "; ".join(failures), result.boot_time, command_time
+
+
 # ---------------------------------------------------------------------------
-# Test catalogue
+# Build, run, fsck
 # ---------------------------------------------------------------------------
 
-_BBFS_ONLY = frozenset({"bbfs"})
-_EXT2_ONLY = frozenset({"ext2"})
+
+def _struct_array_int_member_setup(*, image: Path, test: ProgramTest) -> None:
+    """Runtime oracle: ``arr[i].member[j]`` over an int (4-byte element) member.
+
+    Exercises the shape-B struct-array path now routed through
+    ``resolve_address``.  The legacy ``_resolve_place`` restricted the element
+    index to 1- / 2-byte members and raised for anything larger; the recursive
+    resolver scales the inner subscript through ``_emit_scale_index`` (``shl
+    eax, 2`` for a 4-byte int element), so the larger-element case now compiles.
+    This probe proves it computes the correct address: it fills
+    ``items[i].values[j]`` with ``i*10 + j`` and reads back
+    ``items[1].values[2]`` (== 12).  Both struct and array are file-scope
+    (global) to avoid the pre-existing EBP-vs-BSS mismatch for local struct
+    values in ``main``.  Expected output: 12.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+struct cell { int values[3]; };
+struct cell items[2];
+int main() {
+    int i;
+    int j;
+    i = 0;
+    while (i < 2) {
+        j = 0;
+        while (j < 3) {
+            items[i].values[j] = i * 10 + j;
+            j++;
+        }
+        i++;
+    }
+    printf("%d\\n", items[1].values[2]);
+    return 0;
+}
+""",
+    )
+
+
+def _struct_array_stride_imul_setup(*, image: Path, test: ProgramTest) -> None:
+    """Regression oracle: struct-array stride that lowers to ``imul``.
+
+    Direct guard for the asm.c self-host miscompile fixed in
+    ``fix(cc): correct struct-array stride/decay in resolve_address``.  When
+    the struct size is not 1 / 2 / 4 the dynamic-index scaling in
+    ``resolve_address`` falls through ``_emit_scale_index`` to an ``imul``.
+    f9c82859 emitted the *three*-operand ``imul reg, reg, stride`` form, which
+    the self-hosted assembler in ``user/programs/asm.c`` cannot parse (its
+    ``handle_imul`` only accepts ``imul reg, imm``); it silently encoded the
+    immediate as 0, so every ``symbol_table[index]`` access read the wrong
+    entry.  The struct here mirrors asm.c's ``struct Symbol`` exactly — a
+    38-byte (= 0x26) layout, the very stride whose immediate was zeroed.
+
+    The probe fills ``entries[i].value`` with ``i * 7 + 1`` over a dynamic
+    index loop (forcing the imul-scaled address rather than a constant fold)
+    and reads back ``entries[3].value`` (== 22).  A wrong stride would read a
+    neighbouring entry and print something else.  File-scope to dodge the
+    pre-existing EBP-vs-BSS mismatch for local struct values in ``main``.
+    Expected output: 22.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+struct symbol_entry { char name[32]; int value; char type; char scope; };
+struct symbol_entry entries[5];
+int main() {
+    int i;
+    i = 0;
+    while (i < 5) {
+        entries[i].value = i * 7 + 1;
+        i++;
+    }
+    printf("%d\\n", entries[3].value);
+    return 0;
+}
+""",
+    )
 
 
 TESTS: list[ProgramTest] = [
@@ -1090,7 +1220,7 @@ TESTS: list[ProgramTest] = [
         r"^39$",
         setup=_depth_triple_store_setup,
     ),
-    ProgramTest("dns", ["dns example.com"], r"example\.com is at \d+\.\d+\.\d+\.\d+", with_net=True, timeout=30.0),
+    ProgramTest("dns", ["dns example.com"], r"example\.com is at \d+\.\d+\.\d+\.\d+", timeout=30.0, with_net=True),
     ProgramTest(
         "double_index_ptr_store",
         ["double_index_ptr_store"],
@@ -1304,7 +1434,7 @@ TESTS: list[ProgramTest] = [
     # then runs to confirm the new shell works.
     ProgramTest("nullderef", ["fault_test null", "echo recovered"], r"EXC0E[\s\S]*CR2=00000000[\s\S]*recovered"),
     ProgramTest("okptest", ["fault_test kernel_buf", "echo recovered"], r"ok: bad pointer rejected[\s\S]*recovered"),
-    ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", with_net=True, timeout=20.0),
+    ProgramTest("ping", ["ping 10.0.2.2"], r"(RTT=|time=|reply|timeout)", timeout=20.0, with_net=True),
     # play_midi opens /dev/midi, queues a 1 s A4 tone on OPL voice 0, and exits.
     # The QEMU SB16 device exposes the OPL3 synth at 0x388/0x38A so opl_probe
     # succeeds; without -device sb16 the open returns -1.  The audiodev=none
@@ -1331,8 +1461,8 @@ TESTS: list[ProgramTest] = [
         "recv_timeout_test",
         ["recv_timeout_test"],
         r"^OK$",
-        with_net=True,
         timeout=15.0,
+        with_net=True,
     ),
     ProgramTest(
         "rename",
@@ -1523,133 +1653,6 @@ TESTS: list[ProgramTest] = [
 ]
 
 
-# Subset of ext2 tests re-run with 2 KB blocks (exercises variable-block-size
-# paths).  Only ext2 tests that actually touch the filesystem are included —
-# CPU/network/cc.py tests don't change behavior with block size.  cat_large
-# and the doubly_indirect_* trio are 1 KB-only because src/large.bin is
-# injected exclusively into the 1 KB image (the doubly-indirect threshold
-# is 268 KB at 1 KB blocks; the same data layout doesn't reach the doubly-
-# indirect region at 2 KB blocks, where the threshold is 1 MB).
-_EXT2_BLOCK_SIZE_2K_TEST_NAMES = frozenset({
-    "cat",
-    "chmod",
-    "cp",
-    "cp_into_subdir",
-    "cp_overwrite_shrink",
-    "exec_first_middle_last",
-    "ls",
-    "mkdir",
-    "mkdir_ls_root",
-    "mkdir_nested",
-    "multi_sector_dir",
-    "rename",
-    "rename_dir",
-    "rm",
-    "rmdir",
-    "rmdir_nonempty",
-    "straddle_dir",  # 2 KB-only test; needs the larger block to stage a straddle
-})
-
-
-# ---------------------------------------------------------------------------
-# Build, run, fsck
-# ---------------------------------------------------------------------------
-
-
-def _build_os(*, block_size: int, filesystem: str, large_file: bool, temporary_directory: Path) -> None:
-    """Run make_os.sh with --with-test-programs and the right FS flags."""
-    image = temporary_directory / BASE_IMAGE
-    command = ["./make_os.sh", "--with-test-programs"]
-    if filesystem == "ext2":
-        command += ["--ext2", f"--ext2-block-size={block_size}", "--ext2-inode-count=1024"]
-    command.append(str(image))
-    result = subprocess.run(command, capture_output=True, check=False, text=True)
-    if result.returncode != 0:
-        sys.stderr.write(result.stderr)
-        sys.exit(1)
-    if filesystem == "ext2" and large_file and block_size == 1024:
-        _ext2_add_large_test_file(image=image)
-
-
-def _run_suite(
-    *,
-    fail_fast: bool,
-    filesystem: str,
-    floppy: bool,
-    label: str,
-    tests: list[ProgramTest],
-    temporary_directory: Path,
-) -> tuple[int, int, list[str]]:
-    """Run a list of ProgramTests; return (pass_count, fail_count, failed_names)."""
-    pass_count = 0
-    fail_count = 0
-    failed: list[str] = []
-    for test in tests:
-        display_name = f"{label}{test.name}" if label else test.name
-        if test.skip is not None:
-            print(f"  SKIP  {display_name:<24} ({test.skip})")
-            continue
-        ok, message, boot_time, command_time = _run_test(
-            filesystem=filesystem,
-            floppy=floppy,
-            temporary_directory=temporary_directory,
-            test=test,
-        )
-        timing = f"boot {boot_time:.2f}s  cmd {command_time:.2f}s"
-        if ok:
-            print(f"  PASS  {display_name:<24}              {timing}")
-            pass_count += 1
-        else:
-            print(f"  FAIL  {display_name:<24}  {message}   {timing}")
-            fail_count += 1
-            failed.append(display_name)
-            if fail_fast:
-                break
-    return pass_count, fail_count, failed
-
-
-def _run_test(*, filesystem: str, floppy: bool, temporary_directory: Path, test: ProgramTest) -> tuple[bool, str, float, float]:
-    """Run one ProgramTest; return (passed, message, boot_time, command_time).
-
-    ext2 tests always copy the image (so e2fsck can inspect post-test state)
-    and run with snapshot=False; bbfs tests reuse the base image with
-    snapshot=True unless the test has a setup hook that mutates it.
-    """
-    if filesystem == "ext2" or test.setup is not None:
-        drive = temporary_directory / f"test_{test.name}.img"
-        shutil.copy2(temporary_directory / BASE_IMAGE, drive)
-        if test.setup is not None:
-            test.setup(image=drive, test=test)
-        snapshot = False
-    else:
-        drive = temporary_directory / BASE_IMAGE
-        snapshot = True
-    try:
-        result = run_commands(
-            test.commands,
-            command_timeout=test.timeout,
-            drive=drive,
-            extra_qemu_args=test.extra_qemu_args or None,
-            floppy=floppy,
-            memory=test.memory,
-            snapshot=snapshot,
-            with_net=test.with_net,
-        )
-    except TimeoutError as error:
-        return False, f"timeout: {error}", 0.0, 0.0
-    except RuntimeError as error:
-        return False, f"qemu error: {error}", 0.0, 0.0
-    command_time = sum(result.command_times)
-    failures: list[str] = []
-    if not re.search(test.expect, result.output.replace("\r", ""), re.MULTILINE):
-        failures.append(f"expected regex {test.expect!r} not found in output")
-    if filesystem == "ext2":
-        fsck_error = _ext2_fsck(image=drive)
-        if fsck_error:
-            failures.append(f"fsck: {fsck_error}")
-    return (not failures), "; ".join(failures), result.boot_time, command_time
-
-
 def main() -> int:
     """Run the selected ProgramTests and print a summary."""
     os.chdir(REPO_ROOT)
@@ -1657,7 +1660,7 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("program", nargs="?", help="restrict to one program (e.g. 'arp')")
+    parser.add_argument("program", help="restrict to one program (e.g. 'arp')", nargs="?")
     parser.add_argument(
         "--fail-fast",
         action="store_true",
@@ -1714,8 +1717,8 @@ def main() -> int:
             filesystem=arguments.filesystem,
             floppy=arguments.floppy,
             label="",
-            tests=tests,
             temporary_directory=temporary_directory,
+            tests=tests,
         )
         total_pass += passed
         total_fail += failed_count
@@ -1744,8 +1747,8 @@ def main() -> int:
                 filesystem="ext2",
                 floppy=arguments.floppy,
                 label="2k/",
-                tests=block_2k_tests,
                 temporary_directory=temporary_directory,
+                tests=block_2k_tests,
             )
             total_pass += passed
             total_fail += failed_count

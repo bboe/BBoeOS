@@ -29,16 +29,51 @@ import subprocess
 import sys
 from pathlib import Path
 
+EXCLUDED_AUDIO_BACKENDS = frozenset({
+    "i_allegromusic",
+    "i_allegrosound",
+    "i_sdlmusic",
+    "i_sdlsound",
+})
+# doomgeneric ships an older, header-incompatible copy of these chocolate-doom
+# helpers (memio.{c,h}, mus2mid.{c,h}); we use the chocolate-doom 3.1.0 versions
+# fetched into third_party/chocolate-doom-opl/ instead, so the older copies
+# must not also be linked or the stable symbols (mem_fread, mus2mid, ...)
+# collide.
+EXCLUDED_DOOMGENERIC_AUDIO_HELPERS = frozenset({
+    "memio",
+    "mus2mid",
+})
+EXCLUDED_PLATFORM_BACKENDS = frozenset({
+    "doomgeneric_allegro",
+    "doomgeneric_emscripten",
+    "doomgeneric_linuxvt",
+    "doomgeneric_sdl",
+    "doomgeneric_soso",
+    "doomgeneric_sosox",
+    "doomgeneric_win",
+    "doomgeneric_xlib",
+})
+EXCLUDED_WAD_BACKENDS = frozenset({
+    # ports/doom/bboeos_wad_file.c provides a `stdc_wad_file` that
+    # slurps the WAD into a malloc'd buffer and exposes it through
+    # wad_file_t::mapped, so W_CacheLumpNum bypasses fread entirely.
+    # Drop doomgeneric's stock W_StdC_* implementations to avoid a
+    # duplicate-symbol clash with our backend at link time.
+    "w_file_stdc",
+})
 REPO = Path(__file__).resolve().parent.parent.parent
-CHOCOLATE_OPL = REPO / "third_party" / "chocolate-doom-opl"
-LIBBBOEOS = REPO / "user" / "libbboeos"
-DOOM_DIR = REPO / "ports" / "doom"
-THIRD_PARTY = REPO / "third_party" / "doomgeneric" / "doomgeneric"
 BUILD = REPO / "build" / "doom"
+CHOCOLATE_OPL = REPO / "third_party" / "chocolate-doom-opl"
+DOOM_DIR = REPO / "ports" / "doom"
 ELF_OUTPUT = BUILD / "doom.elf"  # ELF with symbols — addr2line uses this
+
+LIBBBOEOS = REPO / "user" / "libbboeos"
+
+
 MAP_OUTPUT = BUILD / "doom.map"  # ld map — function-by-function VMA layout
 OUTPUT = BUILD / "doom"  # flat binary — copy to disk image as bin/doom
-
+THIRD_PARTY = REPO / "third_party" / "doomgeneric" / "doomgeneric"
 CFLAGS = (
     "--target=i386-pc-none-elf",
     "-m32",
@@ -86,41 +121,6 @@ CFLAGS = (
 )
 
 
-EXCLUDED_AUDIO_BACKENDS = frozenset({
-    "i_allegromusic",
-    "i_allegrosound",
-    "i_sdlmusic",
-    "i_sdlsound",
-})
-# doomgeneric ships an older, header-incompatible copy of these chocolate-doom
-# helpers (memio.{c,h}, mus2mid.{c,h}); we use the chocolate-doom 3.1.0 versions
-# fetched into third_party/chocolate-doom-opl/ instead, so the older copies
-# must not also be linked or the stable symbols (mem_fread, mus2mid, ...)
-# collide.
-EXCLUDED_DOOMGENERIC_AUDIO_HELPERS = frozenset({
-    "memio",
-    "mus2mid",
-})
-EXCLUDED_PLATFORM_BACKENDS = frozenset({
-    "doomgeneric_allegro",
-    "doomgeneric_emscripten",
-    "doomgeneric_linuxvt",
-    "doomgeneric_sdl",
-    "doomgeneric_soso",
-    "doomgeneric_sosox",
-    "doomgeneric_win",
-    "doomgeneric_xlib",
-})
-EXCLUDED_WAD_BACKENDS = frozenset({
-    # ports/doom/bboeos_wad_file.c provides a `stdc_wad_file` that
-    # slurps the WAD into a malloc'd buffer and exposes it through
-    # wad_file_t::mapped, so W_CacheLumpNum bypasses fread entirely.
-    # Drop doomgeneric's stock W_StdC_* implementations to avoid a
-    # duplicate-symbol clash with our backend at link time.
-    "w_file_stdc",
-})
-
-
 def _build_libbboeos() -> None:
     """Pre-compile libbboeos C sources via cc.py, then run make to archive.
 
@@ -137,7 +137,7 @@ def _build_libbboeos() -> None:
     subprocess.check_call(
         ["python3", str(REPO / "tools" / "generate_syscalls_h.py")],
     )
-    BUILD.mkdir(parents=True, exist_ok=True)
+    BUILD.mkdir(exist_ok=True, parents=True)
     for name in [
         "builtins",
         "ctype",
@@ -179,7 +179,7 @@ def _build_libbboeos() -> None:
     subprocess.check_call(["make", "-C", str(LIBBBOEOS)], env=environment)
 
 
-def _compile_one(*, source: Path, extra_cflags: tuple[str, ...] = ()) -> Path:
+def _compile_one(*, extra_cflags: tuple[str, ...] = (), source: Path) -> Path:
     """Compile one .c → build/doom/<name>.o.  Returns the .o path.
 
     *extra_cflags* are appended after the global CFLAGS so per-source
@@ -253,7 +253,7 @@ def _link(*, objects: list[Path]) -> None:
         candidates=("x86_64-elf-objcopy", "i686-elf-objcopy", "llvm-objcopy", "objcopy"),
         purpose="GNU-compatible objcopy",
     )
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT.parent.mkdir(exist_ok=True, parents=True)
     for stale in (OUTPUT, ELF_OUTPUT, MAP_OUTPUT):
         if stale.exists():
             stale.unlink()
@@ -296,7 +296,7 @@ def main() -> None:
 
     if arguments.clean and BUILD.exists():
         shutil.rmtree(BUILD)
-    BUILD.mkdir(parents=True, exist_ok=True)
+    BUILD.mkdir(exist_ok=True, parents=True)
 
     _ensure_chocolate_opl_fetched()
     _ensure_doomgeneric_fetched()
@@ -333,11 +333,11 @@ def main() -> None:
     # ``PACKED_STRUCT``, so the chocolate sources alone need the shim.
     chocolate_cflags = (f"-include{REPO / 'ports' / 'doom' / 'chocolate_compat.h'}",)
     objects.extend([
-        _compile_one(source=CHOCOLATE_OPL / "i_oplmusic.c", extra_cflags=chocolate_cflags),
-        _compile_one(source=CHOCOLATE_OPL / "memio.c", extra_cflags=chocolate_cflags),
-        _compile_one(source=CHOCOLATE_OPL / "midifile.c", extra_cflags=chocolate_cflags),
-        _compile_one(source=CHOCOLATE_OPL / "mus2mid.c", extra_cflags=chocolate_cflags),
-        _compile_one(source=CHOCOLATE_OPL / "opl_queue.c", extra_cflags=chocolate_cflags),
+        _compile_one(extra_cflags=chocolate_cflags, source=CHOCOLATE_OPL / "i_oplmusic.c"),
+        _compile_one(extra_cflags=chocolate_cflags, source=CHOCOLATE_OPL / "memio.c"),
+        _compile_one(extra_cflags=chocolate_cflags, source=CHOCOLATE_OPL / "midifile.c"),
+        _compile_one(extra_cflags=chocolate_cflags, source=CHOCOLATE_OPL / "mus2mid.c"),
+        _compile_one(extra_cflags=chocolate_cflags, source=CHOCOLATE_OPL / "opl_queue.c"),
     ])
 
     _link(objects=objects)

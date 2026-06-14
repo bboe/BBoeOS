@@ -68,13 +68,13 @@ class CodeGeneratorBase:
     logic specific to their ISA.
     """
 
+    BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "unsigned char", "unsigned char*"})
     #: Byte-element type names.  ``unsigned char`` shares the ``char``
     #: codegen path (byte array stride, byte-wide load with zero
     #: extend) but is classified as ``integer`` for comparison
     #: type-checking, so ``unsigned char b; if (b == 0x45)`` works
     #: without pretending the literal is a character.
     BYTE_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "unsigned char"})
-    BYTE_SCALAR_TYPES: ClassVar[frozenset[str]] = frozenset({"char", "char*", "unsigned char", "unsigned char*"})
 
     #: Primitive element types accepted for file-scope arrays.  Byte
     #: types (``char`` / ``unsigned char``) use the byte path;
@@ -90,12 +90,6 @@ class CodeGeneratorBase:
         "unsigned int",
         "unsigned short",
     })
-
-    #: Named constants that, when referenced, require a NASM %include
-    #: directive in the generated output to provide their symbol.
-    NAMED_CONSTANT_INCLUDES: ClassVar[dict[str, str]] = {
-        "arp_frame": "arp_frame.asm",
-    }
 
     #: Identifiers that resolve to NASM kernel constants rather than
     #: user-defined variables.  Emitted verbatim so NASM can resolve
@@ -191,7 +185,361 @@ class CodeGeneratorBase:
         "VIDEO_MODE_VGA_640x480_16",
     })
 
+    #: Named constants that, when referenced, require a NASM %include
+    #: directive in the generated output to provide their symbol.
+    NAMED_CONSTANT_INCLUDES: ClassVar[dict[str, str]] = {
+        "arp_frame": "arp_frame.asm",
+    }
+
     NASM_RESERVED_WORDS: ClassVar[frozenset[str]] = frozenset({"abs", "seg", "wrt"})
+
+    @staticmethod
+    def _always_exits_ir(body: list[ir.Instruction]) -> bool:
+        """Return True if the IR body always ends with a function exit.
+
+        Only :class:`ir.Return` and :class:`ir.Block` wrapping an
+        always-exiting AST node count.  :class:`ir.Jump` does *not* —
+        a jump transfers control within the IR body (e.g. a ``break``
+        to a loop-end label that then falls off the function).  If we
+        treated trailing ``Jump`` as "always exits", no epilogue would
+        be emitted and a ``break`` in a tail ``while`` would fall into
+        whatever function follows.
+        """
+        for instruction in reversed(body):
+            match instruction:
+                case ir.Label():
+                    continue  # skip trailing labels
+                case ir.Return() | ir.TailCall():
+                    return True
+                case ir.Block(node=node) | ir.Access(node=node):
+                    return CodeGeneratorBase.always_exits([node])
+                case _:
+                    return False
+        return False
+
+    @staticmethod
+    def _byte_index_base_key(node: Index, /) -> str:
+        """Return a string key identifying the base pointer of an Index.
+
+        Two byte-index nodes share a base when their keys match,
+        meaning a single ``mov bx, <base>`` can serve both.
+        """
+        return node.array.name
+
+    @staticmethod
+    def _case_body_always_exits(body: list, /) -> bool:
+        """Return True if *body* (AST or IR) transfers control away at its end.
+
+        For AST bodies this is :meth:`always_exits` (``break`` /
+        ``return`` / ``die`` etc.).  For IR bodies a trailing
+        :class:`ir.Jump` also counts: switch-case ``break`` lowers to
+        ``Jump(target=end_label)`` which already redirects control past
+        the next case, satisfying the interleave precondition.
+        """
+        if not body:
+            return False
+        last = body[-1]
+        if isinstance(last, ir.Jump):
+            return True
+        if isinstance(last, ir.Return):
+            return True
+        if isinstance(last, (ir.Block, ir.Access)):
+            return CodeGeneratorBase.always_exits([last.node])
+        if isinstance(last, ir.Label):
+            # Trailing label means control could still fall off the end.
+            return False
+        if isinstance(
+            last,
+            (
+                ir.BinaryOperation,
+                ir.Copy,
+                ir.Call,
+                ir.Index,
+                ir.IndexAssign,
+                ir.BranchFalse,
+                ir.CarryBranch,
+                ir.InlineAsm,
+                ir.LoopBoundary,
+                ir.Switch,
+            ),
+        ):
+            return False
+        # Otherwise treat as AST node list — delegate.
+        return CodeGeneratorBase.always_exits(body)
+
+    @staticmethod
+    def _check_argument_count(*, arguments: list[Node], expected: int, name: str) -> None:
+        """Raise CompileError if the argument count doesn't match expected.
+
+        Derives the line number from the first argument when available,
+        so the diagnostic points at the call site even though the
+        builtin handlers are invoked with only the argument list.
+        """
+        line = arguments[0].line if arguments else None
+        if expected == 0 and arguments:
+            message = f"{name}() takes no arguments"
+            raise CompileError(message, line=line)
+        if expected > 0 and len(arguments) != expected:
+            message = f"{name}() expects exactly {expected} argument{'s' if expected != 1 else ''}"
+            raise CompileError(message, line=line)
+
+    @staticmethod
+    def _classify_cast_operand(node: Cast, /) -> str:
+        if node.target_type.endswith("*"):
+            return "pointer"
+        if node.target_type == "char":
+            return "char"
+        return "integer"
+
+    @staticmethod
+    def _collect_ir_temps(body: list[ir.Instruction]) -> list[str]:
+        """Return IR-generated temp names (``_ir_*``) that appear as destinations."""
+        seen: set[str] = set()
+        result: list[str] = []
+
+        def walk(instructions: list[ir.Instruction]) -> None:
+            for instruction in instructions:
+                destination: str | None = None
+                match instruction:
+                    case ir.BinaryOperation(destination=name) | ir.Copy(destination=name) | ir.Index(destination=name):
+                        destination = name
+                    case ir.Call(destination=name):
+                        destination = name
+                    case ir.AddressOf(destination=name) | ir.Load(destination=name):
+                        destination = name
+                    case ir.Block(node=Assign(name=name)) | ir.Access(node=Assign(name=name)):
+                        destination = name
+                    case ir.Switch(cases=cases):
+                        # IR Switch arms hold lowered IR instructions;
+                        # recurse so temps inside arms get a frame slot.
+                        for case in cases:
+                            walk(case.body)
+                    case _:
+                        pass
+                if destination is not None and destination.startswith("_ir_") and destination not in seen:
+                    seen.add(destination)
+                    result.append(destination)
+
+        walk(body)
+        return result
+
+    @staticmethod
+    def _flatten_and(condition: Node, /) -> list[Node]:
+        """Flatten a left-leaning ``&&`` tree into a list of leaves."""
+        leaves: list[Node] = []
+        while isinstance(condition, LogicalAnd):
+            leaves.append(condition.right)
+            condition = condition.left
+        leaves.append(condition)
+        leaves.reverse()
+        return leaves
+
+    @staticmethod
+    def _is_constant_true_condition(condition: Node, /) -> bool:
+        """Return True if *condition* is statically nonzero.
+
+        ``parse_condition`` wraps bare expressions as ``expr != 0``,
+        so ``while (1)`` reaches here as
+        ``BinaryOperation(left=Int(value=1), operation="!=", right=Int(value=0))``.
+        """
+        if not isinstance(condition, BinaryOperation) or condition.operation != "!=":
+            return False
+        if condition.right != Int(value=0):
+            return False
+        return isinstance(condition.left, Int) and condition.left.value != 0
+
+    @staticmethod
+    def _is_live_after(*, name: str, statements: list[Node]) -> bool:
+        """Check if *name* is read before being unconditionally killed.
+
+        Scans *statements* in order.  An unconditional ``Assign`` to
+        *name* (whose RHS does not read *name*) kills the old value,
+        so any subsequent reads reference the new value, not the one
+        from the fuse-die candidate.  Returns False (not live) if
+        *name* is never read, or is killed before being read.
+        """
+        for stmt in statements:
+            # Unconditional reassignment kills the old value — but only
+            # if the RHS doesn't read the variable (e.g. `err = err + 1`
+            # would read the old value).
+            if isinstance(stmt, Assign) and stmt.name == name and not CodeGeneratorBase._node_references_var(name=name, node=stmt.expr):
+                return False
+            if CodeGeneratorBase._node_references_var(name=name, node=stmt):
+                return True
+        return False
+
+    @staticmethod
+    def _is_modulo_of(*, base: Node, expression: Node) -> bool:
+        """Check if expression is (base % N) for some integer N."""
+        return (
+            isinstance(expression, BinaryOperation)
+            and expression.operation == "%"
+            and expression.left == base
+            and isinstance(expression.right, Int)
+        )
+
+    @staticmethod
+    def _is_simple_arg(node: Node, /) -> bool:
+        """Return True if a call argument is safe for the register calling convention.
+
+        "Safe" means :meth:`_emit_register_arg_single` can evaluate it
+        without clobbering registers that another arg still needs.
+        The base case is ``Int``/``String``/``Var`` (a single ``mov``
+        from immediate/memory/pinned-reg).  ``BinaryOperation(+/-, leaf, leaf)``
+        is also safe: ``generate_expression`` handles those via the
+        ``add ax, [mem]``/``sub ax, imm`` fast paths, which only touch
+        AX.  Inter-arg conflicts are checked separately at codegen
+        time by the topological ordering in
+        :meth:`_emit_register_arg_moves`.
+        """
+        if isinstance(node, (Int, String, Var)):
+            return True
+        if isinstance(node, BinaryOperation) and isinstance(node.left, (Int, String, Var)):
+            # AX-only binops: ``+ - | & ^`` always stay in the accumulator;
+            # ``<< >>`` only when the shift count is an immediate (a Var
+            # RHS would route through CL and could clobber another arg's
+            # ECX target).  Multiply / divide / modulo touch EDX and are
+            # therefore not admitted.
+            if node.operation in ("+", "-", "|", "&", "^"):
+                return isinstance(node.right, (Int, String, Var))
+            if node.operation in ("<<", ">>"):
+                return isinstance(node.right, Int)
+        return False
+
+    @staticmethod
+    def _is_simple_printf(node: Node, /) -> bool:
+        """Return True if *node* is ``printf(<literal with no '%'>)``.
+
+        Such calls are semantically equivalent to a plain string print and
+        can be folded into ``die()`` at end-of-main / end-of-branch.
+        """
+        return (
+            isinstance(node, Call)
+            and node.name == "printf"
+            and len(node.args) == 1
+            and isinstance(node.args[0], String)
+            and "%" not in node.args[0].content
+        )
+
+    @staticmethod
+    def _is_unsigned_type(type_name: str | None, /) -> bool:
+        """Return True if *type_name* compares as unsigned.
+
+        Pointers (any type spelled with a trailing ``*``) are unsigned —
+        they compare as non-negative offsets within the program's
+        address space.  Non-pointer scalars are unsigned when the type
+        name starts with ``unsigned``.  ``None`` (unknown type) falls
+        back to signed.
+        """
+        if type_name is None:
+            return False
+        if type_name.endswith("*"):
+            return True
+        return type_name.startswith("unsigned")
+
+    @staticmethod
+    def _is_zero_exit_if(statement: Node, /) -> bool:
+        """Check if a statement is ``if (VAR == 0) { exit(); }`` or ``if (VAR == 0) { return ...; }``."""
+        return (
+            isinstance(statement, If)
+            and isinstance(statement.cond, BinaryOperation)
+            and statement.cond.operation == "=="
+            and statement.cond.right == Int(value=0)
+            and len(statement.body) == 1
+            and (statement.body[0] == Call(args=[], name="exit") or isinstance(statement.body[0], Return))
+            and statement.else_body is None
+        )
+
+    @staticmethod
+    def _name_is_reassigned(*, name: str, node: Node) -> bool:
+        """Return True if *node* contains a write to a variable named *name*.
+
+        Writes are ``Assign(name=name, ...)`` or a postfix/prefix
+        increment of the named variable, which is
+        ``PlaceIncrementDecrement(place=VariablePlace(name))``.
+        """
+        return ast_contains(
+            node,
+            lambda n: (
+                (isinstance(n, Assign) and n.name == name)
+                or (isinstance(n, PlaceIncrementDecrement) and isinstance(n.place, VariablePlace) and n.place.name == name)
+            ),
+        )
+
+    @staticmethod
+    def _node_references_var(*, name: str, node: Node) -> bool:
+        """Return True if ``Var(name)`` occurs anywhere inside ``node``."""
+        return ast_contains(node, lambda n: isinstance(n, Var) and n.name == name)
+
+    @staticmethod
+    def _statement_references(node: Node, name: str, /) -> bool:
+        """Return True if ``node`` reads or writes a variable named ``name``."""
+        return ast_contains(
+            node,
+            lambda n: (isinstance(n, Var) and n.name == name) or (isinstance(n, Assign) and n.name == name),
+        )
+
+    @staticmethod
+    def _switch_can_interleave(case_arms: list, /) -> bool:
+        """Return True when *case_arms* can be lowered as interleaved dispatch.
+
+        Interleaved emission (``cmp R, K; jne .next; <body>; jmp .end;
+        .next:`` per arm) requires that no body falls through to the next
+        case at runtime — every body ends in ``jmp .end``, so a missing
+        terminator would skip the next case entirely.
+
+        Empty bodies represent the intermediate label of a multi-label
+        case (``case A: case B: body;`` parses as two adjacent SwitchCase
+        nodes where the first has an empty body and the second has the
+        shared body).  These are allowed when the *next* case in *case_arms*
+        carries the actual body — they're folded into a single emission
+        group by :meth:`generate_switch`.  The final case in the list
+        must have a non-empty always-exits body.
+
+        Case bodies are either AST node lists (legacy ``Block``-wrapped
+        Switch path) or IR instruction lists (``ir.Switch`` path).  The
+        ``always_exits`` predicate is dispatched accordingly.
+        """
+        if not case_arms:
+            return False
+        for index, case in enumerate(case_arms):
+            if not case.body:
+                # Intermediate multi-label entry; must be followed by another
+                # case in the same switch so the shared body is reachable.
+                if index == len(case_arms) - 1:
+                    return False
+                continue
+            if not CodeGeneratorBase._case_body_always_exits(case.body):
+                return False
+        # The very last case must carry a non-empty body.
+        return bool(case_arms[-1].body)
+
+    @staticmethod
+    def always_exits(body: list[Node], /) -> bool:
+        """Check if a statement list always exits its enclosing block.
+
+        Recognizes ``die(...)``/``exit()``/``return`` (program exits)
+        and ``break`` (loop exit).  Used to elide dead fall-through
+        code and to keep AX tracking alive across an if whose body
+        never falls through.
+        """
+        if not body:
+            return False
+        last = body[-1]
+        if isinstance(last, Break):
+            return True
+        if isinstance(last, Continue):
+            return True
+        if isinstance(last, Return):
+            return True
+        if isinstance(last, Call) and last.name in {"_exit", "die", "exit"}:
+            return True
+        if isinstance(last, TailCall):
+            return True
+        # Exhaustive if-else: both branches always exit.
+        if isinstance(last, If) and last.else_body is not None:
+            return CodeGeneratorBase.always_exits(last.body) and CodeGeneratorBase.always_exits(last.else_body)
+        return False
 
     def __init__(
         self,
@@ -263,55 +611,6 @@ class CodeGeneratorBase:
         self.virtual_long_locals: set[str] = set()
         self.visible_vars: set[str] = set()
 
-    @staticmethod
-    def _always_exits_ir(body: list[ir.Instruction]) -> bool:
-        """Return True if the IR body always ends with a function exit.
-
-        Only :class:`ir.Return` and :class:`ir.Block` wrapping an
-        always-exiting AST node count.  :class:`ir.Jump` does *not* —
-        a jump transfers control within the IR body (e.g. a ``break``
-        to a loop-end label that then falls off the function).  If we
-        treated trailing ``Jump`` as "always exits", no epilogue would
-        be emitted and a ``break`` in a tail ``while`` would fall into
-        whatever function follows.
-        """
-        for instruction in reversed(body):
-            match instruction:
-                case ir.Label():
-                    continue  # skip trailing labels
-                case ir.Return() | ir.TailCall():
-                    return True
-                case ir.Block(node=node) | ir.Access(node=node):
-                    return CodeGeneratorBase.always_exits([node])
-                case _:
-                    return False
-        return False
-
-    @staticmethod
-    def _byte_index_base_key(node: Index, /) -> str:
-        """Return a string key identifying the base pointer of an Index.
-
-        Two byte-index nodes share a base when their keys match,
-        meaning a single ``mov bx, <base>`` can serve both.
-        """
-        return node.array.name
-
-    @staticmethod
-    def _check_argument_count(*, arguments: list[Node], expected: int, name: str) -> None:
-        """Raise CompileError if the argument count doesn't match expected.
-
-        Derives the line number from the first argument when available,
-        so the diagnostic points at the call site even though the
-        builtin handlers are invoked with only the argument list.
-        """
-        line = arguments[0].line if arguments else None
-        if expected == 0 and arguments:
-            message = f"{name}() takes no arguments"
-            raise CompileError(message, line=line)
-        if expected > 0 and len(arguments) != expected:
-            message = f"{name}() expects exactly {expected} argument{'s' if expected != 1 else ''}"
-            raise CompileError(message, line=line)
-
     def _check_defined(self, name: str, /, *, line: int | None = None) -> None:
         """Raise CompileError if a variable is not in scope."""
         if name in self.NAMED_CONSTANTS:
@@ -321,6 +620,57 @@ class CodeGeneratorBase:
         if name not in self.visible_vars:
             message = f"undefined variable: {name}"
             raise CompileError(message, line=line)
+
+    def _classify_binop_operand(self, node: BinaryOperation, /) -> str:
+        # Pointer arithmetic: ``ptr + n`` / ``n + ptr`` / ``ptr - n``
+        # are pointers; ``ptr - ptr`` is the byte difference (integer).
+        if node.operation in ("+", "-"):
+            left_type = self._type_of_operand(node.left)
+            right_type = self._type_of_operand(node.right)
+            if left_type == "pointer" and right_type == "pointer":
+                return "integer"
+            if left_type == "pointer" or right_type == "pointer":
+                return "pointer"
+        return "integer"
+
+    def _classify_deref_increment_operand(self, node: DerefIncrement, /) -> str:
+        # ``*p++`` rvalue classifies as the pointee type stripped of one
+        # ``*``: ``char *`` → ``"char"``, ``unsigned char *`` / ``int *``
+        # / ``T *`` → ``"integer"``, ``T **`` → ``"pointer"``.
+        holder_type = self.variable_types.get(node.target_name)
+        if holder_type and holder_type.endswith("*"):
+            pointee = holder_type[:-1].rstrip()
+            if pointee == "char":
+                return "char"
+            if pointee.endswith("*"):
+                return "pointer"
+        return "integer"
+
+    def _classify_index_operand(self, node: Index, /) -> str:
+        name = node.array.name
+        variable_type = self.variable_types.get(name)
+        # An indexed access on a ``char *NAME[]`` parameter (which
+        # the parser records as ``type="char*"`` + variable_arrays
+        # membership) yields a ``char *`` element, not a ``char``.
+        # ``main``'s ``argv[i] == NULL`` walks land here.
+        if variable_type == "char*" and name in self.variable_arrays:
+            return "pointer"
+        if variable_type in ("char", "char*"):
+            return "char"
+        return "integer"
+
+    def _classify_var_operand(self, node: Var, /) -> str:
+        if node.name == "NULL":
+            return "null"
+        variable_type = self.variable_types.get(node.name)
+        if variable_type is not None and variable_type.endswith("*"):
+            return "pointer"
+        if variable_type == "char":
+            return "char"
+        if node.name in self.variable_types or node.name in self.NAMED_CONSTANTS:
+            return "integer"
+        message = f"undefined operand: {node.name}"
+        raise CompileError(message, line=node.line)
 
     def _collect_constant_references(self, node: Node, /) -> set[str]:
         """Return every NAMED_CONSTANT name referenced inside *node*.
@@ -335,38 +685,6 @@ class CodeGeneratorBase:
         if isinstance(node, BinaryOperation):
             return self._collect_constant_references(node.left) | self._collect_constant_references(node.right)
         return set()
-
-    @staticmethod
-    def _collect_ir_temps(body: list[ir.Instruction]) -> list[str]:
-        """Return IR-generated temp names (``_ir_*``) that appear as destinations."""
-        seen: set[str] = set()
-        result: list[str] = []
-
-        def walk(instructions: list[ir.Instruction]) -> None:
-            for instruction in instructions:
-                destination: str | None = None
-                match instruction:
-                    case ir.BinaryOperation(destination=name) | ir.Copy(destination=name) | ir.Index(destination=name):
-                        destination = name
-                    case ir.Call(destination=name):
-                        destination = name
-                    case ir.AddressOf(destination=name) | ir.Load(destination=name):
-                        destination = name
-                    case ir.Block(node=Assign(name=name)) | ir.Access(node=Assign(name=name)):
-                        destination = name
-                    case ir.Switch(cases=cases):
-                        # IR Switch arms hold lowered IR instructions;
-                        # recurse so temps inside arms get a frame slot.
-                        for case in cases:
-                            walk(case.body)
-                    case _:
-                        pass
-                if destination is not None and destination.startswith("_ir_") and destination not in seen:
-                    seen.add(destination)
-                    result.append(destination)
-
-        walk(body)
-        return result
 
     def _constant_expression(self, init: Node, /) -> str | None:
         """Return a NASM constant expression if *init* is compile-time resolvable.
@@ -445,17 +763,6 @@ class CodeGeneratorBase:
                 break
             current = else_body[0]
         return target if chain_length >= 2 else None
-
-    @staticmethod
-    def _flatten_and(condition: Node, /) -> list[Node]:
-        """Flatten a left-leaning ``&&`` tree into a list of leaves."""
-        leaves: list[Node] = []
-        while isinstance(condition, LogicalAnd):
-            leaves.append(condition.right)
-            condition = condition.left
-        leaves.append(condition)
-        leaves.reverse()
-        return leaves
 
     def _global_label(self, name: str, /) -> str:
         """Return the NASM label for file-scope variable *name*.
@@ -576,54 +883,6 @@ class CodeGeneratorBase:
         """
         return name in self.byte_scalar_locals
 
-    def _is_unsigned_comparison(self, left: Node, right: Node, /) -> bool:
-        """Return True if a comparison ``left op right`` should use unsigned mnemonics.
-
-        Per C usual arithmetic conversions, an unsigned operand on either
-        side causes the whole comparison to be unsigned.  Detection is a
-        leaf-aware walk over ``Var`` / ``Index`` / ``PlaceLoad`` /
-        ``BinaryOperation`` / ``PlaceAddressOf``; ``Int`` literals stay
-        unsigned-neutral (they pick up the other operand's signedness).
-        Conservative for shapes we don't recognise — falls back to
-        signed, matching the historical default.
-        """
-        return self._is_unsigned_operand(left) or self._is_unsigned_operand(right)
-
-    def _is_unsigned_operand(self, node: Node, /) -> bool:
-        """Return True if *node*'s C type is unsigned for comparison.
-
-        Conservative for shapes we don't recognise (struct member access,
-        function calls, pointer dereferences) — falls back to signed,
-        matching the historical default.  Extend on demand as kernel C
-        runs into new patterns that need unsigned semantics.
-        """
-        if address_of_variable_name(node) is not None:
-            # ``&x`` produces a pointer; pointers compare as unsigned offsets.
-            return True
-        if isinstance(node, Var):
-            return self._is_unsigned_type(self.variable_types.get(node.name))
-        if isinstance(node, Index):
-            return self._is_unsigned_type(self.variable_types.get(node.array.name))
-        if isinstance(node, BinaryOperation):
-            return self._is_unsigned_operand(node.left) or self._is_unsigned_operand(node.right)
-        return False
-
-    @staticmethod
-    def _is_unsigned_type(type_name: str | None, /) -> bool:
-        """Return True if *type_name* compares as unsigned.
-
-        Pointers (any type spelled with a trailing ``*``) are unsigned —
-        they compare as non-negative offsets within the program's
-        address space.  Non-pointer scalars are unsigned when the type
-        name starts with ``unsigned``.  ``None`` (unknown type) falls
-        back to signed.
-        """
-        if type_name is None:
-            return False
-        if type_name.endswith("*"):
-            return True
-        return type_name.startswith("unsigned")
-
     def _is_byte_var(self, name: str, /) -> bool:
         """Return True if *name* is a byte-sized element source.
 
@@ -661,40 +920,6 @@ class CodeGeneratorBase:
             return False
         return not any(self._name_is_reassigned(name=statement.name, node=stmt) for stmt in body)
 
-    @staticmethod
-    def _is_constant_true_condition(condition: Node, /) -> bool:
-        """Return True if *condition* is statically nonzero.
-
-        ``parse_condition`` wraps bare expressions as ``expr != 0``,
-        so ``while (1)`` reaches here as
-        ``BinaryOperation(left=Int(value=1), operation="!=", right=Int(value=0))``.
-        """
-        if not isinstance(condition, BinaryOperation) or condition.operation != "!=":
-            return False
-        if condition.right != Int(value=0):
-            return False
-        return isinstance(condition.left, Int) and condition.left.value != 0
-
-    @staticmethod
-    def _is_live_after(*, name: str, statements: list[Node]) -> bool:
-        """Check if *name* is read before being unconditionally killed.
-
-        Scans *statements* in order.  An unconditional ``Assign`` to
-        *name* (whose RHS does not read *name*) kills the old value,
-        so any subsequent reads reference the new value, not the one
-        from the fuse-die candidate.  Returns False (not live) if
-        *name* is never read, or is killed before being read.
-        """
-        for stmt in statements:
-            # Unconditional reassignment kills the old value — but only
-            # if the RHS doesn't read the variable (e.g. `err = err + 1`
-            # would read the old value).
-            if isinstance(stmt, Assign) and stmt.name == name and not CodeGeneratorBase._node_references_var(name=name, node=stmt.expr):
-                return False
-            if CodeGeneratorBase._node_references_var(name=name, node=stmt):
-                return True
-        return False
-
     def _is_memory_scalar(self, name: str, /) -> bool:
         """Return True when *name* is a memory-resident scalar.
 
@@ -709,71 +934,37 @@ class CodeGeneratorBase:
             return False
         return name in self.locals or name in self.global_scalars
 
-    @staticmethod
-    def _is_modulo_of(*, base: Node, expression: Node) -> bool:
-        """Check if expression is (base % N) for some integer N."""
-        return (
-            isinstance(expression, BinaryOperation)
-            and expression.operation == "%"
-            and expression.left == base
-            and isinstance(expression.right, Int)
-        )
+    def _is_unsigned_comparison(self, left: Node, right: Node, /) -> bool:
+        """Return True if a comparison ``left op right`` should use unsigned mnemonics.
 
-    @staticmethod
-    def _is_simple_arg(node: Node, /) -> bool:
-        """Return True if a call argument is safe for the register calling convention.
-
-        "Safe" means :meth:`_emit_register_arg_single` can evaluate it
-        without clobbering registers that another arg still needs.
-        The base case is ``Int``/``String``/``Var`` (a single ``mov``
-        from immediate/memory/pinned-reg).  ``BinaryOperation(+/-, leaf, leaf)``
-        is also safe: ``generate_expression`` handles those via the
-        ``add ax, [mem]``/``sub ax, imm`` fast paths, which only touch
-        AX.  Inter-arg conflicts are checked separately at codegen
-        time by the topological ordering in
-        :meth:`_emit_register_arg_moves`.
+        Per C usual arithmetic conversions, an unsigned operand on either
+        side causes the whole comparison to be unsigned.  Detection is a
+        leaf-aware walk over ``Var`` / ``Index`` / ``PlaceLoad`` /
+        ``BinaryOperation`` / ``PlaceAddressOf``; ``Int`` literals stay
+        unsigned-neutral (they pick up the other operand's signedness).
+        Conservative for shapes we don't recognise — falls back to
+        signed, matching the historical default.
         """
-        if isinstance(node, (Int, String, Var)):
+        return self._is_unsigned_operand(left) or self._is_unsigned_operand(right)
+
+    def _is_unsigned_operand(self, node: Node, /) -> bool:
+        """Return True if *node*'s C type is unsigned for comparison.
+
+        Conservative for shapes we don't recognise (struct member access,
+        function calls, pointer dereferences) — falls back to signed,
+        matching the historical default.  Extend on demand as kernel C
+        runs into new patterns that need unsigned semantics.
+        """
+        if address_of_variable_name(node) is not None:
+            # ``&x`` produces a pointer; pointers compare as unsigned offsets.
             return True
-        if isinstance(node, BinaryOperation) and isinstance(node.left, (Int, String, Var)):
-            # AX-only binops: ``+ - | & ^`` always stay in the accumulator;
-            # ``<< >>`` only when the shift count is an immediate (a Var
-            # RHS would route through CL and could clobber another arg's
-            # ECX target).  Multiply / divide / modulo touch EDX and are
-            # therefore not admitted.
-            if node.operation in ("+", "-", "|", "&", "^"):
-                return isinstance(node.right, (Int, String, Var))
-            if node.operation in ("<<", ">>"):
-                return isinstance(node.right, Int)
+        if isinstance(node, Var):
+            return self._is_unsigned_type(self.variable_types.get(node.name))
+        if isinstance(node, Index):
+            return self._is_unsigned_type(self.variable_types.get(node.array.name))
+        if isinstance(node, BinaryOperation):
+            return self._is_unsigned_operand(node.left) or self._is_unsigned_operand(node.right)
         return False
-
-    @staticmethod
-    def _is_simple_printf(node: Node, /) -> bool:
-        """Return True if *node* is ``printf(<literal with no '%'>)``.
-
-        Such calls are semantically equivalent to a plain string print and
-        can be folded into ``die()`` at end-of-main / end-of-branch.
-        """
-        return (
-            isinstance(node, Call)
-            and node.name == "printf"
-            and len(node.args) == 1
-            and isinstance(node.args[0], String)
-            and "%" not in node.args[0].content
-        )
-
-    @staticmethod
-    def _is_zero_exit_if(statement: Node, /) -> bool:
-        """Check if a statement is ``if (VAR == 0) { exit(); }`` or ``if (VAR == 0) { return ...; }``."""
-        return (
-            isinstance(statement, If)
-            and isinstance(statement.cond, BinaryOperation)
-            and statement.cond.operation == "=="
-            and statement.cond.right == Int(value=0)
-            and len(statement.body) == 1
-            and (statement.body[0] == Call(args=[], name="exit") or isinstance(statement.body[0], Return))
-            and statement.else_body is None
-        )
 
     def _name_is_address_taken(self, *, name: str, node: Node) -> bool:
         """Return True if ``&name`` is taken as a real address anywhere in ``node``.
@@ -804,32 +995,11 @@ class CodeGeneratorBase:
                         return True
         return False
 
-    @staticmethod
-    def _name_is_reassigned(*, name: str, node: Node) -> bool:
-        """Return True if *node* contains a write to a variable named *name*.
-
-        Writes are ``Assign(name=name, ...)`` or a postfix/prefix
-        increment of the named variable, which is
-        ``PlaceIncrementDecrement(place=VariablePlace(name))``.
-        """
-        return ast_contains(
-            node,
-            lambda n: (
-                (isinstance(n, Assign) and n.name == name)
-                or (isinstance(n, PlaceIncrementDecrement) and isinstance(n.place, VariablePlace) and n.place.name == name)
-            ),
-        )
-
     def _nasm_symbol(self, name: str, /) -> str:
         """Escape *name* with a ``$`` prefix when it clashes with a NASM reserved word."""
         if name in self.NASM_RESERVED_WORDS:
             return f"${name}"
         return name
-
-    @staticmethod
-    def _node_references_var(*, name: str, node: Node) -> bool:
-        """Return True if ``Var(name)`` occurs anywhere inside ``node``."""
-        return ast_contains(node, lambda n: isinstance(n, Var) and n.name == name)
 
     def _resolve_constant(self, name: str, /) -> str | None:
         """Return the NASM constant expression for *name*, or ``None``.
@@ -847,90 +1017,6 @@ class CodeGeneratorBase:
         if name in self.global_arrays:
             return self._global_label(name)
         return None
-
-    @staticmethod
-    def _statement_references(node: Node, name: str, /) -> bool:
-        """Return True if ``node`` reads or writes a variable named ``name``."""
-        return ast_contains(
-            node,
-            lambda n: (isinstance(n, Var) and n.name == name) or (isinstance(n, Assign) and n.name == name),
-        )
-
-    @staticmethod
-    def _switch_can_interleave(case_arms: list, /) -> bool:
-        """Return True when *case_arms* can be lowered as interleaved dispatch.
-
-        Interleaved emission (``cmp R, K; jne .next; <body>; jmp .end;
-        .next:`` per arm) requires that no body falls through to the next
-        case at runtime — every body ends in ``jmp .end``, so a missing
-        terminator would skip the next case entirely.
-
-        Empty bodies represent the intermediate label of a multi-label
-        case (``case A: case B: body;`` parses as two adjacent SwitchCase
-        nodes where the first has an empty body and the second has the
-        shared body).  These are allowed when the *next* case in *case_arms*
-        carries the actual body — they're folded into a single emission
-        group by :meth:`generate_switch`.  The final case in the list
-        must have a non-empty always-exits body.
-
-        Case bodies are either AST node lists (legacy ``Block``-wrapped
-        Switch path) or IR instruction lists (``ir.Switch`` path).  The
-        ``always_exits`` predicate is dispatched accordingly.
-        """
-        if not case_arms:
-            return False
-        for index, case in enumerate(case_arms):
-            if not case.body:
-                # Intermediate multi-label entry; must be followed by another
-                # case in the same switch so the shared body is reachable.
-                if index == len(case_arms) - 1:
-                    return False
-                continue
-            if not CodeGeneratorBase._case_body_always_exits(case.body):
-                return False
-        # The very last case must carry a non-empty body.
-        return bool(case_arms[-1].body)
-
-    @staticmethod
-    def _case_body_always_exits(body: list, /) -> bool:
-        """Return True if *body* (AST or IR) transfers control away at its end.
-
-        For AST bodies this is :meth:`always_exits` (``break`` /
-        ``return`` / ``die`` etc.).  For IR bodies a trailing
-        :class:`ir.Jump` also counts: switch-case ``break`` lowers to
-        ``Jump(target=end_label)`` which already redirects control past
-        the next case, satisfying the interleave precondition.
-        """
-        if not body:
-            return False
-        last = body[-1]
-        if isinstance(last, ir.Jump):
-            return True
-        if isinstance(last, ir.Return):
-            return True
-        if isinstance(last, (ir.Block, ir.Access)):
-            return CodeGeneratorBase.always_exits([last.node])
-        if isinstance(last, ir.Label):
-            # Trailing label means control could still fall off the end.
-            return False
-        if isinstance(
-            last,
-            (
-                ir.BinaryOperation,
-                ir.Copy,
-                ir.Call,
-                ir.Index,
-                ir.IndexAssign,
-                ir.BranchFalse,
-                ir.CarryBranch,
-                ir.InlineAsm,
-                ir.LoopBoundary,
-                ir.Switch,
-            ),
-        ):
-            return False
-        # Otherwise treat as AST node list — delegate.
-        return CodeGeneratorBase.always_exits(body)
 
     def _transform_branch_printf(self, body: list[Node], /) -> list[Node]:
         """Replace trailing simple printf(msg) with die(msg) in a branch body."""
@@ -954,65 +1040,6 @@ class CodeGeneratorBase:
         if new_if is if_body and new_else is else_body:
             return statement
         return If(body=new_if, cond=condition, else_body=new_else, line=statement.line)
-
-    def _classify_binop_operand(self, node: BinaryOperation, /) -> str:
-        # Pointer arithmetic: ``ptr + n`` / ``n + ptr`` / ``ptr - n``
-        # are pointers; ``ptr - ptr`` is the byte difference (integer).
-        if node.operation in ("+", "-"):
-            left_type = self._type_of_operand(node.left)
-            right_type = self._type_of_operand(node.right)
-            if left_type == "pointer" and right_type == "pointer":
-                return "integer"
-            if left_type == "pointer" or right_type == "pointer":
-                return "pointer"
-        return "integer"
-
-    @staticmethod
-    def _classify_cast_operand(node: Cast, /) -> str:
-        if node.target_type.endswith("*"):
-            return "pointer"
-        if node.target_type == "char":
-            return "char"
-        return "integer"
-
-    def _classify_deref_increment_operand(self, node: DerefIncrement, /) -> str:
-        # ``*p++`` rvalue classifies as the pointee type stripped of one
-        # ``*``: ``char *`` → ``"char"``, ``unsigned char *`` / ``int *``
-        # / ``T *`` → ``"integer"``, ``T **`` → ``"pointer"``.
-        holder_type = self.variable_types.get(node.target_name)
-        if holder_type and holder_type.endswith("*"):
-            pointee = holder_type[:-1].rstrip()
-            if pointee == "char":
-                return "char"
-            if pointee.endswith("*"):
-                return "pointer"
-        return "integer"
-
-    def _classify_index_operand(self, node: Index, /) -> str:
-        name = node.array.name
-        variable_type = self.variable_types.get(name)
-        # An indexed access on a ``char *NAME[]`` parameter (which
-        # the parser records as ``type="char*"`` + variable_arrays
-        # membership) yields a ``char *`` element, not a ``char``.
-        # ``main``'s ``argv[i] == NULL`` walks land here.
-        if variable_type == "char*" and name in self.variable_arrays:
-            return "pointer"
-        if variable_type in ("char", "char*"):
-            return "char"
-        return "integer"
-
-    def _classify_var_operand(self, node: Var, /) -> str:
-        if node.name == "NULL":
-            return "null"
-        variable_type = self.variable_types.get(node.name)
-        if variable_type is not None and variable_type.endswith("*"):
-            return "pointer"
-        if variable_type == "char":
-            return "char"
-        if node.name in self.variable_types or node.name in self.NAMED_CONSTANTS:
-            return "integer"
-        message = f"undefined operand: {node.name}"
-        raise CompileError(message, line=node.line)
 
     def _type_of_operand(self, node: Node, /) -> str:
         """Classify an operand for comparison type-checking.
@@ -1053,33 +1080,6 @@ class CodeGeneratorBase:
             return self._classify_var_operand(node)
         message = f"cannot classify operand type for comparison: {type(node).__name__}"
         raise CompileError(message, line=node.line)
-
-    @staticmethod
-    def always_exits(body: list[Node], /) -> bool:
-        """Check if a statement list always exits its enclosing block.
-
-        Recognizes ``die(...)``/``exit()``/``return`` (program exits)
-        and ``break`` (loop exit).  Used to elide dead fall-through
-        code and to keep AX tracking alive across an if whose body
-        never falls through.
-        """
-        if not body:
-            return False
-        last = body[-1]
-        if isinstance(last, Break):
-            return True
-        if isinstance(last, Continue):
-            return True
-        if isinstance(last, Return):
-            return True
-        if isinstance(last, Call) and last.name in {"_exit", "die", "exit"}:
-            return True
-        if isinstance(last, TailCall):
-            return True
-        # Exhaustive if-else: both branches always exit.
-        if isinstance(last, If) and last.else_body is not None:
-            return CodeGeneratorBase.always_exits(last.body) and CodeGeneratorBase.always_exits(last.else_body)
-        return False
 
     def emit(self, line: str = "") -> None:
         """Append a line of assembly to the output buffer."""

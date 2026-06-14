@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
 
+_DD = shutil.which("dd") or "dd"
+_DEBUGFS = shutil.which("debugfs") or "debugfs"
 CONSTANTS_PATH = "kernel/include/constants.asm"
 ENTRIES_PER_SECTOR = 16
 ENTRY_SIZE = 32
@@ -32,8 +34,6 @@ OFFSET_FLAGS = 25
 OFFSET_SECTOR = 26
 OFFSET_SIZE = 28  # 4-byte (32-bit) file size
 SECTOR_SIZE = 512
-_DD = shutil.which("dd") or "dd"
-_DEBUGFS = shutil.which("debugfs") or "debugfs"
 
 
 @contextmanager
@@ -46,7 +46,7 @@ def _ext2_partition(*, ext2_start_sector: int, image_path: str) -> Generator[str
         Path to the temporary file containing only the ext2 partition.
 
     """
-    with tempfile.NamedTemporaryFile(suffix=".ext2", delete=False) as f:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".ext2") as f:
         tmp = pathlib.Path(f.name)
     try:
         subprocess.run(
@@ -352,8 +352,8 @@ def ext2_add_file(
         if executable:
             subprocess.run(
                 [_DEBUGFS, "-w", "-R", f"set_inode_field {destination} mode 0100755", tmp],
-                check=True,
                 capture_output=True,
+                check=True,
             )
     file_size = pathlib.Path(file_path).stat().st_size
     relative_path = f"{subdirectory}/{filename}" if subdirectory else filename
@@ -398,9 +398,9 @@ def ext2_add_files(
     with _ext2_partition(ext2_start_sector=ext2_start_sector, image_path=image_path) as tmp:
         result = subprocess.run(
             [_DEBUGFS, "-w", tmp],
-            input=script.encode(),
             capture_output=True,
             check=False,
+            input=script.encode(),
         )
         stderr_text = result.stderr.decode()
         # debugfs's `write` returns exit 0 even when it cannot allocate
@@ -572,8 +572,8 @@ def main() -> None:
     )
     parser.add_argument(
         "files",
-        nargs="+",
         help="path(s) to file(s) to add (or single directory name with --mkdir)",
+        nargs="+",
     )
     parser.add_argument(
         "--image",

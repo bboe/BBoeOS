@@ -458,31 +458,6 @@ class BuiltinsMixin:
         self.emit(f"        mov {self.target.acc}, {self.target.far_ref(self.target.bx_register)}")
         self.ax_clear()
 
-    def builtin_far_write32(self, arguments: list[Node], /) -> None:
-        """Generate code for the ``far_write32(offset, value)`` builtin.
-
-        Stores a 32-bit dword to ``offset``.  Pmode-only contract —
-        the 16-bit codegen paths intentionally emit a word-width
-        store so the on-disk image keeps the 36-byte symbol entry
-        layout from the legacy 16-bit asm.  Asm.c gates use of this
-        builtin to the protected mode build.
-        """
-        self._check_argument_count(arguments=arguments, expected=2, name="far_write32")
-        offset_argument, value_argument = arguments
-        if isinstance(value_argument, Int):
-            self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
-            if self.target.int_size == 2:
-                self.emit(f"        mov word {self.target.far_ref(self.target.bx_register)}, {value_argument.value & 0xFFFF}")
-            else:
-                self.emit(f"        mov dword {self.target.far_ref(self.target.bx_register)}, {value_argument.value & 0xFFFFFFFF}")
-        else:
-            self.emit_register_from_argument(argument=value_argument, register=self.target.acc)
-            self.emit(f"        push {self.target.acc}")
-            self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
-            self.emit(f"        pop {self.target.acc}")
-            self.emit(f"        mov {self.target.far_ref(self.target.bx_register)}, {self.target.acc}")
-        self.ax_clear()
-
     def builtin_far_read8(self, arguments: list[Node], /) -> None:
         """Generate code for the ``far_read8(offset)`` builtin.
 
@@ -519,6 +494,31 @@ class BuiltinsMixin:
             self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
             self.emit(f"        pop {self.target.acc}")
             self.emit(f"        mov {self.target.far_ref(self.target.bx_register)}, {accumulator_word}")
+        self.ax_clear()
+
+    def builtin_far_write32(self, arguments: list[Node], /) -> None:
+        """Generate code for the ``far_write32(offset, value)`` builtin.
+
+        Stores a 32-bit dword to ``offset``.  Pmode-only contract —
+        the 16-bit codegen paths intentionally emit a word-width
+        store so the on-disk image keeps the 36-byte symbol entry
+        layout from the legacy 16-bit asm.  Asm.c gates use of this
+        builtin to the protected mode build.
+        """
+        self._check_argument_count(arguments=arguments, expected=2, name="far_write32")
+        offset_argument, value_argument = arguments
+        if isinstance(value_argument, Int):
+            self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
+            if self.target.int_size == 2:
+                self.emit(f"        mov word {self.target.far_ref(self.target.bx_register)}, {value_argument.value & 0xFFFF}")
+            else:
+                self.emit(f"        mov dword {self.target.far_ref(self.target.bx_register)}, {value_argument.value & 0xFFFFFFFF}")
+        else:
+            self.emit_register_from_argument(argument=value_argument, register=self.target.acc)
+            self.emit(f"        push {self.target.acc}")
+            self.emit_register_from_argument(argument=offset_argument, register=self.target.bx_register)
+            self.emit(f"        pop {self.target.acc}")
+            self.emit(f"        mov {self.target.far_ref(self.target.bx_register)}, {self.target.acc}")
         self.ax_clear()
 
     def builtin_far_write8(self, arguments: list[Node], /) -> None:
@@ -561,29 +561,6 @@ class BuiltinsMixin:
         self.emit("        mov dl, al")
         self.emit_register_from_argument(argument=fd_arg, register=self.target.bx_register)
         self.emit("        mov al, VGA_IOCTL_FILL_BLOCK")
-        self._emit_syscall("IO_IOCTL")
-        self.ax_clear()
-
-    def builtin_set_palette_color(self, arguments: list[Node], /) -> None:
-        """Generate code for set_palette_color(fd, index, r, g, b).
-
-        Thin wrapper over SYS_IO_IOCTL / VGA_IOCTL_SET_PALETTE.  Programs
-        the VGA DAC entry ``index`` to 6-bit (r, g, b) via the kernel's
-        vga_set_palette_color driver.  Emits BX=fd, CL=index, CH=r,
-        DL=g, DH=b, AL=cmd.
-        """
-        self._check_argument_count(arguments=arguments, expected=5, name="set_palette_color")
-        fd_arg, index_arg, r_arg, g_arg, b_arg = arguments
-        self.emit_register_from_argument(argument=index_arg, register=self.target.acc)
-        self.emit("        mov cl, al")
-        self.emit_register_from_argument(argument=r_arg, register=self.target.acc)
-        self.emit("        mov ch, al")
-        self.emit_register_from_argument(argument=g_arg, register=self.target.acc)
-        self.emit("        mov dl, al")
-        self.emit_register_from_argument(argument=b_arg, register=self.target.acc)
-        self.emit("        mov dh, al")
-        self.emit_register_from_argument(argument=fd_arg, register=self.target.bx_register)
-        self.emit("        mov al, VGA_IOCTL_SET_PALETTE")
         self._emit_syscall("IO_IOCTL")
         self.ax_clear()
 
@@ -1232,6 +1209,29 @@ class BuiltinsMixin:
         self.emit(f"        jnc .ok_{label_index}")
         self.emit(f"        mov {self.target.acc}, -1")
         self.emit(f".ok_{label_index}:")
+        self.ax_clear()
+
+    def builtin_set_palette_color(self, arguments: list[Node], /) -> None:
+        """Generate code for set_palette_color(fd, index, r, g, b).
+
+        Thin wrapper over SYS_IO_IOCTL / VGA_IOCTL_SET_PALETTE.  Programs
+        the VGA DAC entry ``index`` to 6-bit (r, g, b) via the kernel's
+        vga_set_palette_color driver.  Emits BX=fd, CL=index, CH=r,
+        DL=g, DH=b, AL=cmd.
+        """
+        self._check_argument_count(arguments=arguments, expected=5, name="set_palette_color")
+        fd_arg, index_arg, r_arg, g_arg, b_arg = arguments
+        self.emit_register_from_argument(argument=index_arg, register=self.target.acc)
+        self.emit("        mov cl, al")
+        self.emit_register_from_argument(argument=r_arg, register=self.target.acc)
+        self.emit("        mov ch, al")
+        self.emit_register_from_argument(argument=g_arg, register=self.target.acc)
+        self.emit("        mov dl, al")
+        self.emit_register_from_argument(argument=b_arg, register=self.target.acc)
+        self.emit("        mov dh, al")
+        self.emit_register_from_argument(argument=fd_arg, register=self.target.bx_register)
+        self.emit("        mov al, VGA_IOCTL_SET_PALETTE")
+        self._emit_syscall("IO_IOCTL")
         self.ax_clear()
 
     def builtin_setsockopt(self, arguments: list[Node], /) -> None:

@@ -233,7 +233,7 @@ class LivenessAnalyzer:
             self._collect_use_def(statement)
         return entry
 
-    def _build_control_flow_graph_loop(self, body: list[Node], *, continue_id: int, break_id: int) -> int:
+    def _build_control_flow_graph_loop(self, body: list[Node], *, break_id: int, continue_id: int) -> int:
         """Wire the control-flow graph for a loop body, handling break/continue context."""
         self._loop_stack.append((continue_id, break_id))
         try:
@@ -426,7 +426,7 @@ class LivenessAnalyzer:
             # body runs first; its last statement falls into the cond
             # (which is *this* statement's id).  cond → body_entry
             # OR after-loop.
-            body_entry = self._build_control_flow_graph_loop(statement.body, continue_id=statement_id, break_id=fallthrough)
+            body_entry = self._build_control_flow_graph_loop(statement.body, break_id=fallthrough, continue_id=statement_id)
             statement_info.successors = [body_entry, fallthrough]
             return
         if isinstance(statement, Goto):
@@ -460,7 +460,7 @@ class LivenessAnalyzer:
         if isinstance(statement, While):
             # cond evaluates → body OR after-loop.  Last body statement
             # falls back to the cond (back-edge).
-            body_entry = self._build_control_flow_graph_loop(statement.body, continue_id=statement_id, break_id=fallthrough)
+            body_entry = self._build_control_flow_graph_loop(statement.body, break_id=fallthrough, continue_id=statement_id)
             statement_info.successors = [body_entry, fallthrough]
             return
         # Default: linear fall-through.  Unknown statement kinds are

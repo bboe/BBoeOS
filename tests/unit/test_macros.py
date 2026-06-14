@@ -40,12 +40,12 @@ def _compile_32bit(source_text: str, /) -> str:
     """Run cc.py --bits 32 on *source_text*; return the generated asm."""
     text = _STDINT_PREAMBLE + textwrap.dedent(source_text)
     with tempfile.NamedTemporaryFile(
-        suffix=".c",
-        prefix="_test_macros_",
-        dir=str(REPO_ROOT / "user" / "programs"),
-        mode="w",
-        encoding="utf-8",
         delete=True,
+        dir=str(REPO_ROOT / "user" / "programs"),
+        encoding="utf-8",
+        mode="w",
+        prefix="_test_macros_",
+        suffix=".c",
     ) as src_file:
         src_file.write(text)
         src_file.flush()

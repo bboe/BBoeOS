@@ -7,10 +7,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+_PREAMBLE = "#include <stdint.h>\n"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CC = REPO_ROOT / "cc.py"
 LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
-_PREAMBLE = "#include <stdint.h>\n"
 
 
 def _compile(name: str, source: str) -> None:
@@ -35,7 +35,7 @@ def compile_snippet(*, name: str, source: str, work: Path) -> str:
     return asm_path.read_text()
 
 
-def expect_reject(*, name: str, source: str, work: Path, needle: str = "") -> None:
+def expect_reject(*, name: str, needle: str = "", source: str, work: Path) -> None:
     """Assert that cc.py rejects *source*, optionally checking *needle* in stderr."""
     source_path = work / f"{name}.c"
     source_path.write_text(_PREAMBLE + source)
@@ -219,9 +219,9 @@ def test_reject_bitfield_assign_as_expression() -> None:
     with tempfile.TemporaryDirectory() as work:
         expect_reject(
             name="bitfield_assign",
+            needle="bitfield",
             source="struct S { unsigned char f : 3; }; int main(void){ struct S s; return (s.f = 5); }",
-            work=Path(work),
-            needle="bitfield",  # the error message should mention bitfield
+            work=Path(work),  # the error message should mention bitfield
         )
 
 

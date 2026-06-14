@@ -21,11 +21,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CC = REPO_ROOT / "cc.py"
-SOURCE_DIRS = (REPO_ROOT / "user" / "programs", REPO_ROOT / "tests" / "programs")
 INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
+SOURCE_DIRS = (REPO_ROOT / "user" / "programs", REPO_ROOT / "tests" / "programs")
 
 
-def compile_and_assemble(*, source: Path, bits: int, work: Path) -> tuple[bool, str]:
+def compile_and_assemble(*, bits: int, source: Path, work: Path) -> tuple[bool, str]:
     """Run cc.py then nasm; return (passed, first-line-of-error)."""
     asm_path = work / f"{source.stem}-{bits}.asm"
     bin_path = work / f"{source.stem}-{bits}.bin"
@@ -72,7 +72,7 @@ def main() -> int:
         for bits in (16, 32):
             pass_count = 0
             for source in sources:
-                ok, message = compile_and_assemble(source=source, bits=bits, work=work)
+                ok, message = compile_and_assemble(bits=bits, source=source, work=work)
                 if ok:
                     pass_count += 1
                 else:

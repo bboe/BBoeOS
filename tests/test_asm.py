@@ -27,17 +27,17 @@ from run_qemu import COMMAND_TIMEOUT, run_commands  # noqa: E402
 
 from add_file import SECTOR_SIZE, compute_directory_sector, find_entry, read_assign  # noqa: E402
 
-BASE_IMAGE = "drive.img"
-C_DIR = Path("user/programs")
-ORG_DIRECTIVE = "org 08048000h"
-STATIC_DIR = Path("user/static")
-
 # The self-host run on asm.asm itself is the slow-path test; every
 # other program in user/static/ finishes well under a second.  Give asm
 # its own generous budget and let everything else trip the default
 # 4s cap.  CI runners are significantly slower; use BBOE_ASM_SELF_HOST_TIMEOUT
 # to raise the ceiling (the workflow sets it to 32).
 ASM_SELF_HOST_TIMEOUT = int(os.environ.get("BBOE_ASM_SELF_HOST_TIMEOUT", "12"))
+BASE_IMAGE = "drive.img"
+C_DIR = Path("user/programs")
+ORG_DIRECTIVE = "org 08048000h"
+
+STATIC_DIR = Path("user/static")
 
 
 def _build_and_discover(*, only: str | None, temporary_directory: Path) -> list[Path]:
@@ -51,8 +51,8 @@ def _build_and_discover(*, only: str | None, temporary_directory: Path) -> list[
     subprocess.run(
         ["./make_os.sh", str(image)],
         check=True,
-        stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
     )
     for asm_source in c_programs:
         subprocess.run(
@@ -236,8 +236,8 @@ def main() -> int:
     )
     parser.add_argument(
         "program",
-        nargs="?",
         help="restrict the test to one program (e.g. 'edit')",
+        nargs="?",
     )
     parser.add_argument(
         "--fail-fast",
