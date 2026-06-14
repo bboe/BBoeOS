@@ -21,7 +21,7 @@ from run_qemu import qemu_session  # noqa: E402
 
 def _run(*, command: str, timeout: float = 15.0) -> bytes:
     # Extend the boot timeout so we can reliably capture the first prompt.
-    with qemu_session(monitor=False, snapshot=True, boot_timeout=10.0) as session:
+    with qemu_session(boot_timeout=10.0, monitor=False, snapshot=True) as session:
         pre = len(session.buffer)
         # Use write_serial instead of send_command (which has a short
         # COMMAND_TIMEOUT that would fire before the pipeline finishes).

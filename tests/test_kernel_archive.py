@@ -55,7 +55,7 @@ class Expected:
     delta: int
 
 
-def check_path(*, path: str, expected: Expected) -> tuple[bool, str]:
+def check_path(*, expected: Expected, path: str) -> tuple[bool, str]:
     """Verify the snapshot and the C port both exist for one row."""
     archive_asm = ARCHIVE_KERNEL / f"{path}.asm"
     if not archive_asm.is_file():
@@ -75,7 +75,7 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("path", nargs="?", help="restrict to one path (e.g. 'drivers/ps2')")
+    parser.add_argument("path", help="restrict to one path (e.g. 'drivers/ps2')", nargs="?")
     arguments = parser.parse_args()
 
     rows = parse_readme_table(readme=README_PATH)
@@ -93,7 +93,7 @@ def main() -> int:
     fail_count = 0
     failed: list[str] = []
     for path in sorted(rows):
-        ok, message = check_path(path=path, expected=rows[path])
+        ok, message = check_path(expected=rows[path], path=path)
         status = "PASS" if ok else "FAIL"
         print(f"  {status}  {path:<24} {message}")
         if ok:

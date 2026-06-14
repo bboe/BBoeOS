@@ -67,36 +67,36 @@ class CodegenTarget(ABC):
 
     #: Accumulator register name (e.g. ``"ax"`` / ``"eax"``).
     acc: str
-    #: Counter / shift register name (``"cx"`` / ``"ecx"``).
-    count_register: str
     #: Base-pointer register name.
     base_register: str
-    #: Stack-pointer register name.
-    stack_register: str
-    #: NASM size keyword for the native integer width (``"word"`` / ``"dword"``).
-    word_size: str
+    #: Counter / shift register name (``"cx"`` / ``"ecx"``).
+    count_register: str
     #: ``sizeof(int)`` in bytes.
     int_size: int
-    #: ``[bp+N]`` offset to the first stack parameter.
-    param_slot_base: int
-    #: ``sizeof`` table for all supported C types.
-    type_sizes: ClassVar[dict[str, int]]
-    #: Caller-save scratch registers available for local pinning.
-    register_pool: ClassVar[tuple[str, ...]]
-    #: Invocation sequence per syscall name.
-    syscall_sequences: ClassVar[dict[str, tuple[str, ...]]]
     #: General-purpose registers that are not the accumulator.
     non_acc_registers: ClassVar[frozenset[str]]
-
-    @staticmethod
-    @abstractmethod
-    def preamble_lines() -> list[str]:
-        """NASM directives emitted before ``org``."""
+    #: ``[bp+N]`` offset to the first stack parameter.
+    param_slot_base: int
+    #: Caller-save scratch registers available for local pinning.
+    register_pool: ClassVar[tuple[str, ...]]
+    #: Stack-pointer register name.
+    stack_register: str
+    #: Invocation sequence per syscall name.
+    syscall_sequences: ClassVar[dict[str, tuple[str, ...]]]
+    #: ``sizeof`` table for all supported C types.
+    type_sizes: ClassVar[dict[str, int]]
+    #: NASM size keyword for the native integer width (``"word"`` / ``"dword"``).
+    word_size: str
 
     @staticmethod
     @abstractmethod
     def far_ref(base_reg: str) -> str:
         """Memory-operand string for ``far_read*/far_write*`` builtins."""
+
+    @staticmethod
+    @abstractmethod
+    def preamble_lines() -> list[str]:
+        """NASM directives emitted before ``org``."""
 
     @staticmethod
     def low_byte(reg: str) -> str | None:
@@ -149,37 +149,6 @@ class X86CodegenTarget(CodegenTarget):
     register names instead.
     """
 
-    #: Base / general-purpose register (``"bx"`` / ``"ebx"``).  Holds
-    #: the BBoeOS syscall fd argument and serves as a general
-    #: pointer scratch for indexed-memory addressing.
-    bx_register: str
-    #: Destination-index register (``"di"`` / ``"edi"``).  Loaded
-    #: with destination-pointer arguments to string-op / syscall
-    #: builtins (``memcpy``, ``read``, ``recvfrom``, ``mac``, …).
-    di_register: str
-    #: Data register (``"dx"`` / ``"edx"``).  Half of the ``mul`` /
-    #: ``div`` result pair (DX:AX / EDX:EAX) and the UDP ``sendto`` /
-    #: ``recvfrom`` port / remainder argument register.
-    dx_register: str
-    #: Source-index register (``"si"`` / ``"esi"``).  Loaded with
-    #: source-pointer arguments to string-op / syscall builtins
-    #: (``mov``, ``die``, ``exec``, ``write``, ``sendto``, …).
-    si_register: str
-
-    #: Sizes of fixed-width C types, shared by every x86 target.  ``int``
-    #: tracks :attr:`int_size` (2 bytes in 16-bit mode, 4 in 32-bit) and
-    #: pointer types resolve via :meth:`type_size`, so neither appears
-    #: here.  Subclasses inherit this table verbatim.
-    type_sizes: ClassVar[dict[str, int]] = {
-        "char": 1,
-        "double": 8,
-        "float": 4,
-        "unsigned char": 1,
-        "unsigned short": 2,
-        "unsigned long": 4,
-        "void": 0,
-    }
-
     #: BBoeOS kernel ABI: every syscall uses ``int 30h``.
     SYSCALL_SEQUENCES: ClassVar[dict[str, tuple[str, ...]]] = {
         "EXEC": ("mov ah, SYS_SYS_EXEC", "int 30h"),
@@ -215,7 +184,38 @@ class X86CodegenTarget(CodegenTarget):
         "SYS_EXIT": ("mov ah, SYS_SYS_EXIT", "int 30h"),
         "SYS_SIGNAL": ("mov ah, SYS_SYS_SIGNAL", "int 30h"),
     }
+    #: Base / general-purpose register (``"bx"`` / ``"ebx"``).  Holds
+    #: the BBoeOS syscall fd argument and serves as a general
+    #: pointer scratch for indexed-memory addressing.
+    bx_register: str
+    #: Destination-index register (``"di"`` / ``"edi"``).  Loaded
+    #: with destination-pointer arguments to string-op / syscall
+    #: builtins (``memcpy``, ``read``, ``recvfrom``, ``mac``, …).
+    di_register: str
+    #: Data register (``"dx"`` / ``"edx"``).  Half of the ``mul`` /
+    #: ``div`` result pair (DX:AX / EDX:EAX) and the UDP ``sendto`` /
+    #: ``recvfrom`` port / remainder argument register.
+    dx_register: str
+
+    #: Source-index register (``"si"`` / ``"esi"``).  Loaded with
+    #: source-pointer arguments to string-op / syscall builtins
+    #: (``mov``, ``die``, ``exec``, ``write``, ``sendto``, …).
+    si_register: str
+
     syscall_sequences = SYSCALL_SEQUENCES
+    #: Sizes of fixed-width C types, shared by every x86 target.  ``int``
+    #: tracks :attr:`int_size` (2 bytes in 16-bit mode, 4 in 32-bit) and
+    #: pointer types resolve via :meth:`type_size`, so neither appears
+    #: here.  Subclasses inherit this table verbatim.
+    type_sizes: ClassVar[dict[str, int]] = {
+        "char": 1,
+        "double": 8,
+        "float": 4,
+        "unsigned char": 1,
+        "unsigned long": 4,
+        "unsigned short": 2,
+        "void": 0,
+    }
 
     @staticmethod
     def low_byte(reg: str) -> str | None:
@@ -251,20 +251,6 @@ class X86CodegenTarget(CodegenTarget):
 class X86CodegenTarget16(X86CodegenTarget):
     """16-bit real-mode x86 target (legacy; production is 32-bit)."""
 
-    acc = "ax"
-    base_register = "bp"
-    bx_register = "bx"
-    count_register = "cx"
-    di_register = "di"
-    dx_register = "dx"
-    si_register = "si"
-    stack_register = "sp"
-    word_size = "word"
-    int_size = 2
-    param_slot_base = 4
-    register_pool: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
-    non_acc_registers: ClassVar[frozenset[str]] = frozenset({"bx", "cx", "dx", "si", "di", "bp"})
-
     #: Per-builtin clobbers added on top of the generator's base
     #: ``BUILTIN_CLOBBERS`` table.  The kernel returns full 32-bit
     #: longs in EAX; on 16-bit, three RTC-related builtins emit
@@ -276,7 +262,6 @@ class X86CodegenTarget16(X86CodegenTarget):
         "print_datetime": frozenset({"dx"}),
         "uptime_ms": frozenset({"dx"}),
     }
-
     #: Instructions to emit immediately after a syscall whose return
     #: value is a 32-bit long.  16-bit ``unsigned long`` storage uses
     #: the DX:AX shape, so split EAX (set by the kernel) into DX:AX.
@@ -286,7 +271,6 @@ class X86CodegenTarget16(X86CodegenTarget):
         "mov edx, eax",
         "shr edx, 16",
     )
-
     #: Instructions to emit before calling an EAX-shaped callee with a
     #: 32-bit long that currently lives in the target's native shape.
     #: 16-bit holds longs as DX:AX, so combine into EAX.  32-bit
@@ -296,16 +280,32 @@ class X86CodegenTarget16(X86CodegenTarget):
         "movzx eax, ax",
         "or eax, edx",
     )
+    acc = "ax"
+    base_register = "bp"
+    bx_register = "bx"
+    count_register = "cx"
+    di_register = "di"
+    dx_register = "dx"
+    int_size = 2
+    non_acc_registers: ClassVar[frozenset[str]] = frozenset({"bx", "cx", "dx", "si", "di", "bp"})
+    param_slot_base = 4
+    register_pool: ClassVar[tuple[str, ...]] = ("dx", "cx", "bx", "di")
 
-    @staticmethod
-    def preamble_lines() -> list[str]:
-        """No preamble needed for 16-bit real-mode targets."""
-        return []
+    si_register = "si"
+
+    stack_register = "sp"
+
+    word_size = "word"
 
     @staticmethod
     def far_ref(base_reg: str) -> str:
         """ES-segment override for real-mode far-memory access."""
         return f"[es:{base_reg}]"
+
+    @staticmethod
+    def preamble_lines() -> list[str]:
+        """No preamble needed for 16-bit real-mode targets."""
+        return []
 
 
 class X86CodegenTarget32(X86CodegenTarget):
@@ -317,23 +317,23 @@ class X86CodegenTarget32(X86CodegenTarget):
     count_register = "ecx"
     di_register = "edi"
     dx_register = "edx"
+    int_size = 4
+    non_acc_registers: ClassVar[frozenset[str]] = frozenset({"ebx", "ecx", "edx", "esi", "edi", "ebp"})
+    param_slot_base = 8
+    register_pool: ClassVar[tuple[str, ...]] = ("edx", "ecx", "ebx", "edi")
     si_register = "esi"
     stack_register = "esp"
     word_size = "dword"
-    int_size = 4
-    param_slot_base = 8
-    register_pool: ClassVar[tuple[str, ...]] = ("edx", "ecx", "ebx", "edi")
-    non_acc_registers: ClassVar[frozenset[str]] = frozenset({"ebx", "ecx", "edx", "esi", "edi", "ebp"})
-
-    @staticmethod
-    def preamble_lines() -> list[str]:
-        """Emit ``[bits 32]`` to switch NASM to 32-bit encoding."""
-        return ["        [bits 32]"]
 
     @staticmethod
     def far_ref(base_reg: str) -> str:
         """Flat DS covers all memory; no segment override needed."""
         return f"[{base_reg}]"
+
+    @staticmethod
+    def preamble_lines() -> list[str]:
+        """Emit ``[bits 32]`` to switch NASM to 32-bit encoding."""
+        return ["        [bits 32]"]
 
     @staticmethod
     def widen_gp(reg: str) -> str:

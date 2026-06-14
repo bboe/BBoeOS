@@ -46,7 +46,7 @@ def test_ccar_rejects_input_outside_output_directory(tmp_path: Path) -> None:
     object_payload = other_directory / "errno.ccobj"
     _write_ccobj(
         object_payload,
-        symbols={"errno": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"errno": {"binding": "global", "offset": 0, "section": "text"}},
     )
     output = tmp_path / "lib.ccar"
     result = subprocess.run(
@@ -66,13 +66,13 @@ def test_ccar_writes_manifest_with_provides(tmp_path: Path) -> None:
     b = tmp_path / "die.ccobj"
     _write_ccobj(
         a,
-        symbols={"errno": {"section": "text", "offset": 0, "binding": "global"}},
+        symbols={"errno": {"binding": "global", "offset": 0, "section": "text"}},
     )
     _write_ccobj(
         b,
         symbols={
-            "die": {"section": "text", "offset": 0, "binding": "global"},
-            "_die_helper": {"section": "text", "offset": 4, "binding": "local"},
+            "_die_helper": {"binding": "local", "offset": 4, "section": "text"},
+            "die": {"binding": "global", "offset": 0, "section": "text"},
         },
     )
     output = tmp_path / "lib.ccar"

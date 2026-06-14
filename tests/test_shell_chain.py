@@ -29,7 +29,7 @@ def assert_in(*, expected: bytes, haystack: bytes, label: str) -> None:
         raise AssertionError(message)
 
 
-def assert_not_in(*, needle: bytes, haystack: bytes, label: str) -> None:
+def assert_not_in(*, haystack: bytes, label: str, needle: bytes) -> None:
     """Raise AssertionError if *needle* is found in *haystack*."""
     if needle in haystack:
         message = f"{label}: unexpected {needle!r} in {haystack!r}"
@@ -42,8 +42,8 @@ def main() -> int:
         ["./make_os.sh"],
         check=True,
         cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
     )
     test_and_runs_on_success()
     test_and_skips_on_failure()
@@ -60,7 +60,7 @@ def main() -> int:
     return 0
 
 
-def output_after_command(*, session: object, pre_length: int) -> bytes:
+def output_after_command(*, pre_length: int, session: object) -> bytes:
     r"""Return the bytes that appear after the typed command line.
 
     The serial buffer contains the line editor's character-by-character
@@ -81,7 +81,7 @@ def test_and_runs_on_success() -> None:
     with qemu_session(monitor=False, snapshot=True) as session:
         pre_length = len(session.buffer)
         session.send_command("exit_status 0 && echo and_ok")
-        between = output_after_command(session=session, pre_length=pre_length)
+        between = output_after_command(pre_length=pre_length, session=session)
         assert_in(expected=b"and_ok", haystack=between, label="&& after success must run RHS")
     print("PASS: test_and_runs_on_success")
 
@@ -91,8 +91,8 @@ def test_and_skips_on_failure() -> None:
     with qemu_session(monitor=False, snapshot=True) as session:
         pre_length = len(session.buffer)
         session.send_command("exit_status 1 && echo and_ran")
-        between = output_after_command(session=session, pre_length=pre_length)
-        assert_not_in(needle=b"and_ran", haystack=between, label="&& after failure must skip RHS")
+        between = output_after_command(pre_length=pre_length, session=session)
+        assert_not_in(haystack=between, label="&& after failure must skip RHS", needle=b"and_ran")
     print("PASS: test_and_skips_on_failure")
 
 
@@ -107,8 +107,8 @@ def test_color_sgr_command_runs_as_one_command() -> None:
     with qemu_session(monitor=False, snapshot=True) as session:
         pre_length = len(session.buffer)
         session.send_command("echo -e '\\e[38;5;196mred\\e[38;5;46m green\\e[38;5;21m blue\\e[0m'")
-        between = output_after_command(session=session, pre_length=pre_length)
-        assert_not_in(needle=b"unknown command", haystack=between, label="; in quotes must not split")
+        between = output_after_command(pre_length=pre_length, session=session)
+        assert_not_in(haystack=between, label="; in quotes must not split", needle=b"unknown command")
         assert_in(expected=b"red", haystack=between, label="echo's text must appear")
         assert_in(expected=b"blue", haystack=between, label="echo's text must appear")
     print("PASS: test_color_sgr_command_runs_as_one_command")
@@ -119,7 +119,7 @@ def test_dollar_question_between_segments() -> None:
     with qemu_session(monitor=False, snapshot=True) as session:
         pre_length = len(session.buffer)
         session.send_command("exit_status 1; echo $?")
-        between = output_after_command(session=session, pre_length=pre_length)
+        between = output_after_command(pre_length=pre_length, session=session)
         assert_in(expected=b"1", haystack=between, label="$? after `exit_status 1` should be 1")
     print("PASS: test_dollar_question_between_segments")
 
@@ -129,7 +129,7 @@ def test_mixed_chain_left_associative() -> None:
     with qemu_session(monitor=False, snapshot=True) as session:
         pre_length = len(session.buffer)
         session.send_command("exit_status 1 || echo or_a && echo and_b")
-        between = output_after_command(session=session, pre_length=pre_length)
+        between = output_after_command(pre_length=pre_length, session=session)
         assert_in(expected=b"or_a", haystack=between, label="|| after failure must run RHS")
         assert_in(expected=b"and_b", haystack=between, label="&& after echo success must run RHS")
     print("PASS: test_mixed_chain_left_associative")
@@ -140,7 +140,7 @@ def test_or_runs_on_failure() -> None:
     with qemu_session(monitor=False, snapshot=True) as session:
         pre_length = len(session.buffer)
         session.send_command("exit_status 1 || echo or_ran")
-        between = output_after_command(session=session, pre_length=pre_length)
+        between = output_after_command(pre_length=pre_length, session=session)
         assert_in(expected=b"or_ran", haystack=between, label="|| after failure must run RHS")
     print("PASS: test_or_runs_on_failure")
 
@@ -150,8 +150,8 @@ def test_or_skips_on_success() -> None:
     with qemu_session(monitor=False, snapshot=True) as session:
         pre_length = len(session.buffer)
         session.send_command("exit_status 0 || echo or_skipped")
-        between = output_after_command(session=session, pre_length=pre_length)
-        assert_not_in(needle=b"or_skipped", haystack=between, label="|| after success must skip RHS")
+        between = output_after_command(pre_length=pre_length, session=session)
+        assert_not_in(haystack=between, label="|| after success must skip RHS", needle=b"or_skipped")
     print("PASS: test_or_skips_on_success")
 
 
@@ -160,9 +160,9 @@ def test_quoted_and_stays_in_argv() -> None:
     with qemu_session(monitor=False, snapshot=True) as session:
         pre_length = len(session.buffer)
         session.send_command("echo 'x && y'")
-        between = output_after_command(session=session, pre_length=pre_length)
+        between = output_after_command(pre_length=pre_length, session=session)
         assert_in(expected=b"x && y", haystack=between, label="quoted && must reach echo intact")
-        assert_not_in(needle=b"unknown command", haystack=between, label="quoted && must not split")
+        assert_not_in(haystack=between, label="quoted && must not split", needle=b"unknown command")
     print("PASS: test_quoted_and_stays_in_argv")
 
 
@@ -171,9 +171,9 @@ def test_quoted_pipe_stays_in_argv() -> None:
     with qemu_session(monitor=False, snapshot=True) as session:
         pre_length = len(session.buffer)
         session.send_command("echo 'a | b'")
-        between = output_after_command(session=session, pre_length=pre_length)
+        between = output_after_command(pre_length=pre_length, session=session)
         assert_in(expected=b"a | b", haystack=between, label="quoted | must reach echo intact")
-        assert_not_in(needle=b"unknown command", haystack=between, label="quoted | must not split")
+        assert_not_in(haystack=between, label="quoted | must not split", needle=b"unknown command")
     print("PASS: test_quoted_pipe_stays_in_argv")
 
 
@@ -182,9 +182,9 @@ def test_quoted_semicolon_stays_in_argv() -> None:
     with qemu_session(monitor=False, snapshot=True) as session:
         pre_length = len(session.buffer)
         session.send_command("echo 'a;b;c'")
-        between = output_after_command(session=session, pre_length=pre_length)
+        between = output_after_command(pre_length=pre_length, session=session)
         assert_in(expected=b"a;b;c", haystack=between, label="quoted ; must reach echo intact")
-        assert_not_in(needle=b"unknown command", haystack=between, label="quoted ; must not split")
+        assert_not_in(haystack=between, label="quoted ; must not split", needle=b"unknown command")
     print("PASS: test_quoted_semicolon_stays_in_argv")
 
 
@@ -193,7 +193,7 @@ def test_semicolon_runs_both() -> None:
     with qemu_session(monitor=False, snapshot=True) as session:
         pre_length = len(session.buffer)
         session.send_command("echo first_a; echo second_b")
-        between = output_after_command(session=session, pre_length=pre_length)
+        between = output_after_command(pre_length=pre_length, session=session)
         assert_in(expected=b"first_a", haystack=between, label="; must run LHS")
         assert_in(expected=b"second_b", haystack=between, label="; must run RHS")
     print("PASS: test_semicolon_runs_both")

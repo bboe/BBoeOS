@@ -284,6 +284,6 @@ def test_uses_walk_opaque_block_ast() -> None:
     """Block/Access reads are discovered by walking the wrapped AST for Var names."""
     from cc.regalloc import _instruction_uses  # noqa: PLC0415, PLC2701
 
-    node = ast_nodes.Assign(line=1, name="_ir_3", expr=ast_nodes.Var(line=1, name="k"))
+    node = ast_nodes.Assign(expr=ast_nodes.Var(line=1, name="k"), line=1, name="_ir_3")
     block = ir.Block(node=node)
     assert "k" in set(_instruction_uses(instruction=block))

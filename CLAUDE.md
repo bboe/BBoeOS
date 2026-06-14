@@ -181,8 +181,7 @@ bootloader:
 
 - Every function uses mandatory keyword arguments (keyword-only via `*`) unless
   the positional args are self-evident (single obvious arg → positional-only via
-  `/`). Arguments sorted alphabetically at definition and call sites.
-- Functions sorted alphabetically within their scope (module, class).
+  `/`).
 - No abbreviations in function or variable names. Examples: `expression` (not
   `expr`), `generate` (not `gen`), `statement` (not `stmt`), `function` (not
   `func`), `directory` (not `dir`), `command` (not `cmd`), `message` (not

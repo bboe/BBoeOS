@@ -21,11 +21,20 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Each snippet uses a pointer/char comparison the strict default rejects.
+_CHAR_NE_ZERO = "int f(char c) { if (c != 0) return 1; return 0; }\n"
+_POINTER_EQ_ZERO = "int f(char *p) { if (p == 0) return 1; return 0; }\n"
+
+
+_POINTER_NE_ZERO = "int f(char *p) { if (p != 0) return 1; return 0; }\n"
+
+
+_POINTER_TRUTHINESS = "int f(char *p) { if (p) return 1; return 0; }\n"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CC = REPO_ROOT / "cc.py"
 
 
-def _compile(*, source: str, work: Path, permissive: bool) -> subprocess.CompletedProcess:
+def _compile(*, permissive: bool, source: str, work: Path) -> subprocess.CompletedProcess:
     source_path = work / "input.c"
     asm_path = work / "input.asm"
     source_path.write_text(source)
@@ -34,13 +43,6 @@ def _compile(*, source: str, work: Path, permissive: bool) -> subprocess.Complet
         command.append("--permissive")
     command += [str(source_path), str(asm_path)]
     return subprocess.run(command, capture_output=True, check=False, text=True)
-
-
-# Each snippet uses a pointer/char comparison the strict default rejects.
-_CHAR_NE_ZERO = "int f(char c) { if (c != 0) return 1; return 0; }\n"
-_POINTER_EQ_ZERO = "int f(char *p) { if (p == 0) return 1; return 0; }\n"
-_POINTER_NE_ZERO = "int f(char *p) { if (p != 0) return 1; return 0; }\n"
-_POINTER_TRUTHINESS = "int f(char *p) { if (p) return 1; return 0; }\n"
 
 
 def main() -> int:
@@ -62,31 +64,31 @@ def main() -> int:
 
 def test_permissive_allows_char_vs_zero(*, work: Path) -> None:
     """``c != 0`` compiles under --permissive."""
-    result = _compile(source=_CHAR_NE_ZERO, work=work, permissive=True)
+    result = _compile(permissive=True, source=_CHAR_NE_ZERO, work=work)
     assert result.returncode == 0, result.stderr
 
 
 def test_permissive_allows_pointer_eq_zero(*, work: Path) -> None:
     """``p == 0`` compiles under --permissive."""
-    result = _compile(source=_POINTER_EQ_ZERO, work=work, permissive=True)
+    result = _compile(permissive=True, source=_POINTER_EQ_ZERO, work=work)
     assert result.returncode == 0, result.stderr
 
 
 def test_permissive_allows_pointer_ne_zero(*, work: Path) -> None:
     """``p != 0`` compiles under --permissive."""
-    result = _compile(source=_POINTER_NE_ZERO, work=work, permissive=True)
+    result = _compile(permissive=True, source=_POINTER_NE_ZERO, work=work)
     assert result.returncode == 0, result.stderr
 
 
 def test_permissive_allows_pointer_truthiness(*, work: Path) -> None:
     """``if (p)`` compiles under --permissive."""
-    result = _compile(source=_POINTER_TRUTHINESS, work=work, permissive=True)
+    result = _compile(permissive=True, source=_POINTER_TRUTHINESS, work=work)
     assert result.returncode == 0, result.stderr
 
 
 def test_strict_default_rejects_pointer_vs_zero(*, work: Path) -> None:
     """Without the flag, ``p == 0`` is still an error (house style preserved)."""
-    result = _compile(source=_POINTER_EQ_ZERO, work=work, permissive=False)
+    result = _compile(permissive=False, source=_POINTER_EQ_ZERO, work=work)
     assert result.returncode != 0, "strict mode should reject `p == 0`"
     assert "pointer compared to non-pointer" in result.stderr, result.stderr
 

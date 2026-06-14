@@ -29,11 +29,11 @@ from cc.codegen.liveness import LivenessAnalyzer
 
 
 def _assign(name: str, expression: object) -> Assign:
-    return Assign(line=1, name=name, expr=expression)
+    return Assign(expr=expression, line=1, name=name)
 
 
 def _declaration(name: str, init: int) -> VarDecl:
-    return VarDecl(line=1, name=name, init=_int(init), type_name="int")
+    return VarDecl(init=_int(init), line=1, name=name, type_name="int")
 
 
 def _int(value: int) -> Int:
@@ -51,7 +51,7 @@ def test_liveness_disjoint_if_else_arms_do_not_interfere() -> None:
     locals are never live simultaneously.
     """
     body = [
-        VarDecl(line=1, name="cond", init=_int(1), type_name="int"),
+        VarDecl(init=_int(1), line=1, name="cond", type_name="int"),
         If(
             body=[
                 _declaration("then_local", 1),
@@ -78,8 +78,8 @@ def test_liveness_disjoint_switch_cases_do_not_interfere() -> None:
     separate cases never both live at the same program point.
     """
     body = [
-        VarDecl(line=1, name="d", init=_int(1), type_name="int"),
-        VarDecl(line=1, name="result", init=_int(0), type_name="int"),
+        VarDecl(init=_int(1), line=1, name="d", type_name="int"),
+        VarDecl(init=_int(0), line=1, name="result", type_name="int"),
         Switch(
             cases=[
                 SwitchCase(
@@ -123,7 +123,7 @@ def test_liveness_linear_uses_create_interference() -> None:
     body = [
         _declaration("x", 1),
         _declaration("y", 2),
-        _assign("result", BinaryOperation(line=1, left=_var("x"), operation="+", right=_var("y"))),
+        _assign("result", BinaryOperation(left=_var("x"), line=1, operation="+", right=_var("y"))),
         Return(line=1, value=_var("result")),
     ]
     interference = LivenessAnalyzer(body=body).interference()
@@ -145,9 +145,9 @@ def test_liveness_loop_body_locals_interfere_across_iterations() -> None:
         While(
             body=[
                 _declaration("counter", 0),
-                _assign("accumulator", BinaryOperation(line=1, left=_var("accumulator"), operation="+", right=_var("counter"))),
+                _assign("accumulator", BinaryOperation(left=_var("accumulator"), line=1, operation="+", right=_var("counter"))),
             ],
-            cond=BinaryOperation(line=1, left=_var("accumulator"), operation="<", right=_int(10)),
+            cond=BinaryOperation(left=_var("accumulator"), line=1, operation="<", right=_int(10)),
             line=1,
         ),
         Return(line=1, value=_var("accumulator")),
@@ -168,7 +168,7 @@ def test_liveness_nested_blocks_interfere_with_outer_when_overlapping() -> None:
         Compound(
             body=[
                 _declaration("inner", 2),
-                _assign("result", BinaryOperation(line=1, left=_var("outer"), operation="+", right=_var("inner"))),
+                _assign("result", BinaryOperation(left=_var("outer"), line=1, operation="+", right=_var("inner"))),
             ],
             line=1,
         ),

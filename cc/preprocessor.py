@@ -72,13 +72,8 @@ from pathlib import Path
 from cc.errors import CompileError
 from cc.lexer import tokenize
 
-#: Accepts both ``#include "..."`` and ``#include <...>``.  cc.py has
-#: no separate "system" search-path concept, so both forms search the
-#: same include_base + search_paths list — matching what most
-#: embedded toolchains do.  Letting <> work avoids forking shared
-#: headers like ``string.h`` that ship with angle-bracket
-#: dependencies (``#include <stddef.h>``).
-INCLUDE_PATTERN = re.compile(r'\s*(?:"([^"]+)"|<([^>]+)>)\s*$')
+#: Token-kind sentinel for the EOF token appended by :func:`cc.lexer.tokenize`.
+_EOF_KIND = "EOF"
 
 #: Matches ``#define NAME(p1, p2, ...) body`` — the open paren must
 #: come **immediately** after the macro name with no intervening
@@ -89,8 +84,13 @@ FUNCTION_DEFINE_PATTERN = re.compile(
     r"\s*(?P<name>[A-Za-z_][A-Za-z_0-9]*)\((?P<params>[^)]*)\)\s*(?P<body>.*?)\s*$",
 )
 
-#: Token-kind sentinel for the EOF token appended by :func:`cc.lexer.tokenize`.
-_EOF_KIND = "EOF"
+#: Accepts both ``#include "..."`` and ``#include <...>``.  cc.py has
+#: no separate "system" search-path concept, so both forms search the
+#: same include_base + search_paths list — matching what most
+#: embedded toolchains do.  Letting <> work avoids forking shared
+#: headers like ``string.h`` that ship with angle-bracket
+#: dependencies (``#include <stddef.h>``).
+INCLUDE_PATTERN = re.compile(r'\s*(?:"([^"]+)"|<([^>]+)>)\s*$')
 
 
 #: Object-like macros every translation unit gets for free.  Mirrors the

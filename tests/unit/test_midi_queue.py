@@ -45,17 +45,17 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-HARNESS = Path(__file__).resolve().parent / "midi_queue_harness.c"
-MIDI_SOURCE = REPO_ROOT / "kernel" / "fs" / "fd" / "midi.c"
-OPL3_SOURCE = REPO_ROOT / "kernel" / "drivers" / "opl3.c"
-
+BANK0_DATA = 0x389
 # OPL bank port pairs; matches kernel/drivers/opl3.c opl_write().
 BANK0_STATUS = 0x388
-BANK0_DATA = 0x389
-BANK1_STATUS = 0x38A
 BANK1_DATA = 0x38B
+BANK1_STATUS = 0x38A
+
 DELAY_PORT = 0x80  # io_delay_short reads this 4 times after each outb.
+HARNESS = Path(__file__).resolve().parent / "midi_queue_harness.c"
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+MIDI_SOURCE = REPO_ROOT / "kernel" / "fs" / "fd" / "midi.c"
+OPL3_SOURCE = REPO_ROOT / "kernel" / "drivers" / "opl3.c"
 
 
 def _build_shared_library() -> tuple[ctypes.CDLL, Path]:
@@ -205,8 +205,8 @@ def _strip_kernel_source(*, source: str) -> str:
 
 _LIBRARY, _TEMP_DIRECTORY = _build_shared_library()
 
-_SYSTEM_TICKS = ctypes.c_uint32.in_dll(_LIBRARY, "system_ticks")
 _FD_WRITE_BUFFER = ctypes.c_void_p.in_dll(_LIBRARY, "fd_write_buffer")
+_SYSTEM_TICKS = ctypes.c_uint32.in_dll(_LIBRARY, "system_ticks")
 
 
 # -- Tests -----------------------------------------------------------

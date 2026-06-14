@@ -91,13 +91,13 @@ def _measure_wav(*, wav_path: Path) -> dict:
 def _run_sound_check(*, wav_path: Path) -> None:
     """Boot doom under QEMU+SB16, capture WAV, and assert duration/RMS/zero-crossings thresholds."""
     with qemu_session(
-        memory="64",
         extra_qemu_args=[
             "-audiodev",
             f"wav,id=a,path={wav_path}",
             "-device",
             "sb16,audiodev=a",
         ],
+        memory="64",
     ) as session:
         session.write_serial("doom\r")
         session.drain_serial(seconds=30)
@@ -119,7 +119,7 @@ def _test_sound_with_wad() -> None:
         print(f"SKIP doom-sound test: {WAD_FILE} not present (run ports/doom/fetch_wad.sh)")
         return
     _install_doom_and_wad()
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_handle:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_handle:
         wav_path = Path(temp_handle.name)
     # QEMU's wav backend writes a WAV header at start and refuses to
     # overwrite an existing file; drop the empty placeholder mkstemp

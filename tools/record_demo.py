@@ -160,14 +160,14 @@ def _record(*, keep_frames: bool, output: Path) -> int:
         with_net=True,
     ) as session:
         capture = threading.Thread(
-            target=capture_loop,
+            daemon=True,
             kwargs={
                 "frame_directory": capture_root,
                 "framerate": FRAME_RATE,
                 "session": session,
                 "stop": stop,
             },
-            daemon=True,
+            target=capture_loop,
         )
         capture.start()
         try:
@@ -312,7 +312,7 @@ def encode_gif(
         message = f"no frames found in {frame_directory}"
         raise RuntimeError(message)
     trim_seabios_frames(frame_directory=frame_directory)
-    output.parent.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(exist_ok=True, parents=True)
     palette = frame_directory / "palette.png"
     intermediate = frame_directory / "intermediate.gif"
     pattern = frame_directory / "frame_%05d.ppm"
@@ -345,9 +345,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output",
-        type=Path,
         default=DEFAULT_OUTPUT,
         help=f"path of the final GIF (default: {DEFAULT_OUTPUT})",
+        type=Path,
     )
     parser.add_argument(
         "--keep-frames",

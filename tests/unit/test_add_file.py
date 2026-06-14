@@ -34,21 +34,6 @@ from add_file import (  # noqa: E402
 )
 
 
-def _bin_start_sector(*, image: Path) -> int:
-    """Return the start sector of bin/ in the given image."""
-    directory_sector = compute_directory_sector(image_path=str(image))
-    directory_sectors = read_assign("DIRECTORY_SECTORS")
-    image_data = bytearray(image.read_bytes())
-    bin_offset = find_subdirectory_entry(
-        directory_sector=directory_sector,
-        directory_sectors=directory_sectors,
-        image=image_data,
-        name="bin",
-    )
-    assert bin_offset is not None, "bin/ subdirectory not found in image"
-    return int.from_bytes(image_data[bin_offset + 26 : bin_offset + 28], "little")
-
-
 @pytest.fixture(scope="session")
 def base_image() -> Iterator[Path]:
     """Build drive.img once per pytest session.
@@ -63,9 +48,9 @@ def base_image() -> Iterator[Path]:
     image = tmpdir / "drive.img"
     subprocess.run(
         ["./make_os.sh", str(image)],
+        capture_output=True,
         check=True,
         cwd=REPO_ROOT,
-        capture_output=True,
     )
     try:
         yield image
@@ -91,11 +76,26 @@ def ext2_image(tmp_path: Path) -> Path:
     image = tmp_path / "drive_ext2.img"
     subprocess.run(
         ["./make_os.sh", "--ext2", str(image)],
+        capture_output=True,
         check=True,
         cwd=REPO_ROOT,
-        capture_output=True,
     )
     return image
+
+
+def _bin_start_sector(*, image: Path) -> int:
+    """Return the start sector of bin/ in the given image."""
+    directory_sector = compute_directory_sector(image_path=str(image))
+    directory_sectors = read_assign("DIRECTORY_SECTORS")
+    image_data = bytearray(image.read_bytes())
+    bin_offset = find_subdirectory_entry(
+        directory_sector=directory_sector,
+        directory_sectors=directory_sectors,
+        image=image_data,
+        name="bin",
+    )
+    assert bin_offset is not None, "bin/ subdirectory not found in image"
+    return int.from_bytes(image_data[bin_offset + 26 : bin_offset + 28], "little")
 
 
 def test_batch_files_appear(ext2_image: Path, tmp_path: Path) -> None:
@@ -119,8 +119,8 @@ def test_batch_files_appear(ext2_image: Path, tmp_path: Path) -> None:
     )
     listing = subprocess.run(
         ["debugfs", "-R", "ls /bin", str(partition)],
-        check=True,
         capture_output=True,
+        check=True,
         text=True,
     ).stdout
     for name in ("zalpha", "zbeta", "zgamma"):
@@ -174,10 +174,10 @@ def test_cli_accepts_multiple_files(bbfs_image: Path, tmp_path: Path) -> None:
         paths.append(str(path))
     result = subprocess.run(
         ["./add_file.py", "--image", str(bbfs_image), "-d", "bin", *paths],
-        cwd=REPO_ROOT,
         capture_output=True,
-        text=True,
         check=False,
+        cwd=REPO_ROOT,
+        text=True,
     )
     assert result.returncode == 0, result.stderr
 

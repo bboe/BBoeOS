@@ -7,10 +7,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+_PREAMBLE = "#include <stdint.h>\n"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CC = REPO_ROOT / "cc.py"
 LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
-_PREAMBLE = "#include <stdint.h>\n"
 
 
 def _compile(name: str, source: str) -> str:

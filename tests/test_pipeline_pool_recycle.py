@@ -50,7 +50,7 @@ def test_pipe_pool_recycles_across_failure_modes() -> None:
         "nope | pipe_consumer",  # .pipeline_b_not_found
         "pipe_producer | nope",  # .pipeline_c_not_found
     ]
-    with qemu_session(monitor=False, snapshot=True, boot_timeout=10.0) as session:
+    with qemu_session(boot_timeout=10.0, monitor=False, snapshot=True) as session:
         # Several rounds of failures interleaved with successes — more
         # than 4 of each so pool exhaustion would surface as a failing
         # success run.

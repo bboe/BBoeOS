@@ -102,9 +102,9 @@ from cc.tokens import COMPARISON_OPERATIONS
 from cc.types import ArrayType
 from cc.utils import decode_string_escapes, string_byte_length
 
+_ATT_IMMEDIATE = re.compile(r"\$((?:0x[0-9a-fA-F]+|[0-9]+))\b")
 _ATT_REGISTERS = "eax|ebx|ecx|edx|esi|edi|esp|ebp|ax|bx|cx|dx|si|di|sp|bp|ah|al|bh|bl|ch|cl|dh|dl"
 _ATT_REGISTER = re.compile(rf"%({_ATT_REGISTERS})\b")
-_ATT_IMMEDIATE = re.compile(r"\$((?:0x[0-9a-fA-F]+|[0-9]+))\b")
 
 #: Lines that look like a function label: bare identifier at column 0
 #: followed by ``:`` and nothing else.  Used by :func:`_elide_dead_frames`
@@ -166,92 +166,6 @@ _SINGLE_OPERAND_MNEMONICS = frozenset({
 })
 
 
-def _att_to_intel(line: str) -> str:
-    """Convert one AT&T-syntax asm line to Intel syntax (NASM).
-
-    Only fires when the line contains AT&T markers (``%reg`` or
-    ``$imm``); Intel-syntax lines pass through unchanged.
-    """
-    stripped = line.lstrip()
-    if not stripped or stripped.startswith(";"):
-        return line
-    if not _ATT_REGISTER.search(stripped) and not _ATT_IMMEDIATE.search(stripped):
-        return line
-    indent = line[: len(line) - len(stripped)]
-    parts = stripped.split(None, 1)
-    mnemonic = parts[0].rstrip(",")
-    operand_text = parts[1] if len(parts) > 1 else ""
-    operand_text = _ATT_REGISTER.sub(r"\1", operand_text)
-    operand_text = _ATT_IMMEDIATE.sub(r"\1", operand_text)
-    if not operand_text:
-        return f"{indent}{mnemonic}"
-    operands = [operand.strip() for operand in operand_text.split(",")]
-    if len(operands) == 2 and mnemonic not in _SINGLE_OPERAND_MNEMONICS:
-        operands.reverse()
-    return f"{indent}{mnemonic} {', '.join(operands)}"
-
-
-def _elide_dead_frames(*, lines: list[str], target: CodegenTarget) -> list[str]:
-    """Drop ``sub <sp>, N`` + ``mov <sp>, <bp>`` lines in functions whose body never touches the frame.
-
-    Functions allocate a stack frame for every declared local even
-    when later peephole passes fold every use to an immediate — the
-    common case for one-shot bitfield-register structs:
-
-        struct foo s = {.bit = 1};
-        kernel_outb(port, *(u8 *)&s);
-
-    The const-fold + dead-store peepholes collapse both the init and
-    the read to ``mov al, <const>``, leaving the prologue's
-    ``sub esp, N`` and the matching ``mov esp, ebp`` epilogue paying
-    for storage that's never referenced.  This sweep walks each
-    emitted function's line range and, when no ``[<bp>+N]`` /
-    ``[<bp>-N]`` reference survived peepholing, drops those two
-    instruction shapes (and any duplicates from multiple-return
-    paths).  ``push <bp>`` / ``pop <bp>`` stay — leaving them keeps
-    the caller's frame chain undisturbed at zero extra cost relative
-    to a hand-written asm equivalent.
-    """
-    base = target.base_register
-    stack = target.stack_register
-    bracket_base = f"[{base}"
-    sub_prefix = f"        sub {stack}, "
-    mov_unwind = f"        mov {stack}, {base}"
-    result: list[str] = []
-    # Buffer each function's body so we can decide whether to drop the
-    # frame-management lines before flushing.  Anything outside a
-    # function (preamble, file-scope storage, trailing %include) passes
-    # through unchanged.
-    pending: list[str] | None = None
-    pending_has_frame_ref = False
-
-    def flush(*, buffer: list[str] | None, has_frame_ref: bool) -> None:
-        if buffer is None:
-            return
-        if has_frame_ref:
-            result.extend(buffer)
-            return
-        for line in buffer:
-            if line.startswith(sub_prefix) or line == mov_unwind:
-                continue
-            result.append(line)
-
-    for line in lines:
-        if _FUNCTION_LABEL_PATTERN.match(line):
-            flush(buffer=pending, has_frame_ref=pending_has_frame_ref)
-            pending = [line]
-            pending_has_frame_ref = False
-            continue
-        if pending is None:
-            result.append(line)
-            continue
-        if bracket_base in line:
-            pending_has_frame_ref = True
-        pending.append(line)
-    flush(buffer=pending, has_frame_ref=pending_has_frame_ref)
-    return result
-
-
 class EmissionMixin:
     """Emission dispatchers, mixed into :class:`X86CodeGenerator`.
 
@@ -262,6 +176,302 @@ class EmissionMixin:
     methods that still live on the generator class) and the
     ``builtin_*`` / ``peephole`` dispatchers from sibling mixins.
     """
+
+    #: Canonical (16-bit-name) clobber sets for a recognized rep-string
+    #: loop, keyed by operation.  Mirrors ``BUILTIN_CLOBBERS["memcpy"]`` /
+    #: ``["memset"]`` exactly — a ``rep movs`` touches DI/SI/CX/AX (AX is
+    #: cleared by the trailing ``ax_clear``), a ``rep stos`` touches
+    #: DI/CX/AX.  ``_pinned_registers_to_save`` normalises both sides
+    #: through ``target.low_word`` so these match E-register pins too.
+    REP_STRING_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
+        "copy": frozenset({"ax", "cx", "di", "si"}),
+        "fill": frozenset({"ax", "cx", "di"}),
+    }
+
+    @staticmethod
+    def _body_has_member_index_access(body: list[ir.Instruction]) -> bool:
+        """Return True if any IR instruction resolves a member-index ``base.field[i]``.
+
+        A member-index is a :class:`SubscriptPlace` whose ``base`` is a
+        :class:`MemberPlace`; :meth:`_resolve_member_index` lowers it by
+        loading the struct base into BX inline.  Such accesses arrive
+        wrapped in :class:`ir.Access` / :class:`ir.Block` (the complex-
+        lvalue escape hatch) or inside Switch arms; this walks those AST
+        payloads to decide whether BX must stay out of the temp pool.
+        """
+
+        def ast_has(node: object) -> bool:
+            if isinstance(node, SubscriptPlace) and isinstance(node.base, MemberPlace):
+                return True
+            if not isinstance(node, Node):
+                return False
+            for node_field in fields(node):
+                value = getattr(node, node_field.name)
+                if isinstance(value, Node) and ast_has(value):
+                    return True
+                if isinstance(value, list) and any(isinstance(item, Node) and ast_has(item) for item in value):
+                    return True
+            return False
+
+        def walk(instructions: list[ir.Instruction]) -> bool:
+            for instruction in instructions:
+                match instruction:
+                    case ir.Access(node=node) | ir.Block(node=node):
+                        if ast_has(node):
+                            return True
+                    case ir.Switch(cases=cases):
+                        if any(walk(case.body) for case in cases):
+                            return True
+                    case _:
+                        pass
+            return False
+
+        return walk(body)
+
+    @staticmethod
+    def _collect_ir_escape_hatch_temps(body: list[ir.Instruction]) -> set[str]:
+        """Return ``_ir_*`` temps that are destinations of a Block/Access escape hatch.
+
+        These lower through the AST path rather than pure IR, so
+        :meth:`_allocate_ir_temps` excludes them and leaves them in memory.
+        Mirrors the Switch recursion in :meth:`_collect_ir_temps` so temps
+        inside switch arms are caught too.
+        """
+        result: set[str] = set()
+
+        def walk(instructions: list[ir.Instruction]) -> None:
+            for instruction in instructions:
+                match instruction:
+                    case ir.Block(node=Assign(name=name)) | ir.Access(node=Assign(name=name)):
+                        if name.startswith("_ir_"):
+                            result.add(name)
+                    case ir.Switch(cases=cases):
+                        for case in cases:
+                            walk(case.body)
+                    case _:
+                        pass
+
+        walk(body)
+        return result
+
+    @staticmethod
+    def _collect_ir_index_operand_temps(body: list[ir.Instruction]) -> set[str]:
+        """Return ``_ir_*`` temps used as the ``index`` operand of Index / IndexAssign.
+
+        These feed the ``[base + index*scale]`` effective address that the
+        SIB peephole folds into a single ``inc dword [esi + i*4]`` /
+        load / store; pinning them to a register defeats the fusion.
+        :meth:`_allocate_ir_temps` excludes them.  Recurses into Switch
+        arms to match the other temp collectors.
+        """
+        result: set[str] = set()
+
+        def walk(instructions: list[ir.Instruction]) -> None:
+            for instruction in instructions:
+                match instruction:
+                    case ir.Index(index=index) | ir.IndexAssign(index=index):
+                        if isinstance(index, str) and index.startswith("_ir_"):
+                            result.add(index)
+                    case ir.Switch(cases=cases):
+                        for case in cases:
+                            walk(case.body)
+                    case _:
+                        pass
+
+        walk(body)
+        return result
+
+    @staticmethod
+    def _count_ir_temp_uses(*, body: list[ir.Instruction], temps: frozenset[str]) -> dict[str, int]:
+        """Return how many times each temp in *temps* is read across *body*.
+
+        Uses the same exhaustive read model as the interference builder
+        (:func:`cc.regalloc.instruction_uses`), which already recurses into
+        Switch arms and opaque AST-wrapping instructions, so the flat
+        top-level walk here covers every read.  The count feeds the spill
+        benefit: a temp read more often wants a register more.
+        """
+        counts: dict[str, int] = dict.fromkeys(temps, 0)
+        for instruction in body:
+            for name in regalloc.instruction_uses(instruction=instruction):
+                if name in temps:
+                    counts[name] += 1
+        return counts
+
+    @staticmethod
+    def _fold_horner_terms(*, displacement: int, indices: tuple[ir.Value, ...], strides: list[int]) -> tuple[int, tuple[AddressTerm, ...]]:
+        """Fold constant indices into *displacement*; return ``(displacement, dynamic terms)``.
+
+        Mirrors the constant fold inside the legacy Horner walk
+        (``_emit_horner_index_offsets``): an ``int`` index contributes
+        ``index * stride`` to the static displacement, so the plan carries
+        only the dynamic indices as :class:`AddressTerm` entries (in the
+        same outermost-dimension-first order the walk consumes them).
+        """
+        terms: list[AddressTerm] = []
+        for index_value, stride in zip(indices, strides, strict=True):
+            if isinstance(index_value, int):
+                displacement += index_value * stride
+            else:
+                terms.append(AddressTerm(index_value=index_value, scale=stride))
+        return displacement, tuple(terms)
+
+    @staticmethod
+    def _merge_pinned_save_filters(
+        *,
+        locals_initialized: dict[int, frozenset[str]],
+        temp_live: dict[int, frozenset[str]],
+    ) -> dict[int, frozenset[str]]:
+        """Union the locals-initialized and temp-live per-call save filters.
+
+        Each map is keyed by ``id(call-site)``; a value is the set of
+        pinned registers that must be saved across that site (initialized
+        locals from one analysis, live temp registers from the other).
+        The union per site is exactly the registers
+        :meth:`_pinned_registers_to_save` should push / pop.  Sites
+        absent from both maps stay absent (the caller treats absence as
+        ``None`` → save every clobbered pin, the conservative default).
+        """
+        if not locals_initialized and not temp_live:
+            return {}
+        merged: dict[int, frozenset[str]] = {}
+        for site in locals_initialized.keys() | temp_live.keys():
+            merged[site] = locals_initialized.get(site, frozenset()) | temp_live.get(site, frozenset())
+        return merged
+
+    @staticmethod
+    def _normalise_ternary_condition(condition: Node) -> Node:
+        """Wrap a ternary condition as ``expr != 0`` unless it's already a comparison.
+
+        Mirrors :meth:`cc.parser.Parser.parse_condition`: ``&&`` / ``||``
+        and explicit comparisons (``==`` / ``<`` / etc.) are passed
+        through; everything else (a bare variable, an arithmetic
+        expression, a call) is normalised to ``expr != 0`` so the
+        downstream :meth:`emit_condition_false_jump` always sees a
+        comparison-shaped node.
+        """
+        if isinstance(condition, (LogicalAnd, LogicalOr)):
+            return condition
+        if isinstance(condition, BinaryOperation) and condition.operation in COMPARISON_OPERATIONS:
+            return condition
+        return BinaryOperation(left=condition, line=condition.line, operation="!=", right=Int(line=condition.line, value=0))
+
+    @staticmethod
+    def _rep_width_suffix(element_size: int, /) -> str:
+        """Map element size 1/2/4 to the string-op mnemonic suffix."""
+        return {1: "b", 2: "w", 4: "d"}[element_size]
+
+    @staticmethod
+    def _substitute_extended_asm_template(
+        text: str,
+        /,
+        *,
+        name_to_index: dict[str, int],
+        operand_byte_locations: list[str],
+        operand_locations: list[str],
+    ) -> str:
+        """Substitute ``%%``/``%N``/``%[name]``/``%bN``/``%b[name]`` in a template string.
+
+        Pulled out of :meth:`generate_extended_asm` (was a 74-line nested
+        closure) so the operand-resolution algorithm can be read and
+        modified independently of the surrounding parsing / register-
+        spill orchestration.
+
+        Args:
+            text: the template string from the ``asm("...")`` first
+                operand.
+            name_to_index: maps a symbolic operand name (the
+                ``[symname]`` form in the operand list) to its index
+                in ``operand_locations`` / ``operand_byte_locations``.
+            operand_locations: full-width register/memory operand for
+                each declared output / input (outputs first, then
+                inputs).
+            operand_byte_locations: byte-register alias for the same
+                operands; used for ``%b...`` substitutions.
+
+        Recognised forms:
+            ``%%``       → literal ``%``
+            ``%N``       → positional full-width substitution
+            ``%[name]``  → named full-width substitution
+            ``%bN``      → positional byte-alias substitution
+            ``%b[name]`` → named byte-alias substitution
+        Any unrecognised ``%`` sequence is passed through verbatim so
+        the underlying assembler can flag it.
+
+        """
+        result_parts: list[str] = []
+        position = 0
+        length = len(text)
+        while position < length:
+            character = text[position]
+            if character != "%":
+                result_parts.append(character)
+                position += 1
+                continue
+            # We are at a '%' — look ahead.
+            position += 1
+            if position >= length:
+                result_parts.append("%")
+                break
+            next_character = text[position]
+            if next_character == "%":
+                # %% -> literal %
+                result_parts.append("%")
+                position += 1
+            elif next_character == "b":
+                # Possible %b[name] or %bN (byte sub-register form).
+                position += 1
+                if position < length and text[position] == "[":
+                    # %b[name] form
+                    close_bracket = text.find("]", position + 1)
+                    if close_bracket == -1:
+                        result_parts.append("%b[")
+                        position += 1
+                    else:
+                        operand_name = text[position + 1 : close_bracket]
+                        position = close_bracket + 1
+                        operand_index = name_to_index.get(operand_name)
+                        if operand_index is not None and operand_index < len(operand_byte_locations):
+                            result_parts.append(operand_byte_locations[operand_index])
+                        else:
+                            result_parts.append(f"%b[{operand_name}]")
+                elif position < length and text[position].isdigit():
+                    # %bN form
+                    operand_index = int(text[position])
+                    position += 1
+                    if operand_index < len(operand_byte_locations):
+                        result_parts.append(operand_byte_locations[operand_index])
+                    else:
+                        result_parts.append(f"%b{operand_index}")
+                else:
+                    result_parts.append("%b")
+            elif next_character == "[":
+                # %[name] form
+                close_bracket = text.find("]", position + 1)
+                if close_bracket == -1:
+                    result_parts.append("%[")
+                    position += 1
+                else:
+                    operand_name = text[position + 1 : close_bracket]
+                    position = close_bracket + 1
+                    operand_index = name_to_index.get(operand_name)
+                    if operand_index is not None and operand_index < len(operand_locations):
+                        result_parts.append(operand_locations[operand_index])
+                    else:
+                        result_parts.append(f"%[{operand_name}]")
+            elif next_character.isdigit():
+                # %N positional form
+                operand_index = int(next_character)
+                position += 1
+                if operand_index < len(operand_locations):
+                    result_parts.append(operand_locations[operand_index])
+                else:
+                    result_parts.append(f"%{operand_index}")
+            else:
+                # Not a recognized escape — emit literally.
+                result_parts.append("%")
+                # Do not advance past next_character; it will be processed next iteration.
+        return "".join(result_parts)
 
     def _allocate_function_parameters(
         self,
@@ -508,46 +718,6 @@ class EmissionMixin:
             ):
                 function.regparm_count = min(3, len(function.params))
 
-    @staticmethod
-    def _body_has_member_index_access(body: list[ir.Instruction]) -> bool:
-        """Return True if any IR instruction resolves a member-index ``base.field[i]``.
-
-        A member-index is a :class:`SubscriptPlace` whose ``base`` is a
-        :class:`MemberPlace`; :meth:`_resolve_member_index` lowers it by
-        loading the struct base into BX inline.  Such accesses arrive
-        wrapped in :class:`ir.Access` / :class:`ir.Block` (the complex-
-        lvalue escape hatch) or inside Switch arms; this walks those AST
-        payloads to decide whether BX must stay out of the temp pool.
-        """
-
-        def ast_has(node: object) -> bool:
-            if isinstance(node, SubscriptPlace) and isinstance(node.base, MemberPlace):
-                return True
-            if not isinstance(node, Node):
-                return False
-            for node_field in fields(node):
-                value = getattr(node, node_field.name)
-                if isinstance(value, Node) and ast_has(value):
-                    return True
-                if isinstance(value, list) and any(isinstance(item, Node) and ast_has(item) for item in value):
-                    return True
-            return False
-
-        def walk(instructions: list[ir.Instruction]) -> bool:
-            for instruction in instructions:
-                match instruction:
-                    case ir.Access(node=node) | ir.Block(node=node):
-                        if ast_has(node):
-                            return True
-                    case ir.Switch(cases=cases):
-                        if any(walk(case.body) for case in cases):
-                            return True
-                    case _:
-                        pass
-            return False
-
-        return walk(body)
-
     def _classify_switch_arms(self, statement: Switch, /, *, cases_override: list | None = None) -> tuple:
         """Split a switch's cases into ``(default_case, case_arms)`` and check enum exhaustiveness.
 
@@ -648,76 +818,6 @@ class EmissionMixin:
                 result.add(temp)
         return result
 
-    @staticmethod
-    def _collect_ir_escape_hatch_temps(body: list[ir.Instruction]) -> set[str]:
-        """Return ``_ir_*`` temps that are destinations of a Block/Access escape hatch.
-
-        These lower through the AST path rather than pure IR, so
-        :meth:`_allocate_ir_temps` excludes them and leaves them in memory.
-        Mirrors the Switch recursion in :meth:`_collect_ir_temps` so temps
-        inside switch arms are caught too.
-        """
-        result: set[str] = set()
-
-        def walk(instructions: list[ir.Instruction]) -> None:
-            for instruction in instructions:
-                match instruction:
-                    case ir.Block(node=Assign(name=name)) | ir.Access(node=Assign(name=name)):
-                        if name.startswith("_ir_"):
-                            result.add(name)
-                    case ir.Switch(cases=cases):
-                        for case in cases:
-                            walk(case.body)
-                    case _:
-                        pass
-
-        walk(body)
-        return result
-
-    @staticmethod
-    def _collect_ir_index_operand_temps(body: list[ir.Instruction]) -> set[str]:
-        """Return ``_ir_*`` temps used as the ``index`` operand of Index / IndexAssign.
-
-        These feed the ``[base + index*scale]`` effective address that the
-        SIB peephole folds into a single ``inc dword [esi + i*4]`` /
-        load / store; pinning them to a register defeats the fusion.
-        :meth:`_allocate_ir_temps` excludes them.  Recurses into Switch
-        arms to match the other temp collectors.
-        """
-        result: set[str] = set()
-
-        def walk(instructions: list[ir.Instruction]) -> None:
-            for instruction in instructions:
-                match instruction:
-                    case ir.Index(index=index) | ir.IndexAssign(index=index):
-                        if isinstance(index, str) and index.startswith("_ir_"):
-                            result.add(index)
-                    case ir.Switch(cases=cases):
-                        for case in cases:
-                            walk(case.body)
-                    case _:
-                        pass
-
-        walk(body)
-        return result
-
-    @staticmethod
-    def _count_ir_temp_uses(*, body: list[ir.Instruction], temps: frozenset[str]) -> dict[str, int]:
-        """Return how many times each temp in *temps* is read across *body*.
-
-        Uses the same exhaustive read model as the interference builder
-        (:func:`cc.regalloc.instruction_uses`), which already recurses into
-        Switch arms and opaque AST-wrapping instructions, so the flat
-        top-level walk here covers every read.  The count feeds the spill
-        benefit: a temp read more often wants a register more.
-        """
-        counts: dict[str, int] = dict.fromkeys(temps, 0)
-        for instruction in body:
-            for name in regalloc.instruction_uses(instruction=instruction):
-                if name in temps:
-                    counts[name] += 1
-        return counts
-
     def _emit_function_pointer_call(
         self,
         *,
@@ -784,9 +884,9 @@ class EmissionMixin:
         function_line: int,
         is_fastcall: bool,
         parameters: list[Param],
+        register_convention: bool,
         regparm_count: int,
         regparm_registers: tuple[str, ...],
-        register_convention: bool,
     ) -> None:
         """Emit the per-function prologue (push bp / mov bp,esp / sub sp,N).
 
@@ -1293,24 +1393,6 @@ class EmissionMixin:
             self.ax_clear()
             emit_body(default_case.body)
 
-    @staticmethod
-    def _fold_horner_terms(*, displacement: int, indices: tuple[ir.Value, ...], strides: list[int]) -> tuple[int, tuple[AddressTerm, ...]]:
-        """Fold constant indices into *displacement*; return ``(displacement, dynamic terms)``.
-
-        Mirrors the constant fold inside the legacy Horner walk
-        (``_emit_horner_index_offsets``): an ``int`` index contributes
-        ``index * stride`` to the static displacement, so the plan carries
-        only the dynamic indices as :class:`AddressTerm` entries (in the
-        same outermost-dimension-first order the walk consumes them).
-        """
-        terms: list[AddressTerm] = []
-        for index_value, stride in zip(indices, strides, strict=True):
-            if isinstance(index_value, int):
-                displacement += index_value * stride
-            else:
-                terms.append(AddressTerm(index_value=index_value, scale=stride))
-        return displacement, tuple(terms)
-
     def _generate_assign_expr(self, expression: AssignExpr, /) -> None:
         """Lower an :class:'AssignExpr' (parenthesised assignment as an rvalue).
 
@@ -1435,7 +1517,7 @@ class EmissionMixin:
                 # is 2 bytes vs. 3 for ``xor ax, 0xFFFF``.
                 self.emit(f"        not {self.target.acc}")
             else:
-                mnemonic = {"+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor"}[operator]
+                mnemonic = {"&": "and", "+": "add", "-": "sub", "^": "xor", "|": "or"}[operator]
                 self.emit(f"        {mnemonic} {self.target.acc}, {right.value}")
             self.ax_clear()
             return
@@ -1554,7 +1636,7 @@ class EmissionMixin:
             source = self.pinned_register[right.name]
             if source != self.target.count_register or isinstance(left, (Int, Var, String)):
                 self.generate_expression(left)
-                mnemonic = {"+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor"}[operator]
+                mnemonic = {"&": "and", "+": "add", "-": "sub", "^": "xor", "|": "or"}[operator]
                 if len(source) < len(self.target.acc):
                     # 16-bit pinned reg into 32-bit acc: push into count_register first.
                     self.emit(f"        movzx {self.target.count_register}, {source}")
@@ -2152,17 +2234,6 @@ class EmissionMixin:
             return False  # stack arg — can't clean up after a jmp
         return True
 
-    #: Canonical (16-bit-name) clobber sets for a recognized rep-string
-    #: loop, keyed by operation.  Mirrors ``BUILTIN_CLOBBERS["memcpy"]`` /
-    #: ``["memset"]`` exactly — a ``rep movs`` touches DI/SI/CX/AX (AX is
-    #: cleared by the trailing ``ax_clear``), a ``rep stos`` touches
-    #: DI/CX/AX.  ``_pinned_registers_to_save`` normalises both sides
-    #: through ``target.low_word`` so these match E-register pins too.
-    REP_STRING_CLOBBERS: ClassVar[dict[str, frozenset[str]]] = {
-        "copy": frozenset({"ax", "cx", "di", "si"}),
-        "fill": frozenset({"ax", "cx", "di"}),
-    }
-
     def _lower_ir_instruction(self, instruction: ir.Instruction) -> None:
         match instruction:
             case ir.BinaryOperation(destination=destination, operation=operation, left=left, right=right):
@@ -2429,7 +2500,7 @@ class EmissionMixin:
                         message = f"IncrementDecrement consumed a planned address {address!r} its native gate rejected"
                         raise CompileError(message)
                     shape = self._ir_address_with_index(address_op)
-                    self.generate_statement(PlaceIncrementDecrement(line=shape.line, delta=delta, is_postfix=is_postfix, place=shape))
+                    self.generate_statement(PlaceIncrementDecrement(delta=delta, is_postfix=is_postfix, line=shape.line, place=shape))
             case ir.IndirectCall(address=address):
                 plan = self._ir_address_plans.get(address)
                 if plan is not None and plan.call_slot:
@@ -2451,7 +2522,7 @@ class EmissionMixin:
                         message = f"IndirectCall consumed a planned address {address!r} its native gate rejected"
                         raise CompileError(message)
                     shape = self._ir_address_with_index(address_op)
-                    self.generate_statement(PlaceCall(line=shape.line, args=[], place=shape))
+                    self.generate_statement(PlaceCall(args=[], line=shape.line, place=shape))
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
 
@@ -2539,7 +2610,7 @@ class EmissionMixin:
             # planner pre-folds constant indices into the displacement, so
             # every term here is dynamic; ``_accumulate_subscript``'s own
             # Int fold would be a harmless no-op regardless.
-            self._accumulate_subscript(operand, index=self._ir_value_to_ast(term.index_value), element_size=term.scale)
+            self._accumulate_subscript(operand, element_size=term.scale, index=self._ir_value_to_ast(term.index_value))
         return operand
 
     def _materialize_horner_plan(self, plan: AddressPlan, /) -> MemoryOperand:
@@ -2579,29 +2650,6 @@ class EmissionMixin:
             strides=strides,
         )
 
-    @staticmethod
-    def _merge_pinned_save_filters(
-        *,
-        locals_initialized: dict[int, frozenset[str]],
-        temp_live: dict[int, frozenset[str]],
-    ) -> dict[int, frozenset[str]]:
-        """Union the locals-initialized and temp-live per-call save filters.
-
-        Each map is keyed by ``id(call-site)``; a value is the set of
-        pinned registers that must be saved across that site (initialized
-        locals from one analysis, live temp registers from the other).
-        The union per site is exactly the registers
-        :meth:`_pinned_registers_to_save` should push / pop.  Sites
-        absent from both maps stay absent (the caller treats absence as
-        ``None`` → save every clobbered pin, the conservative default).
-        """
-        if not locals_initialized and not temp_live:
-            return {}
-        merged: dict[int, frozenset[str]] = {}
-        for site in locals_initialized.keys() | temp_live.keys():
-            merged[site] = locals_initialized.get(site, frozenset()) | temp_live.get(site, frozenset())
-        return merged
-
     def _node_contains_var(self, node: Node, name: str, /) -> bool:
         """Return True if node or any descendant is Var(name).
 
@@ -2623,23 +2671,6 @@ class EmissionMixin:
                     if isinstance(item, Node) and self._node_contains_var(item, name):
                         return True
         return False
-
-    @staticmethod
-    def _normalise_ternary_condition(condition: Node) -> Node:
-        """Wrap a ternary condition as ``expr != 0`` unless it's already a comparison.
-
-        Mirrors :meth:`cc.parser.Parser.parse_condition`: ``&&`` / ``||``
-        and explicit comparisons (``==`` / ``<`` / etc.) are passed
-        through; everything else (a bare variable, an arithmetic
-        expression, a call) is normalised to ``expr != 0`` so the
-        downstream :meth:`emit_condition_false_jump` always sees a
-        comparison-shaped node.
-        """
-        if isinstance(condition, (LogicalAnd, LogicalOr)):
-            return condition
-        if isinstance(condition, BinaryOperation) and condition.operation in COMPARISON_OPERATIONS:
-            return condition
-        return BinaryOperation(left=condition, line=condition.line, operation="!=", right=Int(line=condition.line, value=0))
 
     def _param_slot_is_read(self, body: list[Node], param_name: str, /) -> bool:
         """Return True if the local slot for param_name is read anywhere in body.
@@ -3179,11 +3210,6 @@ class EmissionMixin:
             return None  # array-of-pointers: legacy deref-rooted path
         return self._plan_mixed_subscript_chain(address)
 
-    @staticmethod
-    def _rep_width_suffix(element_size: int, /) -> str:
-        """Map element size 1/2/4 to the string-op mnemonic suffix."""
-        return {1: "b", 2: "w", 4: "d"}[element_size]
-
     def _reseat_nested_subscript_indices(self, shape: Node, indices: tuple[ir.Value, ...]) -> Node:
         """Re-seat an N-tuple of pre-lowered indices into a nested ``name[i][j]...`` shape.
 
@@ -3226,180 +3252,6 @@ class EmissionMixin:
             else:
                 rebuilt = replace(segment, base=rebuilt)
         return rebuilt
-
-    @staticmethod
-    def _substitute_extended_asm_template(
-        text: str,
-        /,
-        *,
-        name_to_index: dict[str, int],
-        operand_byte_locations: list[str],
-        operand_locations: list[str],
-    ) -> str:
-        """Substitute ``%%``/``%N``/``%[name]``/``%bN``/``%b[name]`` in a template string.
-
-        Pulled out of :meth:`generate_extended_asm` (was a 74-line nested
-        closure) so the operand-resolution algorithm can be read and
-        modified independently of the surrounding parsing / register-
-        spill orchestration.
-
-        Args:
-            text: the template string from the ``asm("...")`` first
-                operand.
-            name_to_index: maps a symbolic operand name (the
-                ``[symname]`` form in the operand list) to its index
-                in ``operand_locations`` / ``operand_byte_locations``.
-            operand_locations: full-width register/memory operand for
-                each declared output / input (outputs first, then
-                inputs).
-            operand_byte_locations: byte-register alias for the same
-                operands; used for ``%b...`` substitutions.
-
-        Recognised forms:
-            ``%%``       → literal ``%``
-            ``%N``       → positional full-width substitution
-            ``%[name]``  → named full-width substitution
-            ``%bN``      → positional byte-alias substitution
-            ``%b[name]`` → named byte-alias substitution
-        Any unrecognised ``%`` sequence is passed through verbatim so
-        the underlying assembler can flag it.
-
-        """
-        result_parts: list[str] = []
-        position = 0
-        length = len(text)
-        while position < length:
-            character = text[position]
-            if character != "%":
-                result_parts.append(character)
-                position += 1
-                continue
-            # We are at a '%' — look ahead.
-            position += 1
-            if position >= length:
-                result_parts.append("%")
-                break
-            next_character = text[position]
-            if next_character == "%":
-                # %% -> literal %
-                result_parts.append("%")
-                position += 1
-            elif next_character == "b":
-                # Possible %b[name] or %bN (byte sub-register form).
-                position += 1
-                if position < length and text[position] == "[":
-                    # %b[name] form
-                    close_bracket = text.find("]", position + 1)
-                    if close_bracket == -1:
-                        result_parts.append("%b[")
-                        position += 1
-                    else:
-                        operand_name = text[position + 1 : close_bracket]
-                        position = close_bracket + 1
-                        operand_index = name_to_index.get(operand_name)
-                        if operand_index is not None and operand_index < len(operand_byte_locations):
-                            result_parts.append(operand_byte_locations[operand_index])
-                        else:
-                            result_parts.append(f"%b[{operand_name}]")
-                elif position < length and text[position].isdigit():
-                    # %bN form
-                    operand_index = int(text[position])
-                    position += 1
-                    if operand_index < len(operand_byte_locations):
-                        result_parts.append(operand_byte_locations[operand_index])
-                    else:
-                        result_parts.append(f"%b{operand_index}")
-                else:
-                    result_parts.append("%b")
-            elif next_character == "[":
-                # %[name] form
-                close_bracket = text.find("]", position + 1)
-                if close_bracket == -1:
-                    result_parts.append("%[")
-                    position += 1
-                else:
-                    operand_name = text[position + 1 : close_bracket]
-                    position = close_bracket + 1
-                    operand_index = name_to_index.get(operand_name)
-                    if operand_index is not None and operand_index < len(operand_locations):
-                        result_parts.append(operand_locations[operand_index])
-                    else:
-                        result_parts.append(f"%[{operand_name}]")
-            elif next_character.isdigit():
-                # %N positional form
-                operand_index = int(next_character)
-                position += 1
-                if operand_index < len(operand_locations):
-                    result_parts.append(operand_locations[operand_index])
-                else:
-                    result_parts.append(f"%{operand_index}")
-            else:
-                # Not a recognized escape — emit literally.
-                result_parts.append("%")
-                # Do not advance past next_character; it will be processed next iteration.
-        return "".join(result_parts)
-
-    def _try_emit_conditional_via_cond_value(self, *, condition: Node, expression: Conditional) -> bool:
-        """Elide the then-branch when it duplicates the comparison's left operand.
-
-        Returns True when the ternary matched the pure-then-equals-cond.left
-        shape and the lowering was emitted; the caller (``_generate_conditional``)
-        then skips its default cond-jump / then / jmp / else / end layout.
-
-        Recognised shape (verbatim output of ``MAX(a, b)`` / ``MIN(a, b)``
-        after function-like macro expansion):
-
-            Conditional(
-                condition=BinaryOperation(left=X, op=COMP, right=Y),
-                then_expr=X,                 # structurally equal to cond.left
-                else_expr=anything,
-            )
-
-        :meth:`emit_condition` ends with ``cmp ax, <right>`` and leaves
-        AX = X.  A *true*-jump to the merge label therefore skips the
-        else branch with no re-evaluation of X — which is exactly the
-        savings the textual macro pattern needs (``MIN(a-b, K)`` would
-        otherwise emit ``a-b`` twice).
-
-        Refused for impure ``then_expr`` (calls, address-of, etc.) — the
-        textual macro semantics require evaluating the chosen branch in
-        full, side effects included.  Refused too for ``&&`` / ``||``
-        condition shapes (those go through the general
-        :meth:`emit_condition_false_jump` short-circuit machinery, which
-        doesn't leave a single representative value in AX), for unsigned
-        long destinations (32-bit accumulator handling differs), and for
-        byte-byte comparisons (AL holds the left byte but AH is stale,
-        so falling through with AX as the result needs a zero-extend
-        the standard path already issues separately).
-        """
-        if not isinstance(condition, BinaryOperation) or condition.operation not in COMPARISON_OPERATIONS:
-            return False
-        if expression.then_expr != condition.left:
-            return False
-        if not self._is_pure_expression(expression.then_expr):
-            return False
-        if self._is_byte_index(condition.left) and self._is_byte_index(condition.right):
-            return False
-        operator, unsigned = self.emit_condition(condition=condition, context="ast")
-        table = JUMP_WHEN_TRUE_UNSIGNED if unsigned else JUMP_WHEN_TRUE
-        # ``emit_condition`` may have returned the synthetic "carry" /
-        # "not_carry" operator for a ``carry_return`` callee — there's
-        # no entry in JUMP_WHEN_TRUE for those, and the cmp path that
-        # this fast track depends on wasn't taken.  Bail.
-        if operator not in table:
-            return False
-        end_label = f".cond_end_{self.new_label()}"
-        self.emit(f"        {table[operator]} {end_label}")
-        # Cond is false here — load else_expr into AX.  Clear ax_local
-        # first so a Var(then_expr.name) shape inside else_expr doesn't
-        # short-circuit on stale tracking.
-        self.ax_clear()
-        self.generate_expression(expression.else_expr)
-        self.emit(f"{end_label}:")
-        # Merge: AX holds whichever branch's value ran, but the
-        # cross-path variable tracking is no longer guaranteed.
-        self.ax_clear()
-        return True
 
     def _try_emit_conditional_via_cmov(self, *, condition: Node, expression: Conditional) -> bool:
         """Lower a ternary to ``cmov`` when at least one branch is a pinned register.
@@ -3483,6 +3335,68 @@ class EmissionMixin:
             if operator not in CMOV_WHEN_FALSE:
                 return False
             self.emit(f"        {CMOV_WHEN_FALSE[operator]} {acc}, {else_reg}")
+        self.ax_clear()
+        return True
+
+    def _try_emit_conditional_via_cond_value(self, *, condition: Node, expression: Conditional) -> bool:
+        """Elide the then-branch when it duplicates the comparison's left operand.
+
+        Returns True when the ternary matched the pure-then-equals-cond.left
+        shape and the lowering was emitted; the caller (``_generate_conditional``)
+        then skips its default cond-jump / then / jmp / else / end layout.
+
+        Recognised shape (verbatim output of ``MAX(a, b)`` / ``MIN(a, b)``
+        after function-like macro expansion):
+
+            Conditional(
+                condition=BinaryOperation(left=X, op=COMP, right=Y),
+                then_expr=X,                 # structurally equal to cond.left
+                else_expr=anything,
+            )
+
+        :meth:`emit_condition` ends with ``cmp ax, <right>`` and leaves
+        AX = X.  A *true*-jump to the merge label therefore skips the
+        else branch with no re-evaluation of X — which is exactly the
+        savings the textual macro pattern needs (``MIN(a-b, K)`` would
+        otherwise emit ``a-b`` twice).
+
+        Refused for impure ``then_expr`` (calls, address-of, etc.) — the
+        textual macro semantics require evaluating the chosen branch in
+        full, side effects included.  Refused too for ``&&`` / ``||``
+        condition shapes (those go through the general
+        :meth:`emit_condition_false_jump` short-circuit machinery, which
+        doesn't leave a single representative value in AX), for unsigned
+        long destinations (32-bit accumulator handling differs), and for
+        byte-byte comparisons (AL holds the left byte but AH is stale,
+        so falling through with AX as the result needs a zero-extend
+        the standard path already issues separately).
+        """
+        if not isinstance(condition, BinaryOperation) or condition.operation not in COMPARISON_OPERATIONS:
+            return False
+        if expression.then_expr != condition.left:
+            return False
+        if not self._is_pure_expression(expression.then_expr):
+            return False
+        if self._is_byte_index(condition.left) and self._is_byte_index(condition.right):
+            return False
+        operator, unsigned = self.emit_condition(condition=condition, context="ast")
+        table = JUMP_WHEN_TRUE_UNSIGNED if unsigned else JUMP_WHEN_TRUE
+        # ``emit_condition`` may have returned the synthetic "carry" /
+        # "not_carry" operator for a ``carry_return`` callee — there's
+        # no entry in JUMP_WHEN_TRUE for those, and the cmp path that
+        # this fast track depends on wasn't taken.  Bail.
+        if operator not in table:
+            return False
+        end_label = f".cond_end_{self.new_label()}"
+        self.emit(f"        {table[operator]} {end_label}")
+        # Cond is false here — load else_expr into AX.  Clear ax_local
+        # first so a Var(then_expr.name) shape inside else_expr doesn't
+        # short-circuit on stale tracking.
+        self.ax_clear()
+        self.generate_expression(expression.else_expr)
+        self.emit(f"{end_label}:")
+        # Merge: AX holds whichever branch's value ran, but the
+        # cross-path variable tracking is no longer guaranteed.
         self.ax_clear()
         return True
 
@@ -4736,7 +4650,7 @@ class EmissionMixin:
             )
         else:
             self.auto_pin_candidates = self._select_auto_pin_candidates(
-                body=body, parameters=param_candidates, apply_liveness_elision=name != "main"
+                apply_liveness_elision=name != "main", body=body, parameters=param_candidates
             )
 
         # Reserve local stack slots for regparm params before scan_locals
@@ -4858,9 +4772,9 @@ class EmissionMixin:
                 function_line=function.line,
                 is_fastcall=is_fastcall,
                 parameters=parameters,
+                register_convention=register_convention,
                 regparm_count=regparm_count,
                 regparm_registers=regparm_registers,
-                register_convention=register_convention,
             )
 
         # IR path: register string literals discovered during IR building.
@@ -5126,7 +5040,7 @@ class EmissionMixin:
                 self._si_scratch_guard_end(guarded=guarded)
 
     def generate_indexed_call(
-        self, *, array_name: str, arguments: list[Node], index: Node, line: int, discard_return: bool = False
+        self, *, arguments: list[Node], array_name: str, discard_return: bool = False, index: Node, line: int
     ) -> None:
         """Generate assembly for a call through a function-pointer array element.
 
@@ -5522,7 +5436,7 @@ class EmissionMixin:
                 else:
                     directive = self.target.word_size
                 base = self._local_address(statement.name)
-                flat = self._flatten_array_init(statement.init, name=statement.name, total=total_elements, line=statement.line)
+                flat = self._flatten_array_init(statement.init, line=statement.line, name=statement.name, total=total_elements)
                 for index in range(total_elements):
                     offset = index * element_size
                     address = f"{base}+{offset}" if offset else base
@@ -5929,3 +5843,89 @@ class EmissionMixin:
         self._ir_address_plans: dict[str, AddressPlan] = {}
         for instruction in body:
             self._lower_ir_instruction(instruction)
+
+
+def _att_to_intel(line: str) -> str:
+    """Convert one AT&T-syntax asm line to Intel syntax (NASM).
+
+    Only fires when the line contains AT&T markers (``%reg`` or
+    ``$imm``); Intel-syntax lines pass through unchanged.
+    """
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith(";"):
+        return line
+    if not _ATT_REGISTER.search(stripped) and not _ATT_IMMEDIATE.search(stripped):
+        return line
+    indent = line[: len(line) - len(stripped)]
+    parts = stripped.split(None, 1)
+    mnemonic = parts[0].rstrip(",")
+    operand_text = parts[1] if len(parts) > 1 else ""
+    operand_text = _ATT_REGISTER.sub(r"\1", operand_text)
+    operand_text = _ATT_IMMEDIATE.sub(r"\1", operand_text)
+    if not operand_text:
+        return f"{indent}{mnemonic}"
+    operands = [operand.strip() for operand in operand_text.split(",")]
+    if len(operands) == 2 and mnemonic not in _SINGLE_OPERAND_MNEMONICS:
+        operands.reverse()
+    return f"{indent}{mnemonic} {', '.join(operands)}"
+
+
+def _elide_dead_frames(*, lines: list[str], target: CodegenTarget) -> list[str]:
+    """Drop ``sub <sp>, N`` + ``mov <sp>, <bp>`` lines in functions whose body never touches the frame.
+
+    Functions allocate a stack frame for every declared local even
+    when later peephole passes fold every use to an immediate — the
+    common case for one-shot bitfield-register structs:
+
+        struct foo s = {.bit = 1};
+        kernel_outb(port, *(u8 *)&s);
+
+    The const-fold + dead-store peepholes collapse both the init and
+    the read to ``mov al, <const>``, leaving the prologue's
+    ``sub esp, N`` and the matching ``mov esp, ebp`` epilogue paying
+    for storage that's never referenced.  This sweep walks each
+    emitted function's line range and, when no ``[<bp>+N]`` /
+    ``[<bp>-N]`` reference survived peepholing, drops those two
+    instruction shapes (and any duplicates from multiple-return
+    paths).  ``push <bp>`` / ``pop <bp>`` stay — leaving them keeps
+    the caller's frame chain undisturbed at zero extra cost relative
+    to a hand-written asm equivalent.
+    """
+    base = target.base_register
+    stack = target.stack_register
+    bracket_base = f"[{base}"
+    sub_prefix = f"        sub {stack}, "
+    mov_unwind = f"        mov {stack}, {base}"
+    result: list[str] = []
+    # Buffer each function's body so we can decide whether to drop the
+    # frame-management lines before flushing.  Anything outside a
+    # function (preamble, file-scope storage, trailing %include) passes
+    # through unchanged.
+    pending: list[str] | None = None
+    pending_has_frame_ref = False
+
+    def flush(*, buffer: list[str] | None, has_frame_ref: bool) -> None:
+        if buffer is None:
+            return
+        if has_frame_ref:
+            result.extend(buffer)
+            return
+        for line in buffer:
+            if line.startswith(sub_prefix) or line == mov_unwind:
+                continue
+            result.append(line)
+
+    for line in lines:
+        if _FUNCTION_LABEL_PATTERN.match(line):
+            flush(buffer=pending, has_frame_ref=pending_has_frame_ref)
+            pending = [line]
+            pending_has_frame_ref = False
+            continue
+        if pending is None:
+            result.append(line)
+            continue
+        if bracket_base in line:
+            pending_has_frame_ref = True
+        pending.append(line)
+    flush(buffer=pending, has_frame_ref=pending_has_frame_ref)
+    return result

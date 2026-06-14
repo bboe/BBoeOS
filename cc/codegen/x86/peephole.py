@@ -35,6 +35,57 @@ class Peepholer:
     returned list as the new emit buffer.
     """
 
+    @staticmethod
+    def _extract_local_label(line: str, /) -> str | None:
+        """Return the _l_ label from a store or declaration, or None.
+
+        Stops at the first non-identifier byte so a byte-offset store
+        like ``mov [_l_sum+1], al`` still resolves to ``_l_sum`` — the
+        same way peephole_dead_stores resolves reads.
+        """
+        # Store: mov [_l_NAME], ... or mov word [_l_NAME], ...
+        if line.startswith("mov") and "[_l_" in line and "], " in line:
+            start = line.index("[_l_") + 1
+            end = start
+            while end < len(line) and (line[end].isalnum() or line[end] == "_"):
+                end += 1
+            return line[start:end]
+        # Declaration: _l_NAME: dw 0
+        if line.startswith("_l_") and line.endswith(": dw 0"):
+            return line[: line.index(":")]
+        return None
+
+    @staticmethod
+    def _match_acc_op(line: str, /, *, register: str) -> tuple[str, str] | None:
+        """Match ``<op> <register>, <operand>`` for arithmetic / bitwise ops.
+
+        ``op`` is one of add / sub / and / or / xor — the five binary
+        operations every :meth:`peephole_memory_arithmetic*` pass scans
+        for between a load and a store.  Returns ``(op, operand)`` on a
+        hit, ``None`` otherwise.
+        """
+        for operation in ("add", "sub", "and", "or", "xor"):
+            prefix = f"{operation} {register}, "
+            if line.startswith(prefix):
+                return operation, line[len(prefix) :]
+        return None
+
+    @staticmethod
+    def _parse_byte_load(line: str, /) -> str | None:
+        """Return the ``[mem]`` source of ``mov al, [mem]``, or ``None``.
+
+        Shared by both passes of :meth:`peephole_memory_arithmetic_byte`,
+        which both scan for the byte-global compound-assign prologue
+        (``mov al, [_g_X] / xor ah, ah / ...``).
+        """
+        prefix = "mov al, "
+        if not line.startswith(prefix):
+            return None
+        source = line[len(prefix) :]
+        if not (source.startswith("[") and source.endswith("]")):
+            return None
+        return source
+
     def __init__(self, *, lines: list[str], target: CodegenTarget) -> None:
         """Capture the emit buffer and target descriptor.
 
@@ -136,26 +187,6 @@ class Peepholer:
             result.append(line)
         self.lines = result
 
-    @staticmethod
-    def _extract_local_label(line: str, /) -> str | None:
-        """Return the _l_ label from a store or declaration, or None.
-
-        Stops at the first non-identifier byte so a byte-offset store
-        like ``mov [_l_sum+1], al`` still resolves to ``_l_sum`` — the
-        same way peephole_dead_stores resolves reads.
-        """
-        # Store: mov [_l_NAME], ... or mov word [_l_NAME], ...
-        if line.startswith("mov") and "[_l_" in line and "], " in line:
-            start = line.index("[_l_") + 1
-            end = start
-            while end < len(line) and (line[end].isalnum() or line[end] == "_"):
-                end += 1
-            return line[start:end]
-        # Declaration: _l_NAME: dw 0
-        if line.startswith("_l_") and line.endswith(": dw 0"):
-            return line[: line.index(":")]
-        return None
-
     def _iter_function_chunks(self) -> list[list[str]]:
         """Split ``self.lines`` into per-function sub-lists.
 
@@ -187,6 +218,24 @@ class Peepholer:
                 chunks.append([])
             chunks[-1].append(line)
         return chunks
+
+    def _parse_load_acc(self, line: str, /) -> tuple[str, bool] | None:
+        """Match ``mov acc, <source>`` where source is memory or a 16-bit GP register.
+
+        Returns ``(source, is_memory)`` on a match, ``None`` otherwise.
+        Shared by the two passes of :meth:`peephole_memory_arithmetic`
+        (and any future pass that wants to recognize the same load
+        prefix).
+        """
+        mov_acc_prefix = f"mov {self.target.acc}, "
+        if not line.startswith(mov_acc_prefix):
+            return None
+        source = line[len(mov_acc_prefix) :]
+        is_memory = source.startswith("[") and source.endswith("]")
+        is_register = source in self.target.non_acc_registers
+        if not (is_memory or is_register):
+            return None
+        return source, is_memory
 
     def _reads_acc(self, line: str, /) -> bool:
         """Return True if *line* reads AX / AL / AH (any width).
@@ -1022,55 +1071,6 @@ class Peepholer:
             del self.lines[i : i + 2]
             i = max(1, i - 1)
 
-    @staticmethod
-    def _match_acc_op(line: str, /, *, register: str) -> tuple[str, str] | None:
-        """Match ``<op> <register>, <operand>`` for arithmetic / bitwise ops.
-
-        ``op`` is one of add / sub / and / or / xor — the five binary
-        operations every :meth:`peephole_memory_arithmetic*` pass scans
-        for between a load and a store.  Returns ``(op, operand)`` on a
-        hit, ``None`` otherwise.
-        """
-        for operation in ("add", "sub", "and", "or", "xor"):
-            prefix = f"{operation} {register}, "
-            if line.startswith(prefix):
-                return operation, line[len(prefix) :]
-        return None
-
-    @staticmethod
-    def _parse_byte_load(line: str, /) -> str | None:
-        """Return the ``[mem]`` source of ``mov al, [mem]``, or ``None``.
-
-        Shared by both passes of :meth:`peephole_memory_arithmetic_byte`,
-        which both scan for the byte-global compound-assign prologue
-        (``mov al, [_g_X] / xor ah, ah / ...``).
-        """
-        prefix = "mov al, "
-        if not line.startswith(prefix):
-            return None
-        source = line[len(prefix) :]
-        if not (source.startswith("[") and source.endswith("]")):
-            return None
-        return source
-
-    def _parse_load_acc(self, line: str, /) -> tuple[str, bool] | None:
-        """Match ``mov acc, <source>`` where source is memory or a 16-bit GP register.
-
-        Returns ``(source, is_memory)`` on a match, ``None`` otherwise.
-        Shared by the two passes of :meth:`peephole_memory_arithmetic`
-        (and any future pass that wants to recognize the same load
-        prefix).
-        """
-        mov_acc_prefix = f"mov {self.target.acc}, "
-        if not line.startswith(mov_acc_prefix):
-            return None
-        source = line[len(mov_acc_prefix) :]
-        is_memory = source.startswith("[") and source.endswith("]")
-        is_register = source in self.target.non_acc_registers
-        if not (is_memory or is_register):
-            return None
-        return source, is_memory
-
     def peephole_memory_arithmetic(self) -> None:
         """Fuse load/modify/store sequences into direct arithmetic.
 
@@ -1375,7 +1375,7 @@ class Peepholer:
             f"movzx {acc}, ",
         )
 
-        def find_forward(start: int, *, matches: Callable[[str], bool], extra_bails: tuple[Callable[[str], bool], ...] = ()) -> int | None:
+        def find_forward(start: int, *, extra_bails: tuple[Callable[[str], bool], ...] = (), matches: Callable[[str], bool]) -> int | None:
             """Walk forward until ``matches`` fires; return that index, else None.
 
             Common bails for both phases: wider-than-AL read of {acc},
@@ -1425,8 +1425,8 @@ class Peepholer:
             # intervening full clobber means our load is dead — bail.
             out_index = find_forward(
                 i + 1,
-                matches=lambda candidate: candidate == "out dx, al",
                 extra_bails=(is_full_acc_clobber,),
+                matches=lambda candidate: candidate == "out dx, al",
             )
             if out_index is None:
                 continue

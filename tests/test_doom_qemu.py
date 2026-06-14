@@ -96,7 +96,7 @@ def _install_doom_only(*, sectors: str = "2880") -> None:
 def _test_bootstrap_no_wad() -> None:
     """Run doom on an image with no WAD; expect IWAD-not-found path."""
     _install_doom_only()
-    result = run_commands(["doom"], memory="64", command_timeout=30)
+    result = run_commands(["doom"], command_timeout=30, memory="64")
     _assert_markers(expected=BOOTSTRAP_EXPECTED, label="bootstrap", output=result.output.replace("\r", ""))
     print("doom bootstrap (no WAD) pass")
 

@@ -16,9 +16,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-SHELL_LEX_HEADER = REPO_ROOT / "user" / "libbboeos" / "include" / "shell_lex.h"
-
 _HARNESS = r"""
 #include <stdio.h>
 #include <string.h>
@@ -77,6 +74,9 @@ int main(int argc, char **argv) {
     return 0;
 }
 """
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+SHELL_LEX_HEADER = REPO_ROOT / "user" / "libbboeos" / "include" / "shell_lex.h"
 
 
 def _run_lex(line: str) -> list[str]:

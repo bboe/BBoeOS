@@ -7,7 +7,7 @@ from cc.types import ArrayType, PointerType, ScalarType, StructType
 
 def _width(name: str, /) -> int:
     """Test stand-in for the target's scalar/struct/pointer byte widths."""
-    return {"char": 1, "unsigned short": 2, "int": 4, "struct point": 8}[name]
+    return {"char": 1, "int": 4, "struct point": 8, "unsigned short": 2}[name]
 
 
 def test_array_sizeof_is_count_times_element() -> None:

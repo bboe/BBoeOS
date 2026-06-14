@@ -455,14 +455,14 @@ def test_rep_string_is_not_dead_code_eliminated() -> None:
     """RepString is side-effecting: DCE must keep it even with no dest."""
     body = [
         ir.RepString(
-            operation="fill",
-            element_size=1,
-            dest="buffer",
-            source=None,
             count="n",
-            fill_value=0,
             counter_signed=False,
+            dest="buffer",
+            element_size=1,
+            fill_value=0,
             final_iv=None,
+            operation="fill",
+            source=None,
         ),
         ir.Return(value=None),
     ]
@@ -473,14 +473,14 @@ def test_rep_string_is_not_dead_code_eliminated() -> None:
 def test_rep_string_value_operands_keep_count_live() -> None:
     """``RepString`` exposes ``count`` (and ``fill_value`` when set) as value operands."""
     node = ir.RepString(
-        operation="copy",
-        element_size=4,
-        dest="d",
-        source="s",
         count="n",
-        fill_value=None,
         counter_signed=True,
+        dest="d",
+        element_size=4,
+        fill_value=None,
         final_iv=None,
+        operation="copy",
+        source="s",
     )
     assert "n" in _instruction_value_operands(node)
 

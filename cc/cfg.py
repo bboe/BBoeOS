@@ -46,6 +46,55 @@ _SYNTHETIC_LABEL_PREFIX = "<"
 _TERMINATOR_TYPES = (ir.BranchFalse, ir.CarryBranch, ir.Jump, ir.Return, ir.TailCall)
 
 
+@dataclass(eq=False, kw_only=True, slots=True)
+class BasicBlock:
+    """One maximal straight-line block in a function's CFG.
+
+    ``label`` is the IR :class:`cc.ir.Label` name that identifies this
+    block's entry point, or a synthetic ``<entry>`` / ``<fallthrough_N>``
+    name when no IR label exists (function entry or the block immediately
+    following an unlabeled terminator — the latter only happens for
+    dead code the IR optimizer hasn't pruned yet).
+
+    ``instructions`` contains every non-terminator, non-leading-Label
+    instruction in source order, including :class:`cc.ir.LoopBoundary`
+    metadata.  ``terminator`` is the trailing control-transfer
+    instruction (``None`` only for the last block when the function
+    ends without an explicit ``Return`` — control-flow analysis treats
+    it as if it falls through to nothing).
+
+    ``successors`` / ``predecessors`` are mutable lists populated by
+    :func:`build_cfg`.  They reference other :class:`BasicBlock`
+    instances by identity (not label), so passes that rewire edges in
+    later phases can mutate them without re-resolving labels.
+    """
+
+    instructions: list[ir.Instruction] = field(default_factory=list)
+    label: str
+    predecessors: list[BasicBlock] = field(default_factory=list)
+    successors: list[BasicBlock] = field(default_factory=list)
+    terminator: ir.Instruction | None = None
+
+
+@dataclass(eq=False, kw_only=True, slots=True)
+class ControlFlowGraph:
+    """All :class:`BasicBlock` instances for one IR function, plus the entry block.
+
+    ``blocks`` is in source order (the order they appear in the original
+    flat IR) so that fall-through edges from ``BranchFalse`` /
+    ``CarryBranch`` line up with the next block in the list.  Optimizer
+    passes that reorder blocks should rebuild the CFG rather than try to
+    keep this invariant.
+
+    ``label_to_block`` maps every real IR label and every synthetic BB
+    label to its block, so branch targets resolve in O(1).
+    """
+
+    blocks: list[BasicBlock]
+    entry: BasicBlock
+    label_to_block: dict[str, BasicBlock]
+
+
 def _build_blocks(body: list[ir.Instruction], /, *, bb_starts: list[tuple[int, str]]) -> list[BasicBlock]:
     """Slice *body* into :class:`BasicBlock` instances using *bb_starts* as boundaries."""
     blocks: list[BasicBlock] = []
@@ -190,55 +239,6 @@ def _wire_successors(blocks: list[BasicBlock], /, *, label_to_block: dict[str, B
                 block.successors.append(fall_through)
         elif isinstance(terminator, (ir.Return, ir.TailCall)):
             pass  # No successors — function exits here.
-
-
-@dataclass(eq=False, kw_only=True, slots=True)
-class BasicBlock:
-    """One maximal straight-line block in a function's CFG.
-
-    ``label`` is the IR :class:`cc.ir.Label` name that identifies this
-    block's entry point, or a synthetic ``<entry>`` / ``<fallthrough_N>``
-    name when no IR label exists (function entry or the block immediately
-    following an unlabeled terminator — the latter only happens for
-    dead code the IR optimizer hasn't pruned yet).
-
-    ``instructions`` contains every non-terminator, non-leading-Label
-    instruction in source order, including :class:`cc.ir.LoopBoundary`
-    metadata.  ``terminator`` is the trailing control-transfer
-    instruction (``None`` only for the last block when the function
-    ends without an explicit ``Return`` — control-flow analysis treats
-    it as if it falls through to nothing).
-
-    ``successors`` / ``predecessors`` are mutable lists populated by
-    :func:`build_cfg`.  They reference other :class:`BasicBlock`
-    instances by identity (not label), so passes that rewire edges in
-    later phases can mutate them without re-resolving labels.
-    """
-
-    instructions: list[ir.Instruction] = field(default_factory=list)
-    label: str
-    predecessors: list[BasicBlock] = field(default_factory=list)
-    successors: list[BasicBlock] = field(default_factory=list)
-    terminator: ir.Instruction | None = None
-
-
-@dataclass(eq=False, kw_only=True, slots=True)
-class ControlFlowGraph:
-    """All :class:`BasicBlock` instances for one IR function, plus the entry block.
-
-    ``blocks`` is in source order (the order they appear in the original
-    flat IR) so that fall-through edges from ``BranchFalse`` /
-    ``CarryBranch`` line up with the next block in the list.  Optimizer
-    passes that reorder blocks should rebuild the CFG rather than try to
-    keep this invariant.
-
-    ``label_to_block`` maps every real IR label and every synthetic BB
-    label to its block, so branch targets resolve in O(1).
-    """
-
-    blocks: list[BasicBlock]
-    entry: BasicBlock
-    label_to_block: dict[str, BasicBlock]
 
 
 def build_cfg(body: list[ir.Instruction], /) -> ControlFlowGraph:

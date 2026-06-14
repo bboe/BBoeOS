@@ -26,10 +26,6 @@ import re
 import sys
 from pathlib import Path
 
-# `%assign NAME VALUE [; comment]` with optional leading whitespace.
-RE_ASSIGN = re.compile(r"^\s*%assign\s+(?P<name>\w+)\s+(?P<value>\S+)\s*(?:;(?P<comment>.*))?$")
-RE_NUMBER = re.compile(r"(0x[0-9a-f]+|[0-9a-f]+h|\d+)")
-
 # GROUPS order is load-bearing in two ways:
 # 1. Section order in the generated header — entries print top-to-bottom in
 #    GROUPS order, so put the most-referenced groups (SYS_, ERROR_) ahead of
@@ -50,11 +46,15 @@ GROUPS = [
     ("ioctl commands", re.compile(r"^(AUDIO|CONSOLE|MIDI|VGA)_IOCTL_")),
     ("libbboeos offsets", re.compile(r"^LIBBBOEOS_")),
 ]
-
 # REPO has to come before DESTINATION and SOURCE because they reference it;
 # DESTINATION before SOURCE keeps the path block alphabetical thereafter.
 REPO = Path(__file__).resolve().parent.parent
+
 DESTINATION = REPO / "user" / "libbboeos" / "include" / "syscalls.h"
+
+# `%assign NAME VALUE [; comment]` with optional leading whitespace.
+RE_ASSIGN = re.compile(r"^\s*%assign\s+(?P<name>\w+)\s+(?P<value>\S+)\s*(?:;(?P<comment>.*))?$")
+RE_NUMBER = re.compile(r"(0x[0-9a-f]+|[0-9a-f]+h|\d+)")
 SOURCE = REPO / "kernel" / "include" / "constants.asm"
 
 
@@ -155,7 +155,7 @@ def main() -> int:
         print(f"generate_syscalls_h: missing {SOURCE}", file=sys.stderr)
         return 1
     rendered = _render_header(rows=_parse_assignments(source=SOURCE))
-    DESTINATION.parent.mkdir(parents=True, exist_ok=True)
+    DESTINATION.parent.mkdir(exist_ok=True, parents=True)
     if DESTINATION.is_file() and DESTINATION.read_text(encoding="utf-8") == rendered:
         return 0
     DESTINATION.write_text(rendered, encoding="utf-8")

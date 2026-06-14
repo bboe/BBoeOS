@@ -54,7 +54,7 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("program", nargs="?", help="restrict to one program (e.g. 'cat')")
+    parser.add_argument("program", help="restrict to one program (e.g. 'cat')", nargs="?")
     arguments = parser.parse_args()
 
     sources = sorted(source for directory in SOURCE_DIRS for source in directory.glob("*.c"))

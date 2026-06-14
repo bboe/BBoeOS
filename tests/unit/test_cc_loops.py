@@ -66,7 +66,7 @@ def test_hoist_invariant_binary_operation_moves_to_preheader() -> None:
         ir.Copy(destination="b", source=20),
         ir.Jump(target=".loop"),
         ir.Label(name=".loop"),
-        ir.BinaryOperation(destination="_ir_invariant", left="a", right="b", operation="+"),
+        ir.BinaryOperation(destination="_ir_invariant", left="a", operation="+", right="b"),
         ir.BranchFalse(left="_ir_invariant", operation="==", right=0, target=".end"),
         ir.Jump(target=".loop"),
         ir.Label(name=".end"),
@@ -96,7 +96,7 @@ def test_hoist_invariant_load_moves_to_preheader() -> None:
         ir.Copy(destination="i", source=0),
         ir.Jump(target=".loop"),
         ir.Label(name=".loop"),
-        ir.Index(destination="_ir_t", base="arr", index=0),
+        ir.Index(base="arr", destination="_ir_t", index=0),
         ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
         ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
         ir.Jump(target=".loop"),
@@ -119,9 +119,9 @@ def test_hoist_is_deterministic_across_runs() -> None:
         ir.Copy(destination="c", source=30),
         ir.Jump(target=".loop"),
         ir.Label(name=".loop"),
-        ir.BinaryOperation(destination="_ir_t1", left="a", right="b", operation="+"),
-        ir.BinaryOperation(destination="_ir_t2", left="b", right="c", operation="*"),
-        ir.BinaryOperation(destination="_ir_t3", left="_ir_t1", right="_ir_t2", operation="-"),
+        ir.BinaryOperation(destination="_ir_t1", left="a", operation="+", right="b"),
+        ir.BinaryOperation(destination="_ir_t2", left="b", operation="*", right="c"),
+        ir.BinaryOperation(destination="_ir_t3", left="_ir_t1", operation="-", right="_ir_t2"),
         ir.BranchFalse(left="_ir_t3", operation="==", right=0, target=".end"),
         ir.Jump(target=".loop"),
         ir.Label(name=".end"),
@@ -136,7 +136,7 @@ def test_hoist_no_loops_returns_body_unchanged() -> None:
     """A straight-line function comes back identical to its input."""
     body = [
         ir.Copy(destination="x", source=1),
-        ir.BinaryOperation(destination="_ir_t", left="x", right=2, operation="+"),
+        ir.BinaryOperation(destination="_ir_t", left="x", operation="+", right=2),
         ir.Return(value="_ir_t"),
     ]
     assert loops.hoist_loop_invariants(body) is body
@@ -149,8 +149,8 @@ def test_hoist_respects_dependency_order_in_preheader() -> None:
         ir.Copy(destination="b", source=2),
         ir.Jump(target=".loop"),
         ir.Label(name=".loop"),
-        ir.BinaryOperation(destination="_ir_t2", left="_ir_t1", right=2, operation="*"),
-        ir.BinaryOperation(destination="_ir_t1", left="a", right="b", operation="+"),
+        ir.BinaryOperation(destination="_ir_t2", left="_ir_t1", operation="*", right=2),
+        ir.BinaryOperation(destination="_ir_t1", left="a", operation="+", right="b"),
         ir.BranchFalse(left="_ir_t2", operation="==", right=0, target=".end"),
         ir.Jump(target=".loop"),
         ir.Label(name=".end"),
@@ -188,11 +188,11 @@ def test_hoist_scans_carry_branch_terminator_for_address_taken_locals() -> None:
     iteration.
     """
     call_ast = ast_nodes.Call(
-        line=1,
         args=[
             ast_nodes.PlaceAddressOf(line=1, place=ast_nodes.VariablePlace(line=1, name="byte_offset")),
             ast_nodes.Var(line=1, name="pointer"),
         ],
+        line=1,
         name="vfs_read_sec",
     )
     body = [
@@ -218,7 +218,7 @@ def test_hoist_skips_function_with_inline_asm() -> None:
         ir.InlineAsm(content="nop"),
         ir.Jump(target=".loop"),
         ir.Label(name=".loop"),
-        ir.BinaryOperation(destination="_ir_t", left="a", right=1, operation="+"),
+        ir.BinaryOperation(destination="_ir_t", left="a", operation="+", right=1),
         ir.BranchFalse(left="_ir_t", operation="==", right=0, target=".end"),
         ir.Jump(target=".loop"),
         ir.Label(name=".end"),
@@ -242,7 +242,7 @@ def test_hoist_skips_load_when_base_pointer_is_loop_defined() -> None:
         ir.Label(name=".loop"),
         ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
         ir.Copy(destination="arr", source=200),
-        ir.Index(destination="_ir_t", base="arr", index=0),
+        ir.Index(base="arr", destination="_ir_t", index=0),
         ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
         ir.Jump(target=".loop"),
         ir.Label(name=".end"),
@@ -267,7 +267,7 @@ def test_hoist_skips_load_when_block_does_not_dominate_every_exit() -> None:
         ir.Label(name=".loop"),
         ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
         ir.BranchFalse(left="other", operation="!=", right=0, target=".skip"),
-        ir.Index(destination="_ir_t", base="arr", index=0),
+        ir.Index(base="arr", destination="_ir_t", index=0),
         ir.Label(name=".skip"),
         ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
         ir.Jump(target=".loop"),
@@ -288,7 +288,7 @@ def test_hoist_skips_load_when_loop_contains_call() -> None:
         ir.Jump(target=".loop"),
         ir.Label(name=".loop"),
         ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
-        ir.Index(destination="_ir_t", base="arr", index=0),
+        ir.Index(base="arr", destination="_ir_t", index=0),
         ir.Call(args=(), destination=None, name="side_effect"),
         ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
         ir.Jump(target=".loop"),
@@ -317,7 +317,7 @@ def test_hoist_skips_load_when_loop_contains_index_assign() -> None:
         ir.Jump(target=".loop"),
         ir.Label(name=".loop"),
         ir.BranchFalse(left="i", operation="<", right=10, target=".end"),
-        ir.Index(destination="_ir_t", base="arr", index=0),
+        ir.Index(base="arr", destination="_ir_t", index=0),
         ir.IndexAssign(base="other", index=0, source=5),
         ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
         ir.Jump(target=".loop"),
@@ -344,7 +344,7 @@ def test_hoist_treats_block_defined_local_as_loop_defined() -> None:
         ir.Jump(target=".loop"),
         ir.Label(name=".loop"),
         ir.Block(node=local_decl),
-        ir.BinaryOperation(destination="_ir_t", left="hi", right=4, operation="<<"),
+        ir.BinaryOperation(destination="_ir_t", left="hi", operation="<<", right=4),
         ir.BranchFalse(left="_ir_t", operation="==", right=0, target=".end"),
         ir.Jump(target=".loop"),
         ir.Label(name=".end"),
@@ -405,7 +405,7 @@ def test_hoist_treats_increment_decrement_target_as_loop_defined() -> None:
         ir.Jump(target=".loop"),
         ir.Label(name=".loop"),
         ir.Block(node=increment_decrement),
-        ir.BinaryOperation(destination="_ir_t", left="i", right="size", operation="*"),
+        ir.BinaryOperation(destination="_ir_t", left="i", operation="*", right="size"),
         ir.BranchFalse(left="_ir_t", operation="==", right=0, target=".loop"),
         ir.Return(value=None),
     ]
@@ -423,7 +423,7 @@ def test_hoist_variant_binary_operation_stays_in_body() -> None:
         ir.Jump(target=".loop"),
         ir.Label(name=".loop"),
         ir.Copy(destination="b", source=1),  # 'b' defined inside loop
-        ir.BinaryOperation(destination="_ir_t", left="a", right="b", operation="+"),
+        ir.BinaryOperation(destination="_ir_t", left="a", operation="+", right="b"),
         ir.BranchFalse(left="_ir_t", operation="==", right=0, target=".end"),
         ir.Jump(target=".loop"),
         ir.Label(name=".end"),
@@ -565,14 +565,14 @@ def test_irreducible_back_edge_target_does_not_dominate_source_no_loop() -> None
 def test_iter_read_names_yields_rep_string_dest_source_count_and_final_iv() -> None:
     """``_iter_read_names`` reports every name a ``RepString`` reads: dest, source, count, and final_iv value."""
     rep = ir.RepString(
-        operation="copy",
-        element_size=1,
-        dest="p",
-        source="q",
         count="n",
-        fill_value=None,
         counter_signed=True,
+        dest="p",
+        element_size=1,
+        fill_value=None,
         final_iv=("i", "m"),
+        operation="copy",
+        source="q",
     )
     names = set(loops._iter_read_names(rep))  # noqa: SLF001
     assert {"p", "q", "n", "m"} <= names
@@ -873,7 +873,7 @@ def test_recognize_copy_loop_rejects_iv_read_after_loop() -> None:
         ir.Copy(destination="i", source=0),
         ir.Label(name="floop0"),
         ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
-        ir.Index(destination="_ir_t0", base="s", index="i"),
+        ir.Index(base="s", destination="_ir_t0", index="i"),
         ir.IndexAssign(base="d", index="i", source="_ir_t0"),
         ir.Label(name="fstep0"),
         ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
@@ -891,7 +891,7 @@ def test_recognize_copy_loop_rejects_multiuse_temp() -> None:
         ir.Copy(destination="i", source=0),
         ir.Label(name="floop0"),
         ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
-        ir.Index(destination="_ir_t0", base="s", index="i"),
+        ir.Index(base="s", destination="_ir_t0", index="i"),
         ir.IndexAssign(base="d", index="i", source="_ir_t0"),
         ir.IndexAssign(base="e", index="i", source="_ir_t0"),
         ir.Label(name="fstep0"),
@@ -899,7 +899,7 @@ def test_recognize_copy_loop_rejects_multiuse_temp() -> None:
         ir.Jump(target="floop0"),
         ir.Label(name="fend0"),
     ]
-    out = loops.recognize_string_loops(body, variable_element_sizes={"d": 4, "s": 4, "e": 4})
+    out = loops.recognize_string_loops(body, variable_element_sizes={"d": 4, "e": 4, "s": 4})
     assert not any(isinstance(instruction, ir.RepString) for instruction in out)
 
 
@@ -909,7 +909,7 @@ def test_recognize_copy_loop_rejects_unknown_element_size() -> None:
         ir.Copy(destination="i", source=0),
         ir.Label(name="floop0"),
         ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
-        ir.Index(destination="_ir_t0", base="s", index="i"),
+        ir.Index(base="s", destination="_ir_t0", index="i"),
         ir.IndexAssign(base="d", index="i", source="_ir_t0"),
         ir.Label(name="fstep0"),
         ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
@@ -927,7 +927,7 @@ def test_recognize_copy_loop_rejects_width_mismatch() -> None:
         ir.Copy(destination="i", source=0),
         ir.Label(name="floop0"),
         ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
-        ir.Index(destination="_ir_t0", base="s", index="i"),
+        ir.Index(base="s", destination="_ir_t0", index="i"),
         ir.IndexAssign(base="d", index="i", source="_ir_t0"),
         ir.Label(name="fstep0"),
         ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
@@ -945,7 +945,7 @@ def test_recognize_copy_loop_rewrites_to_rep_string() -> None:
         ir.Label(name="floop0"),
         ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
         ir.LoopBoundary(continue_label="fstep0", end_label="fend0", push=True),
-        ir.Index(destination="_ir_t0", base="s", index="i"),
+        ir.Index(base="s", destination="_ir_t0", index="i"),
         ir.IndexAssign(base="d", index="i", source="_ir_t0"),
         ir.LoopBoundary(continue_label="fstep0", end_label="fend0", push=False),
         ir.Label(name="fstep0"),
@@ -1190,7 +1190,7 @@ def test_recognize_fill_loop_rejects_iv_used_as_index_base_after_loop() -> None:
         ir.BinaryOperation(destination="i", left="i", operation="+", right=1),
         ir.Jump(target="floop0"),
         ir.Label(name="fend0"),
-        ir.Index(destination="last", base="buf", index="i"),
+        ir.Index(base="buf", destination="last", index="i"),
         ir.Return(value="last"),
     ]
     assert loops.recognize_string_loops(body) is body
@@ -1305,7 +1305,7 @@ def test_recognize_string_loops_ignores_non_idiomatic_body() -> None:
         ir.BranchFalse(left="i", operation="<", right="n", target="fend0"),
         # Load then store from an unrelated name (not the loaded temp) —
         # not the load+store copy shape, not a fill.
-        ir.Index(destination="_ir_t", base="src", index="i"),
+        ir.Index(base="src", destination="_ir_t", index="i"),
         ir.IndexAssign(base="buf", index="i", source="other"),
         ir.Label(name="fstep0"),
         ir.BinaryOperation(destination="i", left="i", operation="+", right=1),

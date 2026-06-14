@@ -30,15 +30,15 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+BASELINE = REPO_ROOT / "tests" / "golden" / "cc_function_sizes_baseline.json"
 CC = REPO_ROOT / "cc.py"
 KERNEL_INCLUDE = REPO_ROOT / "kernel" / "include"
-BASELINE = REPO_ROOT / "tests" / "golden" / "cc_function_sizes_baseline.json"
-SYSCALLS_HEADER_GENERATOR = REPO_ROOT / "tools" / "generate_syscalls_h.py"
-
 # Userland translation units cc.py compiles through the object pipeline.
 # Kernel .c is excluded (compiled with --target kernel, a different path);
 # this gate covers the user / libbboeos surface the Place family touches.
 SOURCE_GLOBS = ("user/libbboeos/*.c", "user/programs/*.c")
+
+SYSCALLS_HEADER_GENERATOR = REPO_ROOT / "tools" / "generate_syscalls_h.py"
 
 
 def compare_source(
@@ -126,7 +126,7 @@ def main() -> int:
     """Run the gate, or refresh the baseline when BBOE_UPDATE_SIZES=1."""
     current = measure_all()
     if os.environ.get("BBOE_UPDATE_SIZES") == "1":
-        BASELINE.parent.mkdir(parents=True, exist_ok=True)
+        BASELINE.parent.mkdir(exist_ok=True, parents=True)
         BASELINE.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
         print(f"WROTE baseline {BASELINE}")
         return 0

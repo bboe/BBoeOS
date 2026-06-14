@@ -31,6 +31,14 @@ CC = REPO_ROOT / "cc.py"
 INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 
 
+def _loop_body(asm: str) -> str:
+    """Return the text between the first ``floop`` label and the matching ``fend`` label."""
+    start = re.search(r"^\._ir_floop\d+:", asm, re.MULTILINE)
+    end = re.search(r"^\._ir_fend\d+:", asm, re.MULTILINE)
+    assert start is not None and end is not None, f"no for-loop labels in:\n{asm}"
+    return asm[start.end() : end.start()]
+
+
 def compile_snippet(*, name: str, source: str, work: Path) -> str:
     """Run cc.py (``--target kernel``, 32-bit) on ``source``; return the emitted asm."""
     source_path = work / f"{name}.c"
@@ -43,14 +51,6 @@ def compile_snippet(*, name: str, source: str, work: Path) -> str:
         text=True,
     )
     return asm_path.read_text()
-
-
-def _loop_body(asm: str) -> str:
-    """Return the text between the first ``floop`` label and the matching ``fend`` label."""
-    start = re.search(r"^\._ir_floop\d+:", asm, re.MULTILINE)
-    end = re.search(r"^\._ir_fend\d+:", asm, re.MULTILINE)
-    assert start is not None and end is not None, f"no for-loop labels in:\n{asm}"
-    return asm[start.end() : end.start()]
 
 
 def main() -> int:

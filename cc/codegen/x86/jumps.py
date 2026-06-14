@@ -9,6 +9,24 @@ pulling each other in, which would cycle.
 
 from __future__ import annotations
 
+CMOV_WHEN_FALSE = {
+    "!=": "cmove",
+    "<": "cmovge",
+    "<=": "cmovg",
+    "==": "cmovne",
+    ">": "cmovle",
+    ">=": "cmovl",
+}
+
+CMOV_WHEN_TRUE = {
+    "!=": "cmovne",
+    "<": "cmovl",
+    "<=": "cmovle",
+    "==": "cmove",
+    ">": "cmovg",
+    ">=": "cmovge",
+}
+
 JUMP_INVERT = {
     "ja": "jbe",
     "jae": "jb",
@@ -26,9 +44,9 @@ JUMP_WHEN_FALSE = {
     "!=": "je",
     "<": "jge",
     "<=": "jg",
+    "==": "jne",
     ">": "jle",
     ">=": "jl",
-    "==": "jne",
     # Pseudo-operators for ``carry_return`` call conditions.  CF clear
     # means the call reported ``return 1`` (true); CF set means
     # ``return 0`` (false).  ``if (foo())`` dispatches through
@@ -37,35 +55,6 @@ JUMP_WHEN_FALSE = {
     # the ``call`` itself leaves CF holding the result.
     "carry": "jc",
     "not_carry": "jnc",
-}
-
-CMOV_WHEN_TRUE = {
-    "!=": "cmovne",
-    "<": "cmovl",
-    "<=": "cmovle",
-    ">": "cmovg",
-    ">=": "cmovge",
-    "==": "cmove",
-}
-
-CMOV_WHEN_FALSE = {
-    "!=": "cmove",
-    "<": "cmovge",
-    "<=": "cmovg",
-    ">": "cmovle",
-    ">=": "cmovl",
-    "==": "cmovne",
-}
-
-JUMP_WHEN_TRUE = {
-    "!=": "jne",
-    "<": "jl",
-    "<=": "jle",
-    ">": "jg",
-    ">=": "jge",
-    "==": "je",
-    "carry": "jnc",
-    "not_carry": "jc",
 }
 
 # Unsigned variants — used when either comparison operand has an unsigned
@@ -79,20 +68,31 @@ JUMP_WHEN_FALSE_UNSIGNED = {
     "!=": "je",
     "<": "jae",
     "<=": "ja",
+    "==": "jne",
     ">": "jbe",
     ">=": "jb",
-    "==": "jne",
     "carry": "jc",
     "not_carry": "jnc",
+}
+
+JUMP_WHEN_TRUE = {
+    "!=": "jne",
+    "<": "jl",
+    "<=": "jle",
+    "==": "je",
+    ">": "jg",
+    ">=": "jge",
+    "carry": "jnc",
+    "not_carry": "jc",
 }
 
 JUMP_WHEN_TRUE_UNSIGNED = {
     "!=": "jne",
     "<": "jb",
     "<=": "jbe",
+    "==": "je",
     ">": "ja",
     ">=": "jae",
-    "==": "je",
     "carry": "jnc",
     "not_carry": "jc",
 }
