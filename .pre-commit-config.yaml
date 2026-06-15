@@ -4,11 +4,11 @@ ci:
 
 repos:
 - repo: https://github.com/praw-dev/CodeSorter
-  rev: 2eaa2ef4f23a9ac80dc51a1792ad74c783144419  # frozen: v0.2.6
+  rev: 8aa6144b41e0f789124b2ca377d246ffd1fbb317  # frozen: v0.2.7
   hooks:
     - id: codesorter
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: 0671d8ab202c4ac093b78433ae5baf74f3fc7246  # v0.15.15
+  rev: 3b3f7c3f57fe9925356faf5fe6230835138be230  # v0.15.17
   hooks:
     # Run the linter.
     - id: ruff-check
