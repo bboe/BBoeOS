@@ -208,6 +208,11 @@ in `kernel/arch/x86/entry.asm` (the `welcome_msg` string emitted by
 `protected_mode_entry`) and move the Unreleased entries under a new version
 header with updated comparison links.
 
+Tag the release `vX.Y.Z` (v-prefixed, e.g. `v0.13.0`) to match the convention
+used across the other repos and this repo's `v*` tag-protection rulesets.
+Comparison links use the actual tag names, so the first v-prefixed release
+compares against the prior bare tag (`compare/0.12.0...v0.13.0`).
+
 ## Testing
 
 Manual testing in QEMU is still the primary workflow — use `-serial stdio` to
