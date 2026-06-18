@@ -357,6 +357,65 @@ class EmissionMixin:
         return BinaryOperation(left=condition, line=condition.line, operation="!=", right=Int(line=condition.line, value=0))
 
     @staticmethod
+    def _plan_preserves_accumulator_for_store_rhs(plan: AddressPlan, /) -> bool:
+        """Return True when *plan*'s store materialization keeps AX intact up to the RHS read.
+
+        Consulted by :meth:`_collect_ir_deferred_single_use_temps` to decide
+        whether a folded ``ir.Address`` between a store-RHS temp's def and
+        its consuming ``ir.Store`` is transparent (the value rides EAX into
+        the rhs read — pinning would only add a ``mov reg, eax`` def bounce
+        plus a ``mov eax, reg`` read) or real (the materialization clobbers
+        AX first, so the rhs reload exists and a register home removes it).
+        Ordering table, one row per consuming-store shape, each read
+        directly from its emitter:
+
+        - ``deref_store`` (``_emit_planned_deref_store``): the rhs evaluates
+          FIRST; the pointer VALUE then loads into SI via a bare register
+          ``mov`` (``_emit_load_var``) that never touches AX; the store
+          writes from AX.  Preserves.
+        - ``subscript_terminal`` (``_emit_subscript_operand_store``): the
+          rhs evaluates FIRST and is pushed; the term accumulation that
+          clobbers AX runs entirely inside the ``push acc`` / ``pop acc``
+          bracket, AFTER the rhs read.  Preserves in the relevant sense:
+          the rhs read precedes every AX-clobbering materialization step.
+        - member store, ``base_is_static`` (ordering 1 of
+          ``_emit_planned_member_store``): the materialization emits
+          NOTHING (pure label/frame displacement), then the rhs evaluates.
+          Preserves.
+        - member store, ``base_preserves_accumulator`` (ordering 3 — the
+          arrow ``pointer->field`` base): the rhs evaluates FIRST, then the
+          bare ``mov bx, [pointer]`` base load.  Preserves.
+        - member store, chained ``base_kind == "plan"`` (ordering 4): the
+          base materializes FIRST and runs THROUGH the accumulator (the
+          inner decayed member address loads via ``_emit_resolved_load``
+          before seeding BX), destroying AX before the rhs read.  Does NOT
+          preserve.
+        - ``call_slot``: never a Store's plan (owned exclusively by the
+          ``ir.IndirectCall`` terminal); conservatively does not preserve.
+
+        Ordering 2 of ``_emit_planned_member_store`` (the 1-bit literal
+        bitfield write) never reads a temp rhs —
+        ``_bitfield_write_literal_value`` matches integer literals only —
+        so it has no row here.
+        """
+        if plan.call_slot:
+            return False
+        if plan.deref_store or plan.subscript_terminal:
+            return True
+        if plan.base_kind == "plan":
+            return False
+        # Hardening against planner drift: today every terms-bearing plan
+        # routes through the subscript terminals (handled above), so the
+        # member orderings below never accumulate through AX — but a future
+        # terms-bearing non-subscript plan would (``_accumulate_subscript``
+        # evaluates each index through the accumulator).  Requiring an
+        # AX-free declared clobber set keeps the verdict sound by
+        # construction instead of by invariant.
+        if "ax" in plan.clobbers:
+            return False
+        return plan.base_is_static or plan.base_preserves_accumulator
+
+    @staticmethod
     def _rep_width_suffix(element_size: int, /) -> str:
         """Map element size 1/2/4 to the string-op mnemonic suffix."""
         return {1: "b", 2: "w", 4: "d"}[element_size]
@@ -640,9 +699,32 @@ class EmissionMixin:
         # BX from the temp pool for these functions instead — the
         # conservative, byte-cheap fix (it costs at most one register of
         # residency in member-indexing functions, and the runtime matrix
-        # stays green).
+        # stays green).  Phase 2's per-instruction clobber table
+        # (_instruction_clobber_registers) covers the planned-terminal
+        # paths (Load / Store / AddressOf / IncrementDecrement); the
+        # Access / Block escape-hatch lowering resolves the member index
+        # inline via _resolve_member_index, which is NOT a planned
+        # terminal, so this blanket exclusion remains load-bearing for
+        # those paths.
         if self._body_has_member_index_access(body):
             reserved_registers.add(self.target.bx_register)
+        # (e) DX, when the body contains a DX-writing BinaryOperation
+        # (``/``, ``%``, or ``*`` with a non-constant right operand): a
+        # DX-homed temp would be CORRECT — ``protect_dx`` in
+        # _generate_binary_operation_expression brackets every ``div``
+        # with a save — but COSTLY: ``dx_pinned`` consults every home in
+        # ``pinned_register`` for the WHOLE function, so a temp homed in
+        # DX anywhere (even one dead long before the division, which the
+        # per-instruction constraint loop below legally leaves
+        # unconstrained) forces ``push edx`` / ``pop edx`` around every
+        # ``div`` AND sets ``division_remainder = None``, killing the
+        # div→mod remainder-reuse fusion (a paired ``%`` re-divides
+        # instead of reading the remainder out of DX — the gettimeofday
+        # ``/ 1000`` + ``% 1000`` anatomy).  Reserving DX in
+        # div-containing functions keeps the fusion alive at the cost of
+        # one pool register, mirroring the BX member-index drop above.
+        if self._body_has_dx_writing_binary_operation(body):
+            reserved_registers.add(self.target.dx_register)
         temp_pool = tuple(register for register in self.target.register_pool if register not in reserved_registers)
         if not temp_pool:
             return
@@ -658,7 +740,40 @@ class EmissionMixin:
 
         spill_benefit = {temp: use_counts.get(temp, 0) for temp in allocatable_temps}
         register_save_cost = {temp: dict.fromkeys(temp_pool, result.live_across_call.get(temp, 0)) for temp in allocatable_temps}
-        constraints = regalloc.RegisterConstraints(allowed={}, pool=temp_pool, precolored={})
+        # Clobber-aware homes (phase 2): a temp live across — or read by —
+        # an instruction whose emission writes register R must not be homed
+        # in R.  Reads are included conservatively because a terminal may
+        # write its materialization registers before it reads its operands
+        # (the subscript store evaluates the RHS, then seeds BX, then reads
+        # the index term).  ``_instruction_clobber_registers`` returns
+        # canonical 16-bit names; normalising the pool side through
+        # ``target.low_word`` widens the comparison exactly like
+        # ``_pinned_registers_to_save`` does for ``BUILTIN_CLOBBERS``
+        # (identity at 16-bit, ``edx`` → ``dx`` at 32-bit).  Switch arms
+        # are covered by the Switch instruction itself: its clobber set is
+        # the union over the arms and ``instruction_uses`` walks the arms,
+        # matching ``live_across``'s opaque-Switch CFG keying.  A temp
+        # whose allowed set becomes empty simply spills — sound.
+        low_word = self.target.low_word
+        pool_set = frozenset(temp_pool)
+        allowed: dict[str, frozenset[str]] = {}
+        for instruction in body:
+            clobber_names = self._instruction_clobber_registers(instruction)
+            if not clobber_names:
+                continue
+            clobbered = frozenset(register for register in pool_set if low_word(register) in clobber_names)
+            if not clobbered:
+                continue
+            endangered = result.live_across.get(id(instruction), frozenset()) | frozenset(
+                name
+                for name in regalloc.instruction_uses(instruction=instruction)
+                if name in allocatable_temps
+                # conservative: a terminal may write its materialization registers before reading its operands
+            )
+            for temp in endangered:
+                if temp in allocatable_temps:  # live_across may contain non-allocatable names (auto-pinned locals/params)
+                    allowed[temp] = allowed.get(temp, pool_set) - clobbered
+        constraints = regalloc.RegisterConstraints(allowed=allowed, pool=temp_pool, precolored={})
         costs = regalloc.CostModel(register_save_cost=register_save_cost, spill_benefit=spill_benefit)
         allocation = regalloc.color(constraints=constraints, costs=costs, interference=restricted_graph, moves=set())
 
@@ -717,6 +832,30 @@ class EmissionMixin:
                 and all(parameter.out_register is None and parameter.in_register is None for parameter in function.params)
             ):
                 function.regparm_count = min(3, len(function.params))
+
+    def _body_has_dx_writing_binary_operation(self, body: list[ir.Instruction], /) -> bool:
+        """Return True if any IR instruction is a DX-writing :class:`ir.BinaryOperation`.
+
+        Reuses :meth:`_instruction_clobber_registers` as the single
+        operator oracle (``/`` / ``%`` / ``*``-with-non-constant-right —
+        the ``div`` / ``mul`` arms that write DX); the comparison is
+        against the canonical 16-bit ``"dx"`` that helper returns, before
+        any widening to the target's pool name.  Switch arms are walked
+        explicitly so the check stays scoped to BinaryOperation
+        instructions (the Switch instruction's own clobber union would
+        also fold in Load / Store materialization writes).
+        """
+        for instruction in body:
+            match instruction:
+                case ir.BinaryOperation():
+                    if "dx" in self._instruction_clobber_registers(instruction):
+                        return True
+                case ir.Switch(cases=cases):
+                    if any(self._body_has_dx_writing_binary_operation(switch_case.body) for switch_case in cases):
+                        return True
+                case _:
+                    pass
+        return False
 
     def _classify_switch_arms(self, statement: Switch, /, *, cases_override: list | None = None) -> tuple:
         """Split a switch's cases into ``(default_case, case_arms)`` and check enum exhaustiveness.
@@ -787,6 +926,34 @@ class EmissionMixin:
           a branch test, ``Return``, ``Call`` arg, or store materialize
           the value into a register / flag and benefit from the home.
 
+        One def+2 shape is treated as def+1: a folded :class:`ir.Address`
+        emits NOTHING (and the consume-only ``case ir.Address`` arm touches
+        no accumulator-tracking state), yet it occupies an instruction
+        slot, so a store-RHS temp in the sequence ``[temp = rhs;
+        Address(a); Store(a, temp)]`` looks deferred while its value in
+        fact rides EAX straight into the store's rhs read.  The phantom is
+        skipped ONLY when (a) the intervening instruction is the
+        ``ir.Address`` whose destination the use instruction consumes, (b)
+        its recorded :class:`AddressPlan` exists and
+        :meth:`_plan_preserves_accumulator_for_store_rhs` confirms the
+        store materialization keeps AX intact up to the rhs read, and (c)
+        the temp is the ``ir.Store``'s VALUE operand (index-term reads
+        happen mid-materialization, after AX is clobbered — though a temp
+        used as a term index is also read by the ``Address`` itself, so it
+        can never be single-use here; the ``value`` check keeps the gate
+        explicit).  A chained-base store (``base_kind == "plan"``) keeps
+        the pin verdict: its materialization loads the inner member
+        address THROUGH the accumulator before the rhs read, so the
+        reload is real and the register home removes it.  Wider gaps
+        (def+3 and beyond, even when every intervening instruction is a
+        folded ``Address``) deliberately keep the pin — only the exact
+        one-phantom shape is proven AX-transparent.
+
+        The plan lookup is safe here: this method runs inside
+        :meth:`_allocate_ir_temps`, which ``generate_function`` calls
+        AFTER the eager ``_plan_ir_addresses`` pre-pass — verified call
+        order, so ``self._ir_address_plans`` is fully populated.
+
         Conservative: only the flat top-level instruction order is
         considered.  A temp whose def or use lives inside a Switch arm
         (not visited here) is not returned, so it falls back to the
@@ -814,8 +981,26 @@ class EmissionMixin:
                 continue
             if temp in binop_operand_temps:
                 continue
-            if uses[0] != definition_index[temp] + 1:
-                result.add(temp)
+            definition_position = definition_index[temp]
+            use_position = uses[0]
+            if use_position == definition_position + 1:
+                continue
+            # Folded-Address phantom (see docstring): a def+2 use whose
+            # single intervening instruction is the consumed ir.Address of
+            # an accumulator-preserving Store is effectively def+1.
+            if use_position == definition_position + 2:
+                intervening = body[definition_position + 1]
+                consumer = body[use_position]
+                if (
+                    isinstance(intervening, ir.Address)
+                    and isinstance(consumer, ir.Store)
+                    and consumer.address == intervening.destination
+                    and consumer.value == temp
+                    and (plan := self._ir_address_plans.get(intervening.destination)) is not None
+                    and self._plan_preserves_accumulator_for_store_rhs(plan)
+                ):
+                    continue
+            result.add(temp)
         return result
 
     def _emit_function_pointer_call(
@@ -2119,6 +2304,86 @@ class EmissionMixin:
             and self._is_tail_call_eligible(if_stmt.else_body[-1])
         )
 
+    def _instruction_clobber_registers(self, instruction: ir.Instruction, /) -> frozenset[str]:
+        """Return the canonical 16-bit registers *instruction*'s emission writes.
+
+        The write-set the allocator must keep live-through temps away from:
+
+        - ``Load`` / ``Store`` / ``AddressOf`` / ``IncrementDecrement``
+          consuming a planned address: the plan's declared ``clobbers``
+          plus the subscript terminals' unconditional BX guard
+          (``subscript_terminal`` plans emit it even with no dynamic
+          terms).  IncrementDecrement's triple re-materialization repeats
+          the same set, so no widening is needed.  AddressOf /
+          IncrementDecrement consume a plan natively only through their
+          arrow gate (``base_kind == "pointer"`` with no bitfield); a
+          gate-rejected plan rides the legacy arm below.
+        - the same terminals consuming an UNPLANNED address: shape-keyed
+          off the recorded op (``_ir_address_ops``).  The array-of-pointers
+          residual family — the uniform ``name[i][j]...`` chain
+          ``_uniform_subscript_chain`` recognizes (the exact shape class
+          ``_plan_subscript_chain`` declines and the census allowlist
+          locks) — emits through ``_generate_nested_index_expression``,
+          whose walk writes only {'ax', 'si'} at BOTH widths
+          (derived from _generate_nested_index_expression's SI/AX-only
+          walk — re-verify there if that helper changes).  Every other unplanned
+          shape (bitfield ride-along member arms, deref stores, anything
+          future) keeps the conservative {'ax', 'bx', 'si'} — the legacy
+          re-seat walk's full scratch footprint.
+        - ``BinaryOperation`` whose operation the emitter lowers through
+          a DX-writing sequence: {'dx'} for ``/`` and ``%`` (the
+          ``xor dx, dx`` + ``div`` arm of
+          ``_generate_binary_operation_expression``) and for ``*`` with a
+          non-constant right operand (the ``mul`` arm; a constant right
+          lowers via ``shl`` / ``imul reg, imm``, which never touch DX).
+        - ``Switch``: the union over its arms' instructions, because the
+          outer CFG treats a Switch as one opaque instruction — inner
+          terminals have no ``live_across`` entries of their own, while
+          ``instruction_uses`` of the Switch already covers every name
+          read anywhere inside the arms.
+        - ``IndirectCall``: nothing, by documented phase-1 convention —
+          call_slot plans declare empty clobbers and the conservative
+          full-pool call-site save governs the whole sequence.
+        - everything else: empty.
+
+        Terminal-owned writes deliberately NOT listed: the accumulator (AX
+        is not in the allocatable pool) and leaf RHS evaluation (AX only).
+        Reads are not clobbers.
+        """
+        legacy_reseat_scratch = frozenset({"ax", "bx", "si"})
+        match instruction:
+            case ir.Load(address=address) | ir.Store(address=address):
+                plan = self._ir_address_plans.get(address)
+                if plan is None:
+                    address_op = self._ir_address_ops.get(address)
+                    if address_op is not None and self._uniform_subscript_chain(address_op.shape) is not None:
+                        # Array-of-pointers residual: the nested-index walk
+                        # writes only the accumulator and SI (see fact table).
+                        return frozenset({"ax", "si"})
+                    return legacy_reseat_scratch
+                # the subscript terminals' BX guard is an unconditional legacy invariant owned by the terminal,
+                # deliberately NOT folded into plan.clobbers (which declare materialization writes only)
+                return plan.clobbers | (frozenset({"bx"}) if plan.subscript_terminal else frozenset())
+            case ir.AddressOf(address=address) | ir.IncrementDecrement(address=address):
+                plan = self._ir_address_plans.get(address)
+                if plan is None or plan.base_kind != "pointer" or plan.bitfield is not None:
+                    return legacy_reseat_scratch
+                return plan.clobbers
+            case ir.BinaryOperation(operation=operation, right=right):
+                if operation in {"/", "%"}:
+                    return frozenset({"dx"})
+                if operation == "*" and not isinstance(right, int):
+                    return frozenset({"dx"})
+                return frozenset()
+            case ir.Switch(cases=cases):
+                clobbered: frozenset[str] = frozenset()
+                for switch_case in cases:
+                    for inner_instruction in switch_case.body:
+                        clobbered |= self._instruction_clobber_registers(inner_instruction)
+                return clobbered
+            case _:
+                return frozenset()
+
     def _ir_address_with_index(self, address: ir.Address, /) -> Node:
         """Return the residual :class:`ir.Address` ``shape``, re-seating its pre-lowered dynamic indices.
 
@@ -2347,11 +2612,18 @@ class EmissionMixin:
                 # fallbacks (the address-of CompileError diagnostic and the
                 # mask/shift read-modify-write).  The ride-along disappears
                 # when those two terminals grow native bitfield handling.
-                plan = self._plan_ir_address(instruction)
-                if plan is not None:
-                    self._ir_address_plans[destination] = plan
-                if plan is None or plan.bitfield is not None:
-                    self._ir_address_ops[destination] = instruction
+                #
+                # CONSUME-ONLY: ``_plan_ir_addresses`` ran as an eager pre-pass
+                # in ``generate_function`` before ``_allocate_ir_temps``, so
+                # every ``ir.Address`` destination is already in either
+                # ``_ir_address_plans`` or ``_ir_address_ops`` (or both for
+                # the bitfield ride-along).  No planning happens here.
+                if destination not in self._ir_address_plans and destination not in self._ir_address_ops:
+                    message = (
+                        f"ir.Address destination {destination!r} not found in eager pre-pass dicts — "
+                        "_plan_ir_addresses must be called before lower_ir_body"
+                    )
+                    raise NotImplementedError(message)
             case ir.Load(address=address, destination=destination):
                 plan = self._ir_address_plans.get(address)
                 if plan is not None:
@@ -2841,6 +3113,31 @@ class EmissionMixin:
         # itself roots at the same ``DereferencePlace(VariablePlace)``, so the
         # member-place planner derives the base from the shape directly.
         return self._plan_member_place(address.shape)
+
+    def _plan_ir_addresses(self, body: list[ir.Instruction], /) -> None:
+        """Plan every ``ir.Address`` in *body* (including Switch arms) eagerly.
+
+        Runs in ``generate_function`` after auto-pin finalizes locals/params
+        and before ``_allocate_ir_temps``, so the plans' declared clobber
+        facts exist at IR-temp allocation time (consumed in phase 2's
+        clobber-aware coloring).  Recording semantics are identical to the
+        (now consume-only) ``case ir.Address`` arm: plannable ops record
+        their plan; unplannable ops and bitfield ride-alongs record the op
+        for the legacy / diagnostic arms.
+        """
+        for instruction in body:
+            if isinstance(instruction, ir.Switch):
+                for switch_case in instruction.cases:
+                    self._plan_ir_addresses(switch_case.body)
+                continue
+            if not isinstance(instruction, ir.Address):
+                continue
+            destination = instruction.destination
+            plan = self._plan_ir_address(instruction)
+            if plan is not None:
+                self._ir_address_plans[destination] = plan
+            if plan is None or plan.bitfield is not None:
+                self._ir_address_ops[destination] = instruction
 
     def _plan_member_place(self, shape: Place, /) -> AddressPlan | None:
         """Plan one deref-free / arrow-rooted member ``shape`` (pure; no emission).
@@ -4715,7 +5012,20 @@ class EmissionMixin:
         # for the temporaries that stayed in memory so the frame size is
         # correct before the prologue is emitted.  A temp that won a register
         # home skips its frame slot.
+        #
+        # Address plans are built eagerly here — before IR-temp coloring —
+        # so their declared ``clobbers`` sets exist when ``_allocate_ir_temps``
+        # colors temps onto registers (phase 2 consumes them to keep temps
+        # out of registers that the plan's materialization clobbers).  The
+        # ``case ir.Address`` arm in ``_lower_ir_instruction`` is consume-only:
+        # it reads the pre-populated dicts rather than calling ``_plan_ir_address``
+        # again.  ``ir_body is not None`` iff ``ir_function is not None``
+        # (both set in the same ``isinstance(function, ir.Function)`` branch),
+        # so a single guard covers both.
         if ir_function is not None:
+            self._ir_address_ops = {}
+            self._ir_address_plans = {}
+            self._plan_ir_addresses(ir_function.body)
             self._allocate_ir_temps(ir_function=ir_function)
         if ir_body is not None:
             for temp in self._collect_ir_temps(ir_body):
@@ -5832,15 +6142,13 @@ class EmissionMixin:
     def lower_ir_body(self, body: list[ir.Instruction]) -> None:
         """Generate x86 assembly from a flat IR instruction list."""
         # ``Address`` ops emit no code; they name a resolved address that a
-        # later ``Load`` / ``Store`` / ``AddressOf`` consumes.  Recording is
-        # exclusive per shape: a plannable shape records its pure
-        # ``AddressPlan`` (the native path the terminals consume first); an
-        # unplannable RESIDUAL shape records the op itself so the consumer
-        # can recover its ``shape`` for the legacy AST re-seat (see
-        # ``_plan_ir_address`` for the residual census; bitfield member
-        # shapes record both — the ride-along in the ``ir.Address`` case).
-        self._ir_address_ops: dict[str, ir.Address] = {}
-        self._ir_address_plans: dict[str, AddressPlan] = {}
+        # later ``Load`` / ``Store`` / ``AddressOf`` consumes.  The dicts are
+        # populated by the ``_plan_ir_addresses`` eager pre-pass in
+        # ``generate_function`` before ``_allocate_ir_temps`` runs; the
+        # ``case ir.Address`` arm in ``_lower_ir_instruction`` is consume-only
+        # (it asserts that the destination is already present).  See
+        # ``_plan_ir_address`` for the residual census; bitfield member shapes
+        # record both — the ride-along in the ``ir.Address`` case.
         for instruction in body:
             self._lower_ir_instruction(instruction)
 

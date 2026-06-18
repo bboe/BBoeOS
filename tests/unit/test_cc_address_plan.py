@@ -27,6 +27,13 @@ int *field_pointer(struct node *n) {
 }
 """
 
+ARROW_COPY_SOURCE = """
+struct pair { int first; int second; };
+void copy_field(struct pair *p, struct pair *q) {
+    p->first = q->second;
+}
+"""
+
 ARROW_MEMBER_SOURCE = """
 struct node { int value; struct node *next; };
 int read_value(struct node *n) {
@@ -57,6 +64,15 @@ int main() {
 }
 """
 
+CHAINED_STORE_SOURCE = """
+struct inner { int a; int b; };
+struct outer { int pad; struct inner mid; };
+struct source { int field; };
+void copy_chained(struct outer *p, struct source *q) {
+    p->mid.b = q->field;
+}
+"""
+
 #: Userland translation units the residual census compiles — the same corpus
 #: ``tests/test_cc_function_sizes.py`` gates byte-for-byte.
 CORPUS_SOURCE_GLOBS = ("user/libbboeos/*.c", "user/programs/*.c")
@@ -70,6 +86,15 @@ void write_byte(char *target, int value) {
 DEREF_STORE_SOURCE = """
 void write_through(int *target, int value) {
     *target = value;
+}
+"""
+
+DIVISION_FUSION_SOURCE = """
+int helper(int alpha, int beta, int gamma) {
+    return alpha + beta + gamma;
+}
+int provoke(int seed) {
+    return helper(seed / 1000 + seed % 1000, seed * 3, seed * 5);
 }
 """
 
@@ -197,6 +222,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 #: Files with zero residuals are omitted.
 RESIDUAL_CENSUS_ALLOWLIST = {"user/programs/shell.c": 6}
 
+SPANNING_TEMP_SOURCE = """
+struct pair { int first; int second; };
+int helper(int alpha, int beta, int gamma) {
+    return alpha + beta + gamma;
+}
+int provoke(struct pair *pair_pointer, int seed) {
+    return helper(seed * 3, seed * 5, pair_pointer->first);
+}
+"""
+
 STRUCT_ARRAY_CONSTANT_SOURCE = """
 struct entry { int key; int payload; };
 struct entry table[8];
@@ -278,6 +313,30 @@ def _generate(source_text: str, /, *, bits: int = 32) -> X86CodeGenerator:
             options=CompilerOptions(bits=bits),
             search_paths=(),
         )
+
+
+def _generate_with_ir_bodies(source_text: str, /) -> tuple[X86CodeGenerator, list[list[ir.Instruction]]]:
+    """Compile *source_text*; return the generator and every lowered IR body.
+
+    Wraps ``lower_ir_body`` with a snapshotting spy so a test can inspect the
+    exact instruction sequence a function lowered through (the per-function
+    ``_ir_address_plans`` dict on the returned generator holds the LAST
+    function's plans, so single-function fixtures pair each body with its
+    plans).
+    """
+    bodies: list[list[ir.Instruction]] = []
+    original = X86CodeGenerator.lower_ir_body
+
+    def spy(self: X86CodeGenerator, body: list[ir.Instruction]) -> None:
+        bodies.append(list(body))
+        original(self, body)
+
+    X86CodeGenerator.lower_ir_body = spy  # type: ignore[method-assign]
+    try:
+        generator = _generate(source_text)
+    finally:
+        X86CodeGenerator.lower_ir_body = original  # type: ignore[method-assign]
+    return generator, bodies
 
 
 def _generate_with_reseat_spy(source_text: str, /) -> tuple[X86CodeGenerator, int]:
@@ -483,6 +542,29 @@ def test_deref_store_consumes_native_plan() -> None:
     assert "push eax" not in lines
 
 
+def test_division_remainder_fusion_survives_temp_allocation() -> None:
+    """A div-containing function never homes an IR temp in DX.
+
+    So the div/mod remainder fusion (division_remainder) and the
+    push/pop-free div sequence are preserved.  This is the gettimeofday
+    class-1 anatomy: a paired ``/ 1000`` + ``% 1000`` where the ``%``
+    reuses EDX from the single ``div`` — a temp homed in DX anywhere in
+    the function (even one dead long before the div; here the
+    ``seed * 3`` / ``seed * 5`` call-argument temps are defined AFTER
+    both divisions, so the per-instruction live-range constraint legally
+    leaves them unconstrained) flips the function-global ``dx_pinned``,
+    forcing ``push edx`` / ``pop edx`` around every div and a second
+    ``div`` for the ``%``.
+    """
+    generator = _generate(DIVISION_FUSION_SOURCE)
+    dx_register = generator.target.dx_register
+    assert dx_register not in generator.temp_pinned_registers.values()
+    body = generator.output.split("provoke:")[1]
+    lines = [line.strip() for line in body.splitlines()]
+    assert sum(1 for line in lines if line.startswith("div ")) == 1
+    assert "push edx" not in lines
+
+
 def test_dot_member_load_produces_pure_displacement_plan() -> None:
     """``g.y`` lowers to one Address whose plan is a pure label+displacement."""
     generator = _generate(DOT_MEMBER_SOURCE)
@@ -675,6 +757,58 @@ def test_multidim_three_dimensional_load_plans_three_terms() -> None:
     assert [term.scale for term in plan.terms] == [48, 12, 4]
 
 
+def test_plans_recorded_before_emission() -> None:
+    """Every ir.Address plan is recorded before body emission begins.
+
+    Mechanism: monkeypatch ``_plan_ir_address`` to snapshot ``len(self.lines)``
+    at each call, and monkeypatch ``lower_ir_body`` to snapshot
+    ``len(self.lines)`` at its entry point (the moment body emission starts).
+    After compilation the test asserts that every ``_plan_ir_address`` call
+    happened with a smaller line count than the corresponding ``lower_ir_body``
+    entry — i.e. all planning occurred before any body instruction was emitted.
+
+    With HEAD's lazy path the planning calls fire INSIDE ``lower_ir_body``, so
+    their line-count snapshots are >= the entry snapshot; the assertion fails,
+    confirming the test detects the pre-pass ordering requirement.  After the
+    eager pre-pass lands the calls fire before the function label is emitted,
+    making their snapshots strictly less than the entry snapshot.
+    """
+    plan_call_line_counts: list[int] = []
+    lower_ir_body_entry_line_counts: list[int] = []
+    original_plan = X86CodeGenerator._plan_ir_address  # noqa: SLF001
+    original_lower = X86CodeGenerator.lower_ir_body
+
+    def plan_spy(self: X86CodeGenerator, address_op: object, /) -> object:
+        plan_call_line_counts.append(len(self.lines))
+        return original_plan(self, address_op)
+
+    def lower_spy(self: X86CodeGenerator, body: object, /) -> None:
+        lower_ir_body_entry_line_counts.append(len(self.lines))
+        original_lower(self, body)
+
+    X86CodeGenerator._plan_ir_address = plan_spy  # type: ignore[method-assign] # noqa: SLF001
+    X86CodeGenerator.lower_ir_body = lower_spy  # type: ignore[method-assign]
+    try:
+        _generate(ARROW_STORE_SOURCE)
+    finally:
+        X86CodeGenerator._plan_ir_address = original_plan  # type: ignore[method-assign] # noqa: SLF001
+        X86CodeGenerator.lower_ir_body = original_lower  # type: ignore[method-assign]
+
+    assert plan_call_line_counts, "no _plan_ir_address calls recorded — source has no ir.Address"
+    assert lower_ir_body_entry_line_counts, "no lower_ir_body calls recorded"
+    # Every planning call must precede body emission: its line-count snapshot
+    # must be strictly less than the lowest lower_ir_body entry snapshot seen
+    # across the entire compilation (functions are processed sequentially, so
+    # the minimum entry snapshot bounds the earliest body-emission point).
+    minimum_body_entry = min(lower_ir_body_entry_line_counts)
+    for count in plan_call_line_counts:
+        assert count < minimum_body_entry, (
+            f"_plan_ir_address called at line count {count}, "
+            f"but lower_ir_body entry was at {minimum_body_entry} — "
+            "planning occurred during body emission (lazy path), not before it"
+        )
+
+
 def test_pointer_to_array_load_plans_outer_row_stride() -> None:
     """``p[i][j]`` over ``int (*p)[3]`` plans a pointer-base Horner plan.
 
@@ -736,6 +870,49 @@ def test_scale_encodes_in_operand_32_bit() -> None:
     assert scale_encodes_in_operand(bits=32, scale=8)
     assert not scale_encodes_in_operand(bits=32, scale=3)
     assert not scale_encodes_in_operand(bits=32, scale=32)
+
+
+def test_single_use_store_rhs_temp_rides_accumulator() -> None:
+    """Accumulator-preserving store-RHS temps are not pinned across folded Address ops.
+
+    A store-RHS temp whose consuming store preserves the accumulator up
+    to the RHS read is NOT pinned (the folded ir.Address between def and
+    use is transparent to the def+1 adjacency test; the value rides
+    ax_local with zero extra bytes — the gettimeofday class-1 shape).  A
+    chained-base store (accumulator-clobbering materialization) keeps the
+    pin — the release/malloc relink shape stays byte-identical.
+
+    HEAD-probe note: today's only admitted non-leaf store RHS is a
+    ``PlaceLoad``, whose ``ir.Load`` def is invisible to
+    ``_ir_instruction_store_targets`` (it returns ``[]`` for Load), so no
+    compile-only fixture pins its RHS temp at HEAD.  The def+2 phantom is
+    therefore locked at the heuristic level: each fixture's lowered body
+    has its ``ir.Load`` def swapped for an ``ir.BinaryOperation`` def (a
+    VISIBLE store target — the quotient shape the class-3/4 re-admissions
+    produce), keeping the real folded ``ir.Address`` + ``ir.Store`` pair
+    and the real recorded AddressPlan.
+    """
+
+    def deferred_verdict(source_text: str, /) -> tuple[str, set[str]]:
+        generator, bodies = _generate_with_ir_bodies(source_text)
+        (body,) = bodies
+        (store,) = (instruction for instruction in body if isinstance(instruction, ir.Store))
+        address_instruction = body[body.index(store) - 1]
+        assert isinstance(address_instruction, ir.Address)
+        assert address_instruction.destination == store.address
+        assert isinstance(store.value, str)
+        synthetic_body: list[ir.Instruction] = [
+            ir.BinaryOperation(destination=store.value, left="seed", operation="/", right=1000),
+            address_instruction,
+            store,
+        ]
+        deferred = generator._collect_ir_deferred_single_use_temps(body=synthetic_body, temps=frozenset({store.value}))  # noqa: SLF001
+        return store.value, deferred
+
+    arrow_temp, arrow_deferred = deferred_verdict(ARROW_COPY_SOURCE)
+    assert arrow_temp not in arrow_deferred  # value rides EAX; a pin would only add bytes
+    chained_temp, chained_deferred = deferred_verdict(CHAINED_STORE_SOURCE)
+    assert chained_temp in chained_deferred  # base materialization clobbers AX before the RHS read
 
 
 def test_struct_array_constant_index_folds_into_displacement() -> None:
@@ -832,3 +1009,37 @@ def test_subscript_call_slot_plans_and_calls_natively() -> None:
     assert lines.count("shl eax, 2") == 1
     assert lines.count("mov eax, [eax]") == 1  # slot load
     assert lines.count("call eax") == 1
+
+
+def test_temp_homes_avoid_member_store_base_clobber() -> None:
+    """A temp live across an arrow-store terminal is never homed in BX.
+
+    The store plan declares clobbers={'bx'} (``_load_member_base`` writes BX
+    to seed the member base); the allocator must exclude BX from any temp
+    live across — or read by — that Store.  Step-1 probe verdict: HEAD
+    MISCOMPILES the live-across-Load twin of this constraint —
+    ``SPANNING_TEMP_SOURCE`` homes the ``seed * 3`` temp in EBX, the planned
+    arrow-member Load's materialization then runs ``mov ebx,
+    [pair_pointer]`` (no guard exists for non-subscript member plans), and
+    the call argument pushes the pointer instead of the product.  The
+    spanning-a-Store variant cannot be constructed from C today (Store
+    values are always leaves and temps never live across statement
+    boundaries), so the Store fact is locked by a direct call into
+    ``_instruction_clobber_registers`` while the compile fixture exercises
+    the Load instance of the same ``_load_member_base`` clobber.
+    """
+    generator = _generate(SPANNING_TEMP_SOURCE)
+    homes = generator.temp_pinned_registers
+    # The fixture forces two interfering deferred-single-use temps
+    # (``seed * 3`` / ``seed * 5``) live across the ``pair_pointer->first``
+    # Load; both must be homed, and neither in the clobbered EBX (the
+    # allocator relocates them onto EDX / EDI instead of spilling).
+    assert "ebx" not in homes.values()
+    assert len(homes) == 2  # both temps homed, neither spilled
+    # Direct fact check for the Store terminal: an arrow-member store plan
+    # declares the BX base-load clobber, and the helper reports it for the
+    # consuming ``ir.Store``.
+    store_generator = _generate(ARROW_STORE_SOURCE)
+    (address_destination,) = store_generator._ir_address_plans  # noqa: SLF001
+    store = ir.Store(address=address_destination, value=7, width=4)
+    assert store_generator._instruction_clobber_registers(store) == frozenset({"bx"})  # noqa: SLF001
