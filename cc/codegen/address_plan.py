@@ -75,6 +75,24 @@ class AddressPlan:
     (the legacy byte-vs-full-accumulator select, including its documented
     ``unsigned short *`` gap); the generic materializer refuses it loudly.
 
+    ``member_index`` marks the single-index member-index plan
+    ``base.field[index]`` / ``pointer->field[index]`` (``s->buffer[s->length]
+    = character`` in stdio.c ``_emit``).  Like ``deref_store`` its emission
+    is owned exclusively by the ``ir.Store`` terminal
+    (``_emit_planned_member_index_store`` →
+    ``_materialize_member_index_plan``), mirroring the legacy
+    ``_emit_member_index_resolved_store`` / ``_resolve_member_index`` pair:
+    the index — held UNFOLDED on the plan's single term, because the legacy
+    resolver branches on the constant form itself — evaluates and scales
+    through the accumulator BEFORE the base load, inside the resolver's own
+    push/pop bracket (not the protect-BX subscript terminal's).
+    ``member_index_arrow`` carries the arrow-vs-dot base form
+    (``_emit_member_index_base``'s dispatch) and ``pointer_field`` marks a
+    pointer-typed field (``char *buffer``) whose VALUE is loaded mid-walk to
+    re-root the operand; ``displacement`` is the raw field byte offset (the
+    materializer decides whether it lands in the terminal operand or the
+    pointer-field load).  The generic materializer refuses it loudly.
+
     ``clobbers`` declares the registers the plan's MATERIALIZATION writes —
     and only the materialization: the terminal load / store / call and any
     rhs evaluation are the consuming terminal's business and are NOT
@@ -107,6 +125,9 @@ class AddressPlan:
     field_size: int = 0
     horner: bool = False
     line: int = 0
+    member_index: bool = False
+    member_index_arrow: bool = False
+    pointer_field: bool = False
     raw_width: bool = False
     subscript_terminal: bool = False
     terms: tuple[AddressTerm, ...] = ()
@@ -118,9 +139,11 @@ class AddressTerm:
 
     ``index_value`` is an :data:`cc.ir.Value` leaf — in practice a variable
     or ``_ir_*`` temp name (planners pre-fold ``int`` constants into the
-    plan displacement, and the exotic ``PlaceAddressOf`` leaf the ungated
-    struct-array index path admits still evaluates through the accumulator
-    only, so the declared clobber facts hold for every leaf kind).
+    plan displacement — except ``member_index`` plans, whose legacy resolver
+    branches on the constant form itself and so keep it on the term — and
+    the exotic ``PlaceAddressOf`` leaf the ungated struct-array index path
+    admits still evaluates through the accumulator only, so the declared
+    clobber facts hold for every leaf kind).
     """
 
     index_value: int | str | ast_nodes.PlaceAddressOf
@@ -130,13 +153,20 @@ class AddressTerm:
 def dynamic_term_clobbers(terms: tuple[AddressTerm, ...], /) -> frozenset[str]:
     """Return the registers the term accumulation writes: AX + BX, or nothing.
 
-    Every plan term is dynamic (the planner pre-folds constant indices into
+    For the callers that hold it — every plan kind except ``member_index`` —
+    every plan term is dynamic (the planner pre-folds constant indices into
     the displacement), so a non-empty ``terms`` always evaluates each index
     through the accumulator (``generate_expression`` + ``_emit_scale_index``
     — the ``imul reg, imm`` fallback never touches DX) and seeds / sums the
     BX index register (``_accumulate_subscript`` and the Horner walk
     ``_emit_horner_index_offsets`` share this AX + BX footprint).  A
     term-less plan's accumulation emits nothing.
+
+    ``member_index`` plans keep their single term UNFOLDED even when
+    ``index_value`` is an ``int`` constant (the legacy resolver branches on
+    the constant form itself — see :class:`AddressTerm` for details), so
+    callers must not invoke this helper for ``member_index`` plans: the
+    planner computes those clobbers directly in ``_plan_member_index``.
     """
     return frozenset({"ax", "bx"}) if terms else frozenset()
 

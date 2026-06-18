@@ -161,14 +161,6 @@ def _add_exec_probe(*, image: Path, name: str) -> None:
         )
 
 
-# Two Stage 3a depth shapes are deferred to FRONTEND/parser work, NOT codegen:
-# pointer-to-multidim-array declarations (``int (*pm)[2][3]``, needed for
-# ``(*pm)[1][2]``) and subscript-then-member access (``arr[i][j].member``, e.g.
-# ``b.grid[1][0].f[1]``) both fail in the PARSER before any address resolution.
-# The recursive resolve_address(place) cannot reach them on its own, so their
-# probes were dropped here; re-add them once the parser accepts the syntax.
-
-
 def _bbfs_bin_entry_names(*, image: Path) -> list[str | None]:
     """Return bin/'s slot table as a list of length 48; empty slots are None."""
     image_data = bytearray(image.read_bytes())
@@ -187,6 +179,14 @@ def _bbfs_bin_entry_names(*, image: Path) -> list[str | None]:
         bytes(image_data[entry_offset : entry_offset + NAME_FIELD]).rstrip(b"\x00").decode() if image_data[entry_offset] != 0 else None
         for entry_offset in iter_entries(base_offset=bin_start * SECTOR_SIZE, sector_count=_BBFS_DIRECTORY_SECTORS)
     ]
+
+
+# Two Stage 3a depth shapes are deferred to FRONTEND/parser work, NOT codegen:
+# pointer-to-multidim-array declarations (``int (*pm)[2][3]``, needed for
+# ``(*pm)[1][2]``) and subscript-then-member access (``arr[i][j].member``, e.g.
+# ``b.grid[1][0].f[1]``) both fail in the PARSER before any address resolution.
+# The recursive resolve_address(place) cannot reach them on its own, so their
+# probes were dropped here; re-add them once the parser accepts the syntax.
 
 
 def _bbfs_pad_bin_to_full_directory(*, image: Path, test: ProgramTest) -> None:
@@ -319,11 +319,6 @@ int main() {
     )
 
 
-# ---------------------------------------------------------------------------
-# bbfs helpers (exec_first_middle_last setup)
-# ---------------------------------------------------------------------------
-
-
 def _compile_and_add_depth_probe(*, image: Path, name: str, source: str) -> None:
     """Attempt to compile *source* and add the resulting binary to bin/.
 
@@ -388,6 +383,56 @@ def _compile_and_add_depth_probe(*, image: Path, name: str, source: str) -> None
             image_path=str(image),
             subdirectory="bin",
         )
+
+
+# ---------------------------------------------------------------------------
+# bbfs helpers (exec_first_middle_last setup)
+# ---------------------------------------------------------------------------
+
+
+def _compound_index_store_setup(*, image: Path, test: ProgramTest) -> None:
+    """Runtime VALUE oracle for the re-admitted compound-index store (ledger class 4).
+
+    The ``member_index`` AddressPlan — ``state->buffer[state->length] = c``
+    where ``buffer`` is a pointer field and ``length`` a dynamic index field —
+    is byte-proven by ``tests/test_cc_function_sizes.py`` but its only library
+    consumer is the buffered branch of stdio.c ``_emit``, reached solely by
+    ``snprintf`` / ``sprintf``, which no userland program calls.  This probe
+    reproduces ``_emit``'s exact store shape in a standalone program: a helper
+    takes ``struct sink *`` and writes each character at the current dynamic
+    length into a live buffer, then ``main`` prints the accumulated bytes.
+
+    If the member_index store materialised the wrong address or value, the
+    formatted string would be corrupted, so the exact ``12345`` assertion fails;
+    it passes when the store writes the right byte at ``buffer + length``.
+    Expected output: 12345.
+    """
+    _compile_and_add_depth_probe(
+        image=image,
+        name=test.name,
+        source="""\
+struct sink { char *buffer; int capacity; int length; };
+void emit_at_length(struct sink *state, char character) {
+    state->buffer[state->length] = character;
+    state->length = state->length + 1;
+}
+char storage[16];
+struct sink buffered_output;
+int main() {
+    buffered_output.buffer = storage;
+    buffered_output.capacity = 16;
+    buffered_output.length = 0;
+    emit_at_length(&buffered_output, '1');
+    emit_at_length(&buffered_output, '2');
+    emit_at_length(&buffered_output, '3');
+    emit_at_length(&buffered_output, '4');
+    emit_at_length(&buffered_output, '5');
+    storage[buffered_output.length] = 0;
+    printf("%s\\n", storage);
+    return 0;
+}
+""",
+    )
 
 
 def _depth_arrow_index_setup(*, image: Path, test: ProgramTest) -> None:
@@ -1162,6 +1207,16 @@ TESTS: list[ProgramTest] = [
         setup=_chain_bitfield_store_setup,
     ),
     ProgramTest("chmod", ["chmod +x arp"], r"\$"),
+    # Runtime VALUE check for the re-admitted compound-index store (ledger
+    # class 4): emit_at_length writes each digit at state->buffer[state->length]
+    # — the exact member_index plan shape of stdio.c _emit, otherwise reached
+    # only via snprintf/sprintf which no userland program calls.
+    ProgramTest(
+        "compound_index_store",
+        ["compound_index_store"],
+        r"^12345$",
+        setup=_compound_index_store_setup,
+    ),
     ProgramTest("cp", ["cp src/parse_ip.asm tmpb", "ls"], r"tmpb"),
     ProgramTest(
         "cp_into_subdir",

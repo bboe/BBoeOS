@@ -672,6 +672,13 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         # auto-pinned locals declared but not yet stored to).  None
         # means "no info available" — fall back to saving everything.
         self._ir_call_pinned_initialized: dict[int, frozenset[str]] = {}
+        # Sunk index-term defs (phase 2 ledger class 4): single-use
+        # ``ir.Load`` / ``ir.Block(Assign)`` defs consumed as a member-index
+        # store Address's only dynamic index leaf, suppressed at their arms
+        # and replayed at the resolver's index-evaluation slot inside
+        # ``_materialize_member_index_plan``.  Repopulated per IR function
+        # in generate_function, defaulted empty for non-IR bodies.
+        self._ir_sunk_index_terms: dict[str, ir.Block | ir.Load] = {}
         # Sunk store-RHS defs (Task 6a / phase 2): repopulated per IR
         # function in generate_function; defaulted empty here so the
         # legacy place-driven store terminals (reachable from non-IR
