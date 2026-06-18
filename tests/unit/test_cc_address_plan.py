@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from cc import ir
-from cc.ast_nodes import SubscriptPlace
+from cc.ast_nodes import Index, SubscriptPlace
 from cc.cli import _discover_include_paths, compile_module  # noqa: PLC2701 — the census needs the CLI's include discovery
 from cc.codegen.address_plan import AddressPlan, AddressTerm, scale_encodes_in_operand
 from cc.codegen.x86.generator import X86CodeGenerator
@@ -221,6 +221,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 #: The locked residual census: repo-relative source -> unplanned Address count.
 #: Files with zero residuals are omitted.
 RESIDUAL_CENSUS_ALLOWLIST = {"user/programs/shell.c": 6}
+
+SINK_STORE_SOURCE = """
+struct inner { int a; int b; };
+struct outer { int pad; struct inner mid; };
+int table[8];
+void sink_chained(struct outer *p, int i) {
+    p->mid.b = table[i];
+}
+"""
 
 SPANNING_TEMP_SOURCE = """
 struct pair { int first; int second; };
@@ -466,6 +475,84 @@ def test_arrow_member_store_consumes_native_plan() -> None:
     # around the base load (a push/pop pair here would be a +2-byte
     # regression the byte gate would also catch corpus-wide).
     assert "push eax" not in lines
+
+
+def test_ax_clobbering_store_sinks_single_use_rhs() -> None:
+    """AX-clobbering store terminals sink their single-use RHS def (Task 6a).
+
+    The complement of Task 5's accumulator ride: when the consuming
+    store's materialization runs THROUGH the accumulator before the RHS
+    read (``_plan_preserves_accumulator_for_store_rhs`` is False — the
+    chained ``base_kind == "plan"`` ordering), a pre-lowered RHS temp
+    would pay a register bounce or a frame spill the legacy inline walk
+    never paid.  The sink suppresses the def's standalone emission and
+    replays it at the terminal's post-materialization RHS slot,
+    reproducing the legacy byte sequence exactly (the readdir +6
+    anatomy from the first class-3 re-admission attempt).
+
+    Part 1 mirrors Task 5's synthetic-triple harness against real
+    recorded plans: the chained store sinks a visible
+    ``ir.BinaryOperation`` def; Task 5's preserve=True arrow fixture
+    does NOT sink (the value rides ``ax_local`` as before).  Part 2
+    drives the full pipeline with the Index admission already in effect
+    (the class-3 shape commit 2 permanently re-admits ``ast_nodes.Index``
+    as a byte-safe store RHS, so the ``_is_byte_safe_store_rhs``
+    monkeypatch now also patches the live gate to confirm admission).
+    Both the baseline and the sunk generator compile through the sunk
+    path, so the ``sunk_body == baseline_body`` comparison is a
+    same-output sanity check; the structural assertions (ordering,
+    frame-slot absence, register-home absence) carry the regression
+    value of this test.
+    """
+
+    def sunk_verdict(source_text: str, /) -> tuple[str, dict[str, ir.Instruction]]:
+        generator, bodies = _generate_with_ir_bodies(source_text)
+        (body,) = bodies
+        (store,) = (instruction for instruction in body if isinstance(instruction, ir.Store))
+        address_instruction = body[body.index(store) - 1]
+        assert isinstance(address_instruction, ir.Address)
+        assert address_instruction.destination == store.address
+        assert isinstance(store.value, str)
+        synthetic_body: list[ir.Instruction] = [
+            ir.BinaryOperation(destination=store.value, left="seed", operation="/", right=1000),
+            address_instruction,
+            store,
+        ]
+        return store.value, generator._collect_ir_sunk_store_values(synthetic_body)  # noqa: SLF001
+
+    arrow_temp, arrow_sunk = sunk_verdict(ARROW_COPY_SOURCE)
+    assert arrow_temp not in arrow_sunk  # preserve=True: Task 5's accumulator ride wins
+    chained_temp, chained_sunk = sunk_verdict(CHAINED_STORE_SOURCE)
+    assert chained_temp in chained_sunk  # AX-clobbering materialization: the def is sunk
+
+    # Part 2: full-pipeline emission with the Index RHS admitted, compared
+    # byte-for-byte against the legacy Access lowering of the same source.
+    def function_body(generator: X86CodeGenerator, /) -> str:
+        # The function's own lines: from its label to the first blank line.
+        return generator.output.split("sink_chained:")[1].split("\n\n")[0]
+
+    baseline_body = function_body(_generate(SINK_STORE_SOURCE))
+    original_predicate = ir._is_byte_safe_store_rhs  # noqa: SLF001
+
+    def admitting_predicate(node: object, /) -> bool:
+        return original_predicate(node) or isinstance(node, Index)
+
+    ir._is_byte_safe_store_rhs = admitting_predicate  # type: ignore[assignment] # noqa: SLF001
+    try:
+        sunk_generator = _generate(SINK_STORE_SOURCE)
+    finally:
+        ir._is_byte_safe_store_rhs = original_predicate  # noqa: SLF001
+    (sunk_temp,) = sunk_generator._ir_sunk_store_values  # noqa: SLF001
+    assert isinstance(sunk_generator._ir_sunk_store_values[sunk_temp], ir.Index)  # noqa: SLF001
+    sunk_body = function_body(sunk_generator)
+    lines = [line.strip() for line in sunk_body.splitlines()]
+    base_seed_position = lines.index("mov ebx, eax")  # the chained base materialization
+    (rhs_position,) = (position for position, line in enumerate(lines) if "_g_table" in line)
+    assert base_seed_position < rhs_position  # RHS replays AFTER the base materialization
+    assert "sub esp, 8" in lines  # only the two regparm spill slots — no frame slot for the sunk temp
+    assert sunk_temp not in sunk_generator.locals  # the sunk temp was never slot-allocated
+    assert sunk_temp not in sunk_generator.temp_pinned_registers  # ... and never register-homed (no bounce)
+    assert sunk_body == baseline_body  # same-output sanity check: both compile through the sunk path
 
 
 def test_chained_dot_member_load_records_no_address_op() -> None:
