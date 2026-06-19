@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from cc import ir
-from cc.ast_nodes import Index, SubscriptPlace
+from cc.ast_nodes import BinaryOperation, Index, SubscriptPlace
 from cc.cli import _discover_include_paths, compile_module  # noqa: PLC2701 — the census needs the CLI's include discovery
 from cc.codegen.address_plan import AddressPlan, AddressTerm, scale_encodes_in_operand
 from cc.codegen.x86.generator import X86CodeGenerator
@@ -70,6 +70,28 @@ struct outer { int pad; struct inner mid; };
 struct source { int field; };
 void copy_chained(struct outer *p, struct source *q) {
     p->mid.b = q->field;
+}
+"""
+
+CHAIN_SINK_SOURCE = """
+struct timeval { int seconds; int microseconds; };
+void split_milliseconds(struct timeval *out_pointer, int total_milliseconds) {
+    out_pointer->seconds = total_milliseconds / 1000;
+    out_pointer->microseconds = (total_milliseconds % 1000) * 1000;
+}
+"""
+
+COMPOUND_CONDITIONAL_INDEX_STORE_SOURCE = """
+struct sink { char *buffer; int capacity; int length; };
+void terminate(struct sink *state) {
+    state->buffer[state->length < state->capacity ? state->length : state->capacity - 1] = 0;
+}
+"""
+
+COMPOUND_INDEX_STORE_SOURCE = """
+struct sink { char *buffer; int capacity; int length; };
+void write_at_length(struct sink *state, char character) {
+    state->buffer[state->length] = character;
 }
 """
 
@@ -266,6 +288,15 @@ struct entry { int key; int payload; };
 struct entry table[8];
 void write_payload(int index, int leaf) {
     table[index].payload = leaf;
+}
+"""
+
+SUBSCRIPT_SINK_SOURCE = """
+struct entry { int key; int payload; };
+struct entry table[8];
+int source_values[8];
+void copy_payload(int index, int position) {
+    table[index].payload = source_values[position];
 }
 """
 
@@ -553,6 +584,77 @@ def test_ax_clobbering_store_sinks_single_use_rhs() -> None:
     assert sunk_temp not in sunk_generator.locals  # the sunk temp was never slot-allocated
     assert sunk_temp not in sunk_generator.temp_pinned_registers  # ... and never register-homed (no bounce)
     assert sunk_body == baseline_body  # same-output sanity check: both compile through the sunk path
+
+
+def test_chain_of_binary_operations_sinks_into_store() -> None:
+    """Consecutive BinaryOperation defs feeding a store sink as a unit (phase 2 Gap A1).
+
+    The gettimeofday ``(total_ms % 1000) * 1000`` anatomy: the chain
+    ``[d1 = a % 1000; d2 = d1 * 1000; Address; Store(d2)]`` sinks BOTH
+    defs — including on an accumulator-preserving plan, where a lone def
+    would ride Task 5's accumulator instead — because the intermediate
+    link otherwise pays a frame-slot round-trip (Task 4's DX reservation
+    keeps it out of registers; legacy emitted ``mov eax, edx`` inline).
+    The replay walks d1..dn at the terminal's RHS-first slot with the
+    accumulator riding between links: the div→mod remainder fusion fires
+    on the replayed ``%`` exactly as at the def site, and zero slot
+    traffic separates the links.
+
+    Part 1 locks the collector verdict on a synthetic chain against the
+    real accumulator-preserving plan of ``ARROW_COPY_SOURCE``; part 2
+    drives the full pipeline (the class-1 chain admission monkeypatched
+    in ahead of its permanent commit) and pins the legacy byte shape.
+    """
+    generator, bodies = _generate_with_ir_bodies(ARROW_COPY_SOURCE)
+    (body,) = bodies
+    (store,) = (instruction for instruction in body if isinstance(instruction, ir.Store))
+    address_instruction = body[body.index(store) - 1]
+    assert isinstance(address_instruction, ir.Address)
+    assert address_instruction.destination == store.address
+    assert isinstance(store.value, str)
+    link_temp = "_ir_900"
+    synthetic_body: list[ir.Instruction] = [
+        ir.BinaryOperation(destination=link_temp, left="seed", operation="%", right=1000),
+        ir.BinaryOperation(destination=store.value, left=link_temp, operation="*", right=1000),
+        address_instruction,
+        store,
+    ]
+    sunk = generator._collect_ir_sunk_store_values(synthetic_body)  # noqa: SLF001
+    assert link_temp in sunk  # the intermediate link is suppressed with the final
+    assert store.value in sunk
+    assert isinstance(sunk[store.value], ir.BinaryOperation)
+    assert sunk[store.value].left == link_temp
+
+    # Part 2: full-pipeline emission of the gettimeofday shape with the
+    # BinaryOperation RHS admission applied.
+    original_predicate = ir._is_byte_safe_store_rhs  # noqa: SLF001
+
+    def admitting_predicate(node: object, /) -> bool:
+        return original_predicate(node) or isinstance(node, BinaryOperation)
+
+    ir._is_byte_safe_store_rhs = admitting_predicate  # type: ignore[assignment] # noqa: SLF001
+    try:
+        chain_generator = _generate(CHAIN_SINK_SOURCE)
+    finally:
+        ir._is_byte_safe_store_rhs = original_predicate  # noqa: SLF001
+    sunk_values = chain_generator._ir_sunk_store_values  # noqa: SLF001
+    # Exactly the % link and the * final are sunk; the lone / def on the
+    # preserving plan keeps Task 5's accumulator ride.
+    assert sorted(definition.operation for definition in sunk_values.values()) == ["%", "*"]
+    for temp in sunk_values:
+        assert temp not in chain_generator.locals  # never slot-allocated
+        assert temp not in chain_generator.temp_pinned_registers  # never register-homed
+    body_text = chain_generator.output.split("split_milliseconds:")[1].split("\n\n")[0]
+    lines = [line.strip() for line in body_text.splitlines()]
+    assert sum(1 for line in lines if line.startswith("div ")) == 1  # remainder fusion: no second div
+    assert "push edx" not in lines  # DX reservation keeps the div bare
+    fusion_position = lines.index("mov eax, edx")  # the fused remainder reuse
+    assert lines[fusion_position + 1] == "imul eax, 1000"  # zero slot traffic between chain links
+    # Only the regparm prologue spills write frame slots — the chain
+    # temps never spill (the measured regression was ``mov [slot], edx``
+    # / ``mov eax, [slot]`` replacing the fused ``mov eax, edx``).
+    slot_writes = [line for line in lines if line.startswith("mov [ebp-")]
+    assert slot_writes == ["mov [ebp-4], eax", "mov [ebp-8], edx"]
 
 
 def test_chained_dot_member_load_records_no_address_op() -> None:
@@ -1096,6 +1198,54 @@ def test_subscript_call_slot_plans_and_calls_natively() -> None:
     assert lines.count("shl eax, 2") == 1
     assert lines.count("mov eax, [eax]") == 1  # slot load
     assert lines.count("call eax") == 1
+
+
+def test_subscript_terminal_store_sinks_single_use_rhs() -> None:
+    """Subscript-terminal stores sink their single-use RHS def at the head slot (phase 2 Gap B).
+
+    The preserve predicate returns True for ``subscript_terminal`` plans
+    (the RHS read precedes every AX-clobbering materialization step), so
+    the original sink gate skipped them — but the subscript terminal
+    evaluates its RHS at its HEAD via ``generate_expression``, so a
+    pre-lowered temp pays a dead slot round-trip (``mov [slot], eax`` at
+    the def, ``mov eax, [slot]`` at the head — the symbol_add
+    ``scope & 0xFF`` +6 anatomy).  The widened gate sinks the def and
+    replays it at the head, directly before the unconditional RHS spill.
+
+    Part 1 drives the full pipeline with the already-admitted Index RHS;
+    part 2 locks the widened gate for a synthetic BinaryOperation def
+    (the class-1 shape) against the same real subscript_terminal plan.
+    """
+    generator, bodies = _generate_with_ir_bodies(SUBSCRIPT_SINK_SOURCE)
+    (sunk_temp,) = generator._ir_sunk_store_values  # noqa: SLF001
+    assert isinstance(generator._ir_sunk_store_values[sunk_temp], ir.Index)  # noqa: SLF001
+    assert sunk_temp not in generator.locals  # never slot-allocated
+    assert sunk_temp not in generator.temp_pinned_registers  # never register-homed
+    body_text = generator.output.split("copy_payload:")[1].split("\n\n")[0]
+    lines = [line.strip() for line in body_text.splitlines()]
+    # Replay-at-head shape: the RHS load lands directly before the
+    # terminal's unconditional spill — no slot round-trip in between.
+    rhs_position = max(position for position, line in enumerate(lines) if "_g_source_values" in line)
+    assert lines[rhs_position + 1] == "push eax"
+    # Only the regparm prologue spills write frame slots — the sunk temp
+    # never pays the ``mov [slot], eax`` / ``mov eax, [slot]`` round-trip.
+    slot_writes = [line for line in lines if line.startswith("mov [ebp-")]
+    assert slot_writes == ["mov [ebp-4], eax", "mov [ebp-8], edx"]
+
+    # Part 2: synthetic BinaryOperation def against the same plan — the
+    # class-1 leaf-operand shape the admission commit re-admits.
+    (body,) = bodies
+    (store,) = (instruction for instruction in body if isinstance(instruction, ir.Store))
+    address_instruction = body[body.index(store) - 1]
+    assert isinstance(address_instruction, ir.Address)
+    assert isinstance(store.value, str)
+    synthetic_body: list[ir.Instruction] = [
+        ir.BinaryOperation(destination=store.value, left="position", operation="&", right=255),
+        address_instruction,
+        store,
+    ]
+    sunk = generator._collect_ir_sunk_store_values(synthetic_body)  # noqa: SLF001
+    assert store.value in sunk
 
 
 def test_temp_homes_avoid_member_store_base_clobber() -> None:

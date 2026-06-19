@@ -94,6 +94,55 @@ def test_arrow_member_increment_lowers_to_increment_decrement_op() -> None:
     assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"member increment must not ride Block/Access, got {kinds}"
 
 
+def test_binary_operation_rhs_member_store_lowers_to_store() -> None:
+    """``p->member = a / b`` lowers onto Address + Store with a BinaryOperation RHS temp.
+
+    No ir.Access producer remains for the shape (ledger class 1 re-admitted in
+    phase 2).
+    """
+    body = _build_function_body(
+        "struct s { int value; };\nvoid f(struct s *pointer, int a, int b) { pointer->value = a / b; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    binary_operations = [op for op in body if isinstance(op, ir.BinaryOperation)]
+    addresses = [op for op in body if isinstance(op, ir.Address)]
+    stores = [op for op in body if isinstance(op, ir.Store)]
+    assert len(binary_operations) == 1, f"expected exactly one ir.BinaryOperation (the div), got {kinds}"
+    assert len(addresses) == 1, f"expected exactly one ir.Address (the store target), got {kinds}"
+    assert len(stores) == 1, f"expected exactly one ir.Store, got {kinds}"
+    assert stores[0].value == binary_operations[0].destination, (
+        f"the Store must consume the BinaryOperation temp, got store.value={stores[0].value!r}"
+        f" vs binary_operation.destination={binary_operations[0].destination!r}"
+    )
+    assert not any(isinstance(op, ir.Access) for op in body), f"BinaryOperation RHS store must not ride Access, got {kinds}"
+
+
+def test_chained_binary_operation_rhs_store_lowers_without_access() -> None:
+    """``p->member = (a % 1000) * 1000`` lowers fully onto chained BinaryOperations + Address + Store.
+
+    The two-binop chain leaves no ir.Access producer: each link is its
+    own ir.BinaryOperation, the final temp feeds the Store, and the
+    intermediate temp feeds the final def's LEFT operand (the shape the
+    emission-side chain sink replays at the terminal's RHS slot).
+    """
+    body = _build_function_body(
+        "struct s { int value; };\nvoid f(struct s *pointer, int a) { pointer->value = (a % 1000) * 1000; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    binary_operations = [op for op in body if isinstance(op, ir.BinaryOperation)]
+    stores = [op for op in body if isinstance(op, ir.Store)]
+    assert len(binary_operations) == 2, f"expected the %% and * links, got {kinds}"
+    remainder, product = binary_operations
+    assert remainder.operation == "%"
+    assert product.operation == "*"
+    assert product.left == remainder.destination, "the * link must consume the % link's temp as its LEFT operand"
+    assert len(stores) == 1, f"expected exactly one ir.Store, got {kinds}"
+    assert stores[0].value == product.destination, "the Store must consume the final chain temp"
+    assert not any(isinstance(op, ir.Access) for op in body), f"chained BinaryOperation RHS store must not ride Access, got {kinds}"
+
+
 def test_every_instruction_subclass_declares_value_fields() -> None:
     """Every member of :data:`cc.ir.Instruction` declares ``VALUE_FIELDS``.
 
@@ -202,6 +251,23 @@ def test_multidim_subscript_load_lowers_to_address_with_index_tuple() -> None:
     assert any(isinstance(op, ir.Load) for op in body), f"expected an ir.Load op, got {kinds}"
     # The multidim read no longer rides the AST escape hatch.
     assert not any(isinstance(op, (ir.Block, ir.Access)) for op in body), f"multidim load must not ride Block/Access, got {kinds}"
+
+
+def test_place_load_operand_binary_operation_rhs_stays_on_access() -> None:
+    """``p->a = p->a + q->b`` (PlaceLoad operand) keeps its ir.Access producer.
+
+    The documented residual of the class-1 re-admission: the
+    PlaceLoad-operand subfamily (``block->bytes += curr->bytes`` in
+    stdlib.c release/malloc) stays on Access because its legacy 1-byte
+    push/pop stack choreography cannot be matched by slot-resident
+    temps.
+    """
+    body = _build_function_body(
+        "struct s { int a; int b; };\nvoid f(struct s *p, struct s *q) { p->a = p->a + q->b; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    assert any(isinstance(op, ir.Access) for op in body), f"PlaceLoad-operand BinaryOperation RHS must stay on Access, got {kinds}"
 
 
 def test_struct_field_multidim_load_lowers_to_member_rooted_address() -> None:
