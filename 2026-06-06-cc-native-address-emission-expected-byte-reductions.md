@@ -64,7 +64,15 @@ stack choreography cannot be matched by slot-resident temps;
 
 ### 2. `Cast` store RHS — 3 sites, +6 bytes in `readdir`
 
-**OPEN — phase 3** (`Store.width`).
+**CASHED (phase 3, 2026-06-19) — corrected mechanism.** Re-admitted via the
+store-RHS sink, NOT `Store.width`: recon falsified the width premise. The
+`readdir` +6 was never a width drop (the `(ino_t)` cast stores a dword into a
+dword field, `mov [ebx], eax` at the same width before and after) — it was a
+cast-temp spill/reload across address resolution, the exact class-1/3/4 anatomy.
+A `Cast` store RHS lowers to `ir.Block(Assign(Cast))`, so phase 3 extended
+`_collect_ir_sunk_store_values` to collect and replay that Block def at the
+terminal RHS slot (mirroring `_collect_ir_sunk_index_terms`). `readdir` 0-delta;
+`grow_heap`/`strtol` were always 0-delta (pointer-width casts).
 
 - **Sites:** `dirent.c` `readdir` (+6, the width-bearing `char` cast);
   `stdlib.c` `grow_heap` and `strtol` casts measured 0-delta in the same

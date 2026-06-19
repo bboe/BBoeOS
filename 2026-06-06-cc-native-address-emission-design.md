@@ -338,3 +338,41 @@ phase table's one-line summary:
   exposure, tracked for follow-up): the `division_remainder` fusion is never
   invalidated by an intervening call or operand mutation between the fused div
   and mod — both shapes miscompile on `main` today.
+
+## Phase-3 errata (2026-06-19, implementation `bboe/cc-naddr-phase3-cast`)
+
+The `Store.width` premise in the "Terminals, Store.width, and the clobber model"
+section is **wrong** and was not implemented. Reconnaissance on `main`
+(6f545794) established:
+
+- **`ir.Store` already has a vestigial `width: int` field** — constructed
+  `width=0` at all six builder sites and entirely unused at emission. Store
+  width is derived from the lvalue's field layout (`AddressPlan` /
+  `MemoryOperand`), never from `Store.width`.
+- **The `readdir` +6 was never a width drop.** The regressing store is
+  `directory->entry.d_ino = (ino_t)d_ino` (`ino_t` = `uint32_t`), a dword cast
+  into a dword field; the emitted store stays `mov [ebx], eax` at the same width
+  before and after. The +6 is a cast-temp spill/reload across address resolution
+  — the same class-1/3/4 anatomy phase 2 erased with the store-RHS sink. The
+  bare-`Value` round-trip the section blames never occurs: a `Cast` store RHS
+  lowers to `ir.Block(Assign(Cast))`, which preserves the cast in AST; the width
+  was always correct.
+- **Casts are codegen-identity for stores** (`generate_expression`'s `Cast` arm
+  ignores `target_type`, no truncation) and the cast width already equals the
+  field width at every corpus site, so a populated `Store.width` would override
+  nothing.
+
+**Corrected mechanism (implemented):** re-admit `Cast` by extending the value
+sink (`_collect_ir_sunk_store_values`) to the `Block(Assign(Cast))` def shape
+and replaying it at the terminal RHS slot — identical in spirit to the
+`_collect_ir_sunk_index_terms` Block handling. No `Store.width` plumbing.
+
+**`Store.width` disposition:** stays vestigial; it is a candidate for
+**removal**, not population. It is not even the right hook for the one real
+future need it gestured at — **narrowing-cast truncation** (`(char)0x1FF` should
+be `0xFF`; cc.py currently never truncates). That correctness gap is
+deliberately deferred and, when addressed, belongs in `generate_expression`'s
+`Cast` codegen (a cast's truncation is the cast's property), not on the store op
+(a store's width is the lvalue's property). The design conflated the two.
+
+Phase table row 3 mechanism is "store-RHS cast sink", not "`Store.width`".
