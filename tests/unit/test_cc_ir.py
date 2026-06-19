@@ -118,6 +118,33 @@ def test_binary_operation_rhs_member_store_lowers_to_store() -> None:
     assert not any(isinstance(op, ir.Access) for op in body), f"BinaryOperation RHS store must not ride Access, got {kinds}"
 
 
+def test_cast_rhs_member_store_lowers_to_store() -> None:
+    """p->member = (char)x lowers onto Address + Store with a sunk cast def.
+
+    No ir.Access producer remains for the shape (ledger class 2 re-admitted
+    in phase 3).
+    """
+    body = _build_function_body(
+        "struct inner { int b; };\nstruct outer { int pad; struct inner mid; };\nvoid f(struct outer *p, int x) { p->mid.b = (char)x; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    addresses = [op for op in body if isinstance(op, ir.Address)]
+    stores = [op for op in body if isinstance(op, ir.Store)]
+    assert len(addresses) == 1, f"expected exactly one ir.Address (the store target), got {kinds}"
+    assert len(stores) == 1, f"expected exactly one ir.Store, got {kinds}"
+    cast_defs = [
+        op
+        for op in body
+        if isinstance(op, ir.Block)
+        and isinstance(op.node, ast_nodes.Assign)
+        and isinstance(op.node.expr, ast_nodes.Cast)
+        and op.node.name == stores[0].value
+    ]
+    assert len(cast_defs) == 1, f"expected exactly one ir.Block(Assign(Cast)) def for the store value, got {kinds}"
+    assert not any(isinstance(op, ir.Access) for op in body), f"cast RHS store must not ride Access, got {kinds}"
+
+
 def test_chained_binary_operation_rhs_store_lowers_without_access() -> None:
     """``p->member = (a % 1000) * 1000`` lowers fully onto chained BinaryOperations + Address + Store.
 
