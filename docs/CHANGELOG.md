@@ -38,6 +38,24 @@ time.
 
 ### Changed
 
+- **cc.py native-Address emission refactor — phase 3 (2026-06-19).** Re-admits
+  `Cast` store RHS (ledger class 2) via the cast `Block(Assign(Cast))` store-RHS
+  sink: the cast's `Block` def is suppressed and replayed at the terminal's
+  legacy RHS slot so the pre-lowered temp never spills across the address
+  resolution. `readdir` gates 0-delta; this cashes the last of the four ledger
+  classes (1 / 2 / 3 / 4 all at `.text`-size parity). The design-specs errata
+  records the corrected mechanism: the earlier `Store.width` premise was
+  falsified — the regression was a cast-temp spill, not a dropped width; casts
+  are codegen-identity so the store width (the lvalue's field width) is
+  unchanged. Caveat (not measured by the `.text`-size gate): an
+  accumulator-preserving cast store whose value rides AX still reserves an
+  unused frame slot, adding 4 bytes of stack to `grow_heap` / `strtol` — a
+  pre-existing slot-allocation pattern (`main`'s `release` already has such
+  gaps) that Cast admission extends by two sites; recovering it (excluding
+  ax-riding single-use store-RHS temps from frame allocation, which also helps
+  the phase-2 preserve-plan sites) is a tracked follow-up, orthogonal to this
+  re-admission.
+
 - **cc.py native-Address emission refactor — phase 2 (2026-06-07).** The
   register allocator now consumes per-`AddressPlan` clobber facts
   (`_instruction_clobber_registers` feeding `RegisterConstraints.allowed` in
