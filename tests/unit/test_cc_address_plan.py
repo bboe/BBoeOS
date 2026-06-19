@@ -12,7 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from cc import ir
-from cc.ast_nodes import BinaryOperation, Index, SubscriptPlace
+from cc.ast_nodes import Assign, BinaryOperation, Cast, Index, SubscriptPlace, Var
 from cc.cli import _discover_include_paths, compile_module  # noqa: PLC2701 — the census needs the CLI's include discovery
 from cc.codegen.address_plan import AddressPlan, AddressTerm, scale_encodes_in_operand
 from cc.codegen.x86.generator import X86CodeGenerator
@@ -593,6 +593,48 @@ def test_ax_clobbering_store_sinks_single_use_rhs() -> None:
     assert sunk_temp not in sunk_generator.locals  # the sunk temp was never slot-allocated
     assert sunk_temp not in sunk_generator.temp_pinned_registers  # ... and never register-homed (no bounce)
     assert sunk_body == baseline_body  # same-output sanity check: both compile through the sunk path
+
+
+def test_cast_store_rhs_block_def_is_sunk() -> None:
+    """An AX-clobbering store's ``Block(Assign(Cast))`` RHS def sinks (phase 3, class 2).
+
+    A cast store RHS (``p->field = (T)x``) lowers to
+    ``ir.Block(node=Assign(expr=Cast, name=temp))``.  Emitted standalone
+    on an AX-clobbering plan (``_plan_preserves_accumulator_for_store_rhs``
+    False — the chained ``base_kind == "plan"`` ordering), the cast temp
+    pays a spill/reload across the address resolution (the readdir +6
+    anatomy) that the value sink removes by replaying the def at the
+    terminal's post-materialization RHS slot.
+
+    No ``Cast`` store RHS is admitted yet (Task 2), so the corpus never
+    forms the ``[Block(Cast); Address; Store]`` triple — a compile-through
+    test could not produce it.  The collector is therefore exercised
+    DIRECTLY on a hand-built synthetic body whose ``ir.Address`` carries
+    the real AX-clobbering plan recorded for ``CHAINED_STORE_SOURCE``,
+    mirroring the synthetic-triple harness of
+    :func:`test_ax_clobbering_store_sinks_single_use_rhs`.
+    """
+    generator, bodies = _generate_with_ir_bodies(CHAINED_STORE_SOURCE)
+    (body,) = bodies
+    (store,) = (instruction for instruction in body if isinstance(instruction, ir.Store))
+    address_instruction = body[body.index(store) - 1]
+    assert isinstance(address_instruction, ir.Address)
+    assert address_instruction.destination == store.address
+    assert isinstance(store.value, str)
+    cast_block = ir.Block(node=Assign(expr=Cast(expression=Var(name="source"), target_type="char"), name=store.value))
+    synthetic_body: list[ir.Instruction] = [cast_block, address_instruction, store]
+    sunk = generator._collect_ir_sunk_store_values(synthetic_body)  # noqa: SLF001
+    assert sunk == {store.value: cast_block}  # the Block(Assign(Cast)) def is sunk into the store terminal
+
+    # Negative 1: a Block whose Assign.expr is a bare Var (no Cast) is not
+    # the class-2 shape, so it stays on the slot path.
+    bare_block = ir.Block(node=Assign(expr=Var(name="source"), name=store.value))
+    assert generator._collect_ir_sunk_store_values([bare_block, address_instruction, store]) == {}  # noqa: SLF001
+
+    # Negative 2: a Cast over an ``_ir_*`` temp is rejected conservatively —
+    # the temp's home is unknowable in this pre-allocation scan.
+    temp_cast_block = ir.Block(node=Assign(expr=Cast(expression=Var(name="_ir_other"), target_type="char"), name=store.value))
+    assert generator._collect_ir_sunk_store_values([temp_cast_block, address_instruction, store]) == {}  # noqa: SLF001
 
 
 def test_chain_of_binary_operations_sinks_into_store() -> None:

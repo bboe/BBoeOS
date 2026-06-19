@@ -1074,20 +1074,6 @@ class EmissionMixin:
         matching the value sink.  Runs after the eager
         ``_plan_ir_addresses`` pre-pass so both plan lookups are populated.
         """
-
-        def reads_ir_temp(node: Node, /) -> bool:
-            # Conservative operand scan for the Block class: any str field
-            # (or descendant) spelled like an IR temp counts as a read.
-            for node_field in fields(node):
-                value = getattr(node, node_field.name)
-                if isinstance(value, str) and value.startswith("_ir_"):
-                    return True
-                if isinstance(value, Node) and reads_ir_temp(value):
-                    return True
-                if isinstance(value, list) and any(isinstance(item, Node) and reads_ir_temp(item) for item in value):
-                    return True
-            return False
-
         use_counts: dict[str, int] = {}
         for instruction in body:
             for name in regalloc.instruction_uses(instruction=instruction):
@@ -1117,7 +1103,7 @@ class EmissionMixin:
                     continue
             elif isinstance(definition, ir.Block) and isinstance(definition.node, Assign):
                 temp = definition.node.name
-                if reads_ir_temp(definition.node.expr):
+                if _ast_node_reads_ir_temp(definition.node.expr):
                     continue
             else:
                 continue
@@ -1128,7 +1114,7 @@ class EmissionMixin:
             result[temp] = definition
         return result
 
-    def _collect_ir_sunk_store_values(self, body: list[ir.Instruction], /) -> dict[str, ir.BinaryOperation | ir.Index]:
+    def _collect_ir_sunk_store_values(self, body: list[ir.Instruction], /) -> dict[str, ir.BinaryOperation | ir.Block | ir.Index]:
         """Return store-RHS temp defs to sink into their AX-clobbering store terminals.
 
         The missing half of the evaluation-order contract whose
@@ -1223,7 +1209,7 @@ class EmissionMixin:
         for instruction in body:
             for name in regalloc.instruction_uses(instruction=instruction):
                 use_counts[name] = use_counts.get(name, 0) + 1
-        result: dict[str, ir.BinaryOperation | ir.Index] = {}
+        result: dict[str, ir.BinaryOperation | ir.Block | ir.Index] = {}
         for position, instruction in enumerate(body):
             if not isinstance(instruction, ir.Store) or position < 2:
                 continue
@@ -1235,6 +1221,29 @@ class EmissionMixin:
                 continue
             plan = self._ir_address_plans.get(address_instruction.destination)
             if plan is None:
+                continue
+            definition = body[position - 2]
+            if (
+                isinstance(definition, ir.Block)
+                and isinstance(definition.node, Assign)
+                and isinstance(definition.node.expr, Cast)
+                and definition.node.name == value
+            ):
+                # Lone class-2 def: a ``Block(Assign(expr=Cast))`` cast store
+                # RHS (``p->field = (T)x``).  The Block never links a chain
+                # (the cast wraps a single inner value), so it bypasses the
+                # BinaryOperation/Index chain walk below.  Reject when the
+                # cast's inner expression reads any ``_ir_*`` temp — its home
+                # is unknowable in this pre-allocation scan
+                # (``_ast_node_reads_ir_temp``, the same guard the index-term
+                # twin :meth:`_collect_ir_sunk_index_terms` applies to its
+                # Block class).  Honor the lone-def preserve gate: on a
+                # preserving non-subscript plan Task 5's accumulator ride
+                # already wins, so do not sink.
+                if not _ast_node_reads_ir_temp(definition.node.expr) and not (
+                    self._plan_preserves_accumulator_for_store_rhs(plan) and not plan.subscript_terminal
+                ):
+                    result[value] = definition
                 continue
             # Walk the def chain backwards from the final def at
             # ``position - 2``.  ``chain`` collects dn..d1 (reverse
@@ -1880,7 +1889,7 @@ class EmissionMixin:
             )
             self._emit_place_store(place, value_node)
 
-    def _emit_sunk_store_value(self, definition: ir.BinaryOperation | ir.Index, /) -> None:
+    def _emit_sunk_store_value(self, definition: ir.BinaryOperation | ir.Block | ir.Index, /) -> None:
         """Replay a sunk store-RHS *definition* into the accumulator (Task 6a).
 
         Called by the store terminal at the exact point its legacy
@@ -1929,6 +1938,16 @@ class EmissionMixin:
                 self.generate_expression(
                     BinaryOperation(left=self._ir_value_to_ast(left), operation=operation, right=self._ir_value_to_ast(right))
                 )
+            case ir.Block(node=Assign(expr=expression)):
+                # Sunk class-2 cast store RHS (``p->field = (T)x``): the def
+                # is a ``Block(Assign(expr=Cast))``.  Replaying the Cast node
+                # through ``generate_expression`` lands the inner value in
+                # the accumulator (a cast emits no runtime instructions —
+                # identity codegen), the exact walk the legacy inline RHS
+                # took.  The wrapped Cast carries a leaf inner expression
+                # (the collector rejected ``_ir_*`` reads), so no operand
+                # home shifts under the base-first reorder.
+                self.generate_expression(expression)
             case ir.Index(base=base, index=index):
                 self.generate_expression(Index(array=Var(name=base), index=self._ir_value_to_ast(index)))
             case _:
@@ -3280,14 +3299,24 @@ class EmissionMixin:
                         raise CompileError(message)
                     shape = self._ir_address_with_index(address_op)
                     self.generate_statement(PlaceCall(args=[], line=shape.line, place=shape))
-            case ir.Block(node=Assign(name=name)) if self._ir_sunk_index_terms.get(name) is instruction:
-                # Sunk index-term def (ledger class 4, Block class): the
-                # escape-hatch Assign of a complex index expression is
-                # suppressed here and its expression replays at the
-                # consuming member-index resolver's index slot
-                # (``_materialize_member_index_plan``) — no frame slot, no
-                # slot round-trip.  Identity check, mirroring the
-                # value-sink suppression.
+            case ir.Block(node=Assign(name=name)) if (
+                self._ir_sunk_index_terms.get(name) is instruction or self._ir_sunk_store_values.get(name) is instruction
+            ):
+                # Sunk Block def, suppressed here and replayed at its
+                # consumer's slot.  Two mutually-exclusive classes:
+                #
+                # * ``_ir_sunk_index_terms`` (ledger class 4): the
+                #   escape-hatch Assign of a complex index expression
+                #   replays at the consuming member-index resolver's index
+                #   slot (``_materialize_member_index_plan``).
+                # * ``_ir_sunk_store_values`` (ledger class 2): the
+                #   ``Block(Assign(expr=Cast))`` cast store RHS replays at
+                #   the AX-clobbering store terminal's post-materialization
+                #   RHS slot (``_emit_sunk_store_value``).
+                #
+                # Either way no frame slot is written and no slot round-trip
+                # is paid.  Identity check (not name): a multi-def temp's
+                # sibling defs must emit normally.
                 pass
             case ir.Access(node=node) | ir.Block(node=node):
                 self.generate_statement(node)
@@ -6853,6 +6882,28 @@ class EmissionMixin:
         # record both — the ride-along in the ``ir.Address`` case.
         for instruction in body:
             self._lower_ir_instruction(instruction)
+
+
+def _ast_node_reads_ir_temp(node: Node, /) -> bool:
+    """Return whether *node* (or any descendant) reads an ``_ir_*`` IR temp.
+
+    Conservative operand scan shared by the Block-def arms of
+    :meth:`X86CodeGenerator._collect_ir_sunk_index_terms` (the index-term
+    twin) and :meth:`X86CodeGenerator._collect_ir_sunk_store_values` (the
+    value twin): any ``str`` field — or descendant — spelled like an IR
+    temp counts as a read.  A Block def reading a temp is rejected because
+    the operand's home is unknowable in the pre-allocation scan both
+    collectors run before :meth:`X86CodeGenerator._allocate_ir_temps`.
+    """
+    for node_field in fields(node):
+        value = getattr(node, node_field.name)
+        if isinstance(value, str) and value.startswith("_ir_"):
+            return True
+        if isinstance(value, Node) and _ast_node_reads_ir_temp(value):
+            return True
+        if isinstance(value, list) and any(isinstance(item, Node) and _ast_node_reads_ir_temp(item) for item in value):
+            return True
+    return False
 
 
 def _att_to_intel(line: str) -> str:
