@@ -38,6 +38,26 @@ time.
 
 ### Changed
 
+- **cc.py native-Address emission refactor — phase 2 (2026-06-07).** The
+  register allocator now consumes per-`AddressPlan` clobber facts
+  (`_instruction_clobber_registers` feeding `RegisterConstraints.allowed` in
+  `_allocate_ir_temps`), fixing a latent wrong-code bug where a register-homed
+  IR temp could be silently destroyed by a member-base load that shared its
+  physical register. A DX pool reservation in div/mod functions preserves
+  `div`/`mod` remainder fusion under temp allocation (e.g. `gettimeofday`'s
+  `(total_ms % 1000) * 1000` chain). A store-RHS ride/sink mechanism
+  (accumulator-aware single-use pinning plus `_collect_ir_sunk_store_values` /
+  `_collect_ir_sunk_index_terms`) replays pre-lowered RHS and index defs at the
+  legacy evaluation slots so the temps never live across the address-resolution
+  clobber. With those mechanisms in place, ledger classes 1 (leaf and pure-chain
+  `BinaryOperation`), 3 (`Index`), and 4 (compound-index
+  `_is_mixed_subscript_chain_store`) are re-admitted into
+  `_is_byte_safe_store_rhs` at byte parity: `readdir`, `gettimeofday`,
+  `symbol_add`, `_emit`, and `vsnprintf` (and their callees) all gate 0-delta
+  across 361 functions in 49 files. Remaining exclusions are `Cast` (phase 3
+  owns it via `Store.width`) and the `PlaceLoad`-operand `BinaryOperation`
+  subfamily (documented residual).
+
 - **cc.py native-Address emission flip-over (phase 1).** Every lowered
   member-access, array-subscript, and pointer-deref access now flows through a
   unified `AddressPlan` planner and materializer instead of re-seating AST

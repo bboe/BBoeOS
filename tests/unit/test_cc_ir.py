@@ -143,6 +143,28 @@ def test_chained_binary_operation_rhs_store_lowers_without_access() -> None:
     assert not any(isinstance(op, ir.Access) for op in body), f"chained BinaryOperation RHS store must not ride Access, got {kinds}"
 
 
+def test_compound_index_member_store_lowers_to_store() -> None:
+    """``s->buffer[s->length] = value`` lowers onto Address + Store with a pre-lowered index temp.
+
+    The compound index (an arrow member load) pre-lowers to its own temp
+    carried as the Address's single dynamic index leaf; no ir.Access producer
+    remains for the shape (ledger class 4 re-admitted in phase 2).
+    """
+    body = _build_function_body(
+        "struct stream { char buffer[16]; int length; };\nvoid f(struct stream *s, char value) { s->buffer[s->length] = value; }\n",
+        name="f",
+    )
+    kinds = [type(op).__name__ for op in body]
+    stores = [op for op in body if isinstance(op, ir.Store)]
+    assert len(stores) == 1, f"expected exactly one ir.Store, got {kinds}"
+    store_addresses = [op for op in body if isinstance(op, ir.Address) and op.destination == stores[0].address]
+    assert len(store_addresses) == 1, f"expected exactly one ir.Address feeding the Store, got {kinds}"
+    assert len(store_addresses[0].indices) == 1, (
+        f"expected the compound index as a single pre-lowered leaf, got {store_addresses[0].indices}"
+    )
+    assert not any(isinstance(op, ir.Access) for op in body), f"compound-index store must not ride Access, got {kinds}"
+
+
 def test_every_instruction_subclass_declares_value_fields() -> None:
     """Every member of :data:`cc.ir.Instruction` declares ``VALUE_FIELDS``.
 
