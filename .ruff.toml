@@ -1,14 +1,14 @@
 indent-width = 4
 line-length = 140
-lint.ignore = ["COM812", "CPY001", "D203", "D211", "D213", "PLR0913", "S101", "T201"]
+lint.ignore = ["missing-trailing-comma", "missing-copyright-notice", "incorrect-blank-line-before-class", "blank-line-before-class", "multi-line-summary-second-line", "too-many-arguments", "assert", "print"]
 lint.select = ["ALL"]
 preview = true
 target-version = "py313"
 
 [lint.per-file-ignores]
-"add_file.py" = ["C901", "PLR0914", "S404", "S603"]
-"cc/*.py" = ["ARG002", "B007", "C901", "DOC201", "DOC501", "ERA001", "PLR0904", "PLR0911", "PLR0912", "PLR0914", "PLR0915", "PLR0916", "PLR2004", "PLR6201", "SIM108"]
-"ports/**/*.py" = ["DOC201", "DOC501", "S"]
-"run_qemu.py" = ["DOC201", "DOC501", "S"]
-"test_*.py" = ["DOC201", "DOC501", "INP001", "PLR0913", "PLR0914", "PLR2004", "PT018", "S"]
-"tools/*.py" = ["DOC201", "DOC501", "S"]
+"add_file.py" = ["complex-structure", "too-many-locals", "suspicious-subprocess-import", "subprocess-without-shell-equals-true"]
+"cc/*.py" = ["unused-method-argument", "unused-loop-control-variable", "complex-structure", "docstring-missing-returns", "docstring-missing-exception", "commented-out-code", "too-many-public-methods", "too-many-return-statements", "too-many-branches", "too-many-locals", "too-many-statements", "too-many-boolean-expressions", "magic-value-comparison", "literal-membership", "if-else-block-instead-of-if-exp"]
+"ports/**/*.py" = ["docstring-missing-returns", "docstring-missing-exception", "S"]
+"run_qemu.py" = ["docstring-missing-returns", "docstring-missing-exception", "S"]
+"test_*.py" = ["docstring-missing-returns", "docstring-missing-exception", "implicit-namespace-package", "too-many-arguments", "too-many-locals", "magic-value-comparison", "pytest-composite-assertion", "S"]
+"tools/*.py" = ["docstring-missing-returns", "docstring-missing-exception", "S"]

@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from add_file import (  # noqa: E402
+from add_file import (  # ruff:ignore[module-import-not-at-top-of-file]
     add_files,
     compute_directory_sector,
     find_entry,
@@ -139,7 +139,7 @@ def test_batch_runs_single_debugfs_session(
         path.write_text("hi\n")
         files.append(str(path))
 
-    import add_file as add_file_module  # noqa: PLC0415
+    import add_file as add_file_module  # ruff:ignore[import-outside-top-level]
 
     original_run = subprocess.run
     debugfs_calls: list[list[str]] = []

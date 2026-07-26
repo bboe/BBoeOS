@@ -23,9 +23,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from run_qemu import run_commands  # noqa: E402
+from run_qemu import run_commands  # ruff:ignore[module-import-not-at-top-of-file]
 
-from add_file import FLAG_DIRECTORY, FLAG_EXECUTE, SECTOR_SIZE, compute_directory_sector, find_entry, read_assign  # noqa: E402
+from add_file import (  # ruff:ignore[module-import-not-at-top-of-file]
+    FLAG_DIRECTORY,
+    FLAG_EXECUTE,
+    SECTOR_SIZE,
+    compute_directory_sector,
+    find_entry,
+    read_assign,
+)
 
 BASE_IMAGE = "drive.img"
 COMMAND_TIMEOUT = float(os.environ.get("BBOE_FS_COMMAND_TIMEOUT", "1"))
@@ -92,7 +99,7 @@ def main() -> int:
                 ok, message = True, ""
             except AssertionError as e:
                 ok, message = False, str(e)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # ruff:ignore[blind-except]
                 ok, message = False, f"{type(e).__name__}: {e}"
             elapsed = time.monotonic() - started
             label = name

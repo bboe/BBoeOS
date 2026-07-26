@@ -45,9 +45,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(REPO_ROOT))
 
-from run_qemu import run_commands  # noqa: E402
+from run_qemu import run_commands  # ruff:ignore[module-import-not-at-top-of-file]
 
-from add_file import (  # noqa: E402
+from add_file import (  # ruff:ignore[module-import-not-at-top-of-file]
     ENTRIES_PER_SECTOR,
     NAME_FIELD,
     OFFSET_SECTOR,

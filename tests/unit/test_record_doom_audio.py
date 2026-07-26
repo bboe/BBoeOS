@@ -15,9 +15,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO / "ports" / "doom"))
 
-from record import (  # noqa: E402
-    _build_audio_filter,  # noqa: PLC2701
-    _build_trim_concat_filter,  # noqa: PLC2701
+from record import (  # ruff:ignore[module-import-not-at-top-of-file]
+    _build_audio_filter,  # ruff:ignore[import-private-name]
+    _build_trim_concat_filter,  # ruff:ignore[import-private-name]
 )
 
 

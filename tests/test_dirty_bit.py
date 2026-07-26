@@ -18,9 +18,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from run_qemu import qemu_session  # noqa: E402
+from run_qemu import qemu_session  # ruff:ignore[module-import-not-at-top-of-file]
 
-from add_file import (  # noqa: E402
+from add_file import (  # ruff:ignore[module-import-not-at-top-of-file]
     NAME_FIELD,
     OFFSET_SIZE,
     SECTOR_SIZE,

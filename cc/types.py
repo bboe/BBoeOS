@@ -123,7 +123,7 @@ class PointerType(Type):
 
     pointee: Type
 
-    def sizeof(self, *, pointer_width: int = 0, scalar_width: Callable[[str], int]) -> int:  # noqa: PLR6301
+    def sizeof(self, *, pointer_width: int = 0, scalar_width: Callable[[str], int]) -> int:  # ruff:ignore[no-self-use]
         """Return pointer_width regardless of pointee type."""
         return pointer_width
 

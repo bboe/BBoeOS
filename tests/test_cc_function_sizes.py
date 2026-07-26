@@ -96,7 +96,7 @@ def function_sizes(*, source: Path, work: Path) -> dict[str, int]:
     section_prefix = ".text."
     for line in readelf.stdout.splitlines():
         # readelf -SW section-header row format:
-        #   "[ N] .text.<name> PROGBITS <addr> <off> <size> ..."  # noqa: ERA001 — illustrative format string, not commented-out code
+        #   "[ N] .text.<name> PROGBITS <addr> <off> <size> ..."  # ruff:ignore[commented-out-code] — illustrative format string, not commented-out code
         stripped = line.strip()
         if section_prefix not in stripped or "PROGBITS" not in stripped:
             continue

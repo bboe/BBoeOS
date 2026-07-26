@@ -8,7 +8,7 @@ matches what a hand-trace would predict.
 from __future__ import annotations
 
 from cc import ast_nodes, ir
-from cc.ir_optimize import Optimizer, _instruction_value_operands  # noqa: PLC2701
+from cc.ir_optimize import Optimizer, _instruction_value_operands  # ruff:ignore[import-private-name]
 
 
 def _function(body: list[ir.Instruction], /, *, carry_return: bool = False) -> ir.Function:

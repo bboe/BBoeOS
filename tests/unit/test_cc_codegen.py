@@ -37,14 +37,14 @@ INCLUDE_DIR = REPO_ROOT / "kernel" / "include"
 
 LIBBBOEOS_INCLUDE = REPO_ROOT / "user" / "libbboeos" / "include"
 sys.path.insert(0, str(REPO_ROOT))
-from cc import ast_nodes, ir  # noqa: E402
-from cc.codegen.x86.generator import X86CodeGenerator  # noqa: E402
-from cc.codegen.x86.peephole import Peepholer  # noqa: E402
-from cc.lexer import tokenize  # noqa: E402
-from cc.options import CompilerOptions  # noqa: E402
-from cc.parser import Parser  # noqa: E402
-from cc.preprocessor import apply_defines, preprocess  # noqa: E402
-from cc.target import X86CodegenTarget16  # noqa: E402
+from cc import ast_nodes, ir  # ruff:ignore[module-import-not-at-top-of-file]
+from cc.codegen.x86.generator import X86CodeGenerator  # ruff:ignore[module-import-not-at-top-of-file]
+from cc.codegen.x86.peephole import Peepholer  # ruff:ignore[module-import-not-at-top-of-file]
+from cc.lexer import tokenize  # ruff:ignore[module-import-not-at-top-of-file]
+from cc.options import CompilerOptions  # ruff:ignore[module-import-not-at-top-of-file]
+from cc.parser import Parser  # ruff:ignore[module-import-not-at-top-of-file]
+from cc.preprocessor import apply_defines, preprocess  # ruff:ignore[module-import-not-at-top-of-file]
+from cc.target import X86CodegenTarget16  # ruff:ignore[module-import-not-at-top-of-file]
 
 # FD layout constants from kernel/include/constants.asm (must match exactly).
 # Used by the struct-fd layout-pinning tests below.  Sorted alphabetically

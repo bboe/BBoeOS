@@ -44,13 +44,13 @@ REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO / "tests"))
 sys.path.insert(0, str(REPO / "tools"))
 
-from record_demo import (  # noqa: E402
-    _ppm_dimensions,  # noqa: PLC2701
-    _renumber_frames,  # noqa: PLC2701
+from record_demo import (  # ruff:ignore[module-import-not-at-top-of-file]
+    _ppm_dimensions,  # ruff:ignore[import-private-name]
+    _renumber_frames,  # ruff:ignore[import-private-name]
     capture_loop,
     type_at_human_pace,
 )
-from run_qemu import QemuSession, qemu_session  # noqa: E402
+from run_qemu import QemuSession, qemu_session  # ruff:ignore[module-import-not-at-top-of-file]
 
 # Wall-clock budget per phase.  Total ~30s end-to-end; tweak in one
 # place rather than scattering sleeps through main().
@@ -395,7 +395,7 @@ def _encode_doom_mp4(
         raise RuntimeError(message)
     MP4_OUTPUT.parent.mkdir(exist_ok=True, parents=True)
     pattern = frame_directory / "frame_%05d.ppm"
-    has_audio = audio_path.is_file() and audio_path.stat().st_size > 44  # noqa: PLR2004
+    has_audio = audio_path.is_file() and audio_path.stat().st_size > 44  # ruff:ignore[magic-value-comparison]
     if not has_audio:
         print(
             f"record_doom: {audio_path} missing or empty — encoding silent MP4",

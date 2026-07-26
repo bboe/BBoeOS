@@ -19,7 +19,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 
-from run_qemu import qemu_session  # noqa: E402
+from run_qemu import qemu_session  # ruff:ignore[module-import-not-at-top-of-file]
 
 _SETTLE_SECONDS = 0.3
 
@@ -35,7 +35,7 @@ def _build_image() -> Path:
     return REPO_ROOT / "drive.img"
 
 
-def main() -> None:  # noqa: D103
+def main() -> None:  # ruff:ignore[undocumented-public-function]
     selected = sys.argv[1] if len(sys.argv) > 1 else None
     tests = [(name, function) for name, function in _ALL_TESTS if name == selected] if selected else _ALL_TESTS
     if not tests:
@@ -47,7 +47,7 @@ def main() -> None:  # noqa: D103
         try:
             function()
             print(f"PASS: {name}")
-        except Exception as exception:  # noqa: BLE001
+        except Exception as exception:  # ruff:ignore[blind-except]
             print(f"FAIL: {name}: {exception}")
             failures += 1
     if failures:

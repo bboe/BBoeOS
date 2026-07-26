@@ -22,7 +22,7 @@ def test_address_taken_local_is_excluded_from_allocatable() -> None:
     ]
     generator = _generator()
     generator.safe_pin_registers = generator.compute_safe_pin_registers(body, parameters=[])
-    economics = generator._compute_pin_economics(body=body, parameters=[])  # noqa: SLF001
+    economics = generator._compute_pin_economics(body=body, parameters=[])  # ruff:ignore[private-member-access]
     assert "slot" not in economics.allocatable
     assert "slot" in economics.address_taken
 
@@ -36,7 +36,7 @@ def test_reference_counts_and_allocatable_for_simple_body() -> None:
     ]
     generator = _generator()
     generator.safe_pin_registers = generator.compute_safe_pin_registers(body, parameters=[])
-    economics = generator._compute_pin_economics(body=body, parameters=[])  # noqa: SLF001
+    economics = generator._compute_pin_economics(body=body, parameters=[])  # ruff:ignore[private-member-access]
     assert "total" in economics.allocatable
     assert economics.reference_counts.get("total", 0) == 1
     assert economics.index_uses.get("total", 0) == 0

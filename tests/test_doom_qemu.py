@@ -29,7 +29,7 @@ WAD_FILE = REPO / "wads" / "doom1.wad"
 
 sys.path.insert(0, str(REPO / "tests"))
 
-from run_qemu import qemu_session, run_commands  # noqa: E402
+from run_qemu import qemu_session, run_commands  # ruff:ignore[module-import-not-at-top-of-file]
 
 # Stage 1: bootstrap (no WAD).  Each pattern is searched independently
 # in the full output and matched as a set.

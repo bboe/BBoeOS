@@ -20,7 +20,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from run_qemu import QemuSession, qemu_session  # noqa: E402
+from run_qemu import QemuSession, qemu_session  # ruff:ignore[module-import-not-at-top-of-file]
 
 # pmemsave resolves paths relative to QEMU's cwd (the repo root).
 # Using an absolute path trips QEMU's HMP expression parser (the
