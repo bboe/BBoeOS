@@ -62,7 +62,7 @@ jobs:
         run: echo "Docs-only change; ${{ matrix.suite }} marked passing without running."
       - uses: actions/checkout@v7
         if: needs.changes.outputs.docs_only != 'true'
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: needs.changes.outputs.docs_only != 'true'
         with:
           python-version: '3.13'
