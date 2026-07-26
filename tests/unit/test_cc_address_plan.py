@@ -13,7 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from cc import ir
 from cc.ast_nodes import BinaryOperation, Index, SubscriptPlace
-from cc.cli import _discover_include_paths, compile_module  # noqa: PLC2701 — the census needs the CLI's include discovery
+from cc.cli import (
+    _discover_include_paths,  # ruff:ignore[import-private-name] — the census needs the CLI's include discovery
+    compile_module,
+)
 from cc.codegen.address_plan import AddressPlan, AddressTerm, scale_encodes_in_operand
 from cc.codegen.x86.generator import X86CodeGenerator
 from cc.options import CompilerOptions
@@ -397,17 +400,17 @@ def _generate_with_reseat_spy(source_text: str, /) -> tuple[X86CodeGenerator, in
     the source ``Place`` node from ``_ir_address_ops``.
     """
     calls: list[object] = []
-    original = X86CodeGenerator._ir_address_with_index  # noqa: SLF001
+    original = X86CodeGenerator._ir_address_with_index  # ruff:ignore[private-member-access]
 
     def spy(self: X86CodeGenerator, address_op: object, /) -> object:
         calls.append(address_op)
         return original(self, address_op)
 
-    X86CodeGenerator._ir_address_with_index = spy  # type: ignore[method-assign] # noqa: SLF001
+    X86CodeGenerator._ir_address_with_index = spy  # type: ignore[method-assign] # ruff:ignore[private-member-access]
     try:
         generator = _generate(source_text)
     finally:
-        X86CodeGenerator._ir_address_with_index = original  # type: ignore[method-assign] # noqa: SLF001
+        X86CodeGenerator._ir_address_with_index = original  # type: ignore[method-assign] # ruff:ignore[private-member-access]
     return generator, len(calls)
 
 
@@ -439,7 +442,7 @@ def test_arrow_member_address_of_consumes_native_plan() -> None:
     """
     generator, reseat_count = _generate_with_reseat_spy(ADDRESS_OF_SOURCE)
     assert reseat_count == 0
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.base_kind == "pointer"
@@ -459,7 +462,7 @@ def test_arrow_member_increment_decrement_consumes_native_plan() -> None:
     """
     generator, reseat_count = _generate_with_reseat_spy(INCREMENT_SOURCE)
     assert reseat_count == 0
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.base_kind == "pointer"
@@ -475,7 +478,7 @@ def test_arrow_member_increment_decrement_consumes_native_plan() -> None:
 def test_arrow_member_load_plans_pointer_base() -> None:
     """``n->value`` plans a "pointer" base whose materialization is the SI-or-BX load."""
     generator = _generate(ARROW_MEMBER_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.base_kind == "pointer"
@@ -499,7 +502,7 @@ def test_arrow_member_store_consumes_native_plan() -> None:
     ``tests/test_cc_function_sizes.py``.
     """
     generator = _generate(ARROW_STORE_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.base_kind == "pointer"
@@ -558,7 +561,7 @@ def test_ax_clobbering_store_sinks_single_use_rhs() -> None:
             address_instruction,
             store,
         ]
-        return store.value, generator._collect_ir_sunk_store_values(synthetic_body)  # noqa: SLF001
+        return store.value, generator._collect_ir_sunk_store_values(synthetic_body)  # ruff:ignore[private-member-access]
 
     arrow_temp, arrow_sunk = sunk_verdict(ARROW_COPY_SOURCE)
     assert arrow_temp not in arrow_sunk  # preserve=True: Task 5's accumulator ride wins
@@ -572,18 +575,18 @@ def test_ax_clobbering_store_sinks_single_use_rhs() -> None:
         return generator.output.split("sink_chained:")[1].split("\n\n")[0]
 
     baseline_body = function_body(_generate(SINK_STORE_SOURCE))
-    original_predicate = ir._is_byte_safe_store_rhs  # noqa: SLF001
+    original_predicate = ir._is_byte_safe_store_rhs  # ruff:ignore[private-member-access]
 
     def admitting_predicate(node: object, /) -> bool:
         return original_predicate(node) or isinstance(node, Index)
 
-    ir._is_byte_safe_store_rhs = admitting_predicate  # type: ignore[assignment] # noqa: SLF001
+    ir._is_byte_safe_store_rhs = admitting_predicate  # type: ignore[assignment] # ruff:ignore[private-member-access]
     try:
         sunk_generator = _generate(SINK_STORE_SOURCE)
     finally:
-        ir._is_byte_safe_store_rhs = original_predicate  # noqa: SLF001
-    (sunk_temp,) = sunk_generator._ir_sunk_store_values  # noqa: SLF001
-    assert isinstance(sunk_generator._ir_sunk_store_values[sunk_temp], ir.Index)  # noqa: SLF001
+        ir._is_byte_safe_store_rhs = original_predicate  # ruff:ignore[private-member-access]
+    (sunk_temp,) = sunk_generator._ir_sunk_store_values  # ruff:ignore[private-member-access]
+    assert isinstance(sunk_generator._ir_sunk_store_values[sunk_temp], ir.Index)  # ruff:ignore[private-member-access]
     sunk_body = function_body(sunk_generator)
     lines = [line.strip() for line in sunk_body.splitlines()]
     base_seed_position = lines.index("mov ebx, eax")  # the chained base materialization
@@ -628,7 +631,7 @@ def test_chain_of_binary_operations_sinks_into_store() -> None:
         address_instruction,
         store,
     ]
-    sunk = generator._collect_ir_sunk_store_values(synthetic_body)  # noqa: SLF001
+    sunk = generator._collect_ir_sunk_store_values(synthetic_body)  # ruff:ignore[private-member-access]
     assert link_temp in sunk  # the intermediate link is suppressed with the final
     assert store.value in sunk
     assert isinstance(sunk[store.value], ir.BinaryOperation)
@@ -636,17 +639,17 @@ def test_chain_of_binary_operations_sinks_into_store() -> None:
 
     # Part 2: full-pipeline emission of the gettimeofday shape with the
     # BinaryOperation RHS admission applied.
-    original_predicate = ir._is_byte_safe_store_rhs  # noqa: SLF001
+    original_predicate = ir._is_byte_safe_store_rhs  # ruff:ignore[private-member-access]
 
     def admitting_predicate(node: object, /) -> bool:
         return original_predicate(node) or isinstance(node, BinaryOperation)
 
-    ir._is_byte_safe_store_rhs = admitting_predicate  # type: ignore[assignment] # noqa: SLF001
+    ir._is_byte_safe_store_rhs = admitting_predicate  # type: ignore[assignment] # ruff:ignore[private-member-access]
     try:
         chain_generator = _generate(CHAIN_SINK_SOURCE)
     finally:
-        ir._is_byte_safe_store_rhs = original_predicate  # noqa: SLF001
-    sunk_values = chain_generator._ir_sunk_store_values  # noqa: SLF001
+        ir._is_byte_safe_store_rhs = original_predicate  # ruff:ignore[private-member-access]
+    sunk_values = chain_generator._ir_sunk_store_values  # ruff:ignore[private-member-access]
     # Exactly the % link and the * final are sunk; the lone / def on the
     # preserving plan keeps Task 5's accumulator ride.
     assert sorted(definition.operation for definition in sunk_values.values()) == ["%", "*"]
@@ -676,8 +679,8 @@ def test_chained_dot_member_load_records_no_address_op() -> None:
     handles it whole.
     """
     generator = _generate(CHAINED_DOT_SOURCE)
-    assert generator._ir_address_ops == {}  # noqa: SLF001
-    assert generator._ir_address_plans == {}  # noqa: SLF001
+    assert generator._ir_address_ops == {}  # ruff:ignore[private-member-access]
+    assert generator._ir_address_plans == {}  # ruff:ignore[private-member-access]
 
 
 def test_compound_conditional_index_store_sinks_block_def() -> None:
@@ -693,8 +696,8 @@ def test_compound_conditional_index_store_sinks_block_def() -> None:
     round-trip (the vsnprintf +12 anatomy).
     """
     generator, _bodies = _generate_with_ir_bodies(COMPOUND_CONDITIONAL_INDEX_STORE_SOURCE)
-    (sunk_temp,) = generator._ir_sunk_index_terms  # noqa: SLF001
-    assert isinstance(generator._ir_sunk_index_terms[sunk_temp], ir.Block)  # noqa: SLF001
+    (sunk_temp,) = generator._ir_sunk_index_terms  # ruff:ignore[private-member-access]
+    assert isinstance(generator._ir_sunk_index_terms[sunk_temp], ir.Block)  # ruff:ignore[private-member-access]
     assert sunk_temp not in generator.locals  # never slot-allocated
     body_text = generator.output.split("terminate:")[1].split("\n\n")[0]
     lines = [line.strip() for line in body_text.splitlines()]
@@ -726,8 +729,8 @@ def test_compound_index_store_sinks_term_temp() -> None:
     byte-for-byte.
     """
     generator, _bodies = _generate_with_ir_bodies(COMPOUND_INDEX_STORE_SOURCE)
-    (sunk_temp,) = generator._ir_sunk_index_terms  # noqa: SLF001
-    assert isinstance(generator._ir_sunk_index_terms[sunk_temp], ir.Load)  # noqa: SLF001
+    (sunk_temp,) = generator._ir_sunk_index_terms  # ruff:ignore[private-member-access]
+    assert isinstance(generator._ir_sunk_index_terms[sunk_temp], ir.Load)  # ruff:ignore[private-member-access]
     assert sunk_temp not in generator.locals  # never slot-allocated
     assert sunk_temp not in generator.temp_pinned_registers  # never register-homed
     body_text = generator.output.split("write_at_length:")[1].split("\n\n")[0]
@@ -752,7 +755,7 @@ def test_deref_store_byte_pointer_plans_field_size_one() -> None:
     """
     generator, reseat_count = _generate_with_reseat_spy(DEREF_STORE_BYTE_SOURCE)
     assert reseat_count == 0
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.base == "target"
@@ -777,7 +780,7 @@ def test_deref_store_consumes_native_plan() -> None:
     """
     generator, reseat_count = _generate_with_reseat_spy(DEREF_STORE_SOURCE)
     assert reseat_count == 0
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.base == "target"
@@ -828,7 +831,7 @@ def test_division_remainder_fusion_survives_temp_allocation() -> None:
 def test_dot_member_load_produces_pure_displacement_plan() -> None:
     """``g.y`` lowers to one Address whose plan is a pure label+displacement."""
     generator = _generate(DOT_MEMBER_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.base_kind == "label"
@@ -850,11 +853,11 @@ def test_member_index_plan_refused_by_generic_materializer() -> None:
     generator = _generate(COMPOUND_INDEX_STORE_SOURCE)
     (plan,) = (
         plan
-        for plan in generator._ir_address_plans.values()  # noqa: SLF001
+        for plan in generator._ir_address_plans.values()  # ruff:ignore[private-member-access]
         if plan.member_index
     )
     with pytest.raises(NotImplementedError, match="member-index"):
-        generator._materialize_address_plan(plan)  # noqa: SLF001
+        generator._materialize_address_plan(plan)  # ruff:ignore[private-member-access]
 
 
 def test_member_index_store_emits_legal_sixteen_bit_addresses() -> None:
@@ -899,7 +902,7 @@ def test_member_index_store_plans_clobber_facts() -> None:
     dynamic_generator = _generate(COMPOUND_INDEX_STORE_SOURCE)
     dynamic_plans = [
         plan
-        for plan in dynamic_generator._ir_address_plans.values()  # noqa: SLF001
+        for plan in dynamic_generator._ir_address_plans.values()  # ruff:ignore[private-member-access]
         if plan.member_index
     ]
     assert len(dynamic_plans) == 1
@@ -911,7 +914,7 @@ def test_member_index_store_plans_clobber_facts() -> None:
     constant_generator = _generate(MEMBER_INDEX_CONSTANT_STORE_SOURCE)
     constant_plans = [
         plan
-        for plan in constant_generator._ir_address_plans.values()  # noqa: SLF001
+        for plan in constant_generator._ir_address_plans.values()  # ruff:ignore[private-member-access]
         if plan.member_index
     ]
     assert len(constant_plans) == 1
@@ -931,7 +934,7 @@ def test_mixed_chain_store_plans_member_offset_and_two_terms() -> None:
     multi-term ``subscript_terminal`` plan over the static array base.
     """
     generator = _generate(MIXED_CHAIN_STORE_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.horner is False
@@ -953,7 +956,7 @@ def test_multi_level_arrow_load_plans_nested_plan_base() -> None:
     and moved into BX, then the outer field offset rides the register base.
     """
     generator = _generate(MULTI_LEVEL_ARROW_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.base_kind == "plan"
@@ -982,7 +985,7 @@ def test_multidim_constant_indices_fold_into_displacement() -> None:
     routed the fully-folded shape through the protect-BX terminals.
     """
     generator = _generate(MULTIDIM_CONSTANT_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.horner is True
@@ -1006,7 +1009,7 @@ def test_multidim_frame_base_dynamic_index_declares_si_clobber() -> None:
     nothing.
     """
     generator = _generate(MULTIDIM_FRAME_BASE_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 2
     folded_plan, dynamic_plan = plans
     assert folded_plan.base_kind == "frame"
@@ -1020,7 +1023,7 @@ def test_multidim_frame_base_dynamic_index_declares_si_clobber() -> None:
 def test_multidim_load_plans_horner_terms() -> None:
     """``m[i][j]`` plans a Horner plan with byte strides per dimension."""
     generator = _generate(MULTIDIM_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.horner is True
@@ -1038,7 +1041,7 @@ def test_multidim_load_plans_horner_terms() -> None:
 def test_multidim_member_arrow_load_plans_pointer_horner_base() -> None:
     """``p->cells[i][j]`` plans a Horner plan whose pointer base loads into SI."""
     generator = _generate(MULTIDIM_MEMBER_ARROW_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.horner is True
@@ -1056,7 +1059,7 @@ def test_multidim_member_arrow_load_plans_pointer_horner_base() -> None:
 def test_multidim_member_dot_load_plans_register_seeded_base() -> None:
     """``g.cells[i][j]`` plans a Horner plan whose static base always seeds SI."""
     generator = _generate(MULTIDIM_MEMBER_DOT_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.horner is True
@@ -1079,7 +1082,7 @@ def test_multidim_store_consumes_horner_plan() -> None:
     the BASE-vs-HEAD asm diff.
     """
     generator = _generate(MULTIDIM_STORE_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.horner is True
@@ -1093,7 +1096,7 @@ def test_multidim_store_consumes_horner_plan() -> None:
 def test_multidim_three_dimensional_load_plans_three_terms() -> None:
     """``m[i][j][k]`` over ``int m[2][4][3]`` plans three byte strides 48/12/4."""
     generator = _generate(MULTIDIM_THREE_DIMENSIONAL_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.horner is True
@@ -1132,7 +1135,7 @@ def test_non_adjacent_index_term_def_keeps_slot_path() -> None:
         store_address,
         store,
     ]
-    sunk = generator._collect_ir_sunk_index_terms(non_adjacent_body)  # noqa: SLF001
+    sunk = generator._collect_ir_sunk_index_terms(non_adjacent_body)  # ruff:ignore[private-member-access]
     assert load_def.destination not in sunk  # non-adjacent: the slot path is kept
 
 
@@ -1154,7 +1157,7 @@ def test_plans_recorded_before_emission() -> None:
     """
     plan_call_line_counts: list[int] = []
     lower_ir_body_entry_line_counts: list[int] = []
-    original_plan = X86CodeGenerator._plan_ir_address  # noqa: SLF001
+    original_plan = X86CodeGenerator._plan_ir_address  # ruff:ignore[private-member-access]
     original_lower = X86CodeGenerator.lower_ir_body
 
     def plan_spy(self: X86CodeGenerator, address_op: object, /) -> object:
@@ -1165,12 +1168,12 @@ def test_plans_recorded_before_emission() -> None:
         lower_ir_body_entry_line_counts.append(len(self.lines))
         original_lower(self, body)
 
-    X86CodeGenerator._plan_ir_address = plan_spy  # type: ignore[method-assign] # noqa: SLF001
+    X86CodeGenerator._plan_ir_address = plan_spy  # type: ignore[method-assign] # ruff:ignore[private-member-access]
     X86CodeGenerator.lower_ir_body = lower_spy  # type: ignore[method-assign]
     try:
         _generate(ARROW_STORE_SOURCE)
     finally:
-        X86CodeGenerator._plan_ir_address = original_plan  # type: ignore[method-assign] # noqa: SLF001
+        X86CodeGenerator._plan_ir_address = original_plan  # type: ignore[method-assign] # ruff:ignore[private-member-access]
         X86CodeGenerator.lower_ir_body = original_lower  # type: ignore[method-assign]
 
     assert plan_call_line_counts, "no _plan_ir_address calls recorded — source has no ir.Address"
@@ -1196,7 +1199,7 @@ def test_pointer_to_array_load_plans_outer_row_stride() -> None:
     materialization (``base_kind="pointer"`` + ``base_always_in_register``).
     """
     generator = _generate(POINTER_TO_ARRAY_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.horner is True
@@ -1285,7 +1288,7 @@ def test_single_use_store_rhs_temp_rides_accumulator() -> None:
             address_instruction,
             store,
         ]
-        deferred = generator._collect_ir_deferred_single_use_temps(body=synthetic_body, temps=frozenset({store.value}))  # noqa: SLF001
+        deferred = generator._collect_ir_deferred_single_use_temps(body=synthetic_body, temps=frozenset({store.value}))  # ruff:ignore[private-member-access]
         return store.value, deferred
 
     arrow_temp, arrow_deferred = deferred_verdict(ARROW_COPY_SOURCE)
@@ -1305,7 +1308,7 @@ def test_struct_array_constant_index_folds_into_displacement() -> None:
     bytes (including the legacy unconditional rhs spill on stores) match.
     """
     generator = _generate(STRUCT_ARRAY_CONSTANT_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.terms == ()
@@ -1320,7 +1323,7 @@ def test_struct_array_constant_index_folds_into_displacement() -> None:
 def test_struct_array_member_load_plans_one_term() -> None:
     """``table[index].payload`` plans one dynamic term scaled by the struct size."""
     generator = _generate(STRUCT_ARRAY_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert len(plan.terms) == 1
@@ -1341,7 +1344,7 @@ def test_struct_array_member_store_plans_term_and_emits_indexed_store() -> None:
     the legacy path is enforced by ``tests/test_cc_function_sizes.py``.
     """
     generator = _generate(STRUCT_ARRAY_STORE_SOURCE)
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert len(plan.terms) == 1
@@ -1370,7 +1373,7 @@ def test_subscript_call_slot_plans_and_calls_natively() -> None:
     """
     generator, reseat_count = _generate_with_reseat_spy(INDIRECT_CALL_SOURCE)
     assert reseat_count == 0
-    plans = list(generator._ir_address_plans.values())  # noqa: SLF001
+    plans = list(generator._ir_address_plans.values())  # ruff:ignore[private-member-access]
     assert len(plans) == 1
     plan = plans[0]
     assert plan.call_slot is True
@@ -1407,8 +1410,8 @@ def test_subscript_terminal_store_sinks_single_use_rhs() -> None:
     (the class-1 shape) against the same real subscript_terminal plan.
     """
     generator, bodies = _generate_with_ir_bodies(SUBSCRIPT_SINK_SOURCE)
-    (sunk_temp,) = generator._ir_sunk_store_values  # noqa: SLF001
-    assert isinstance(generator._ir_sunk_store_values[sunk_temp], ir.Index)  # noqa: SLF001
+    (sunk_temp,) = generator._ir_sunk_store_values  # ruff:ignore[private-member-access]
+    assert isinstance(generator._ir_sunk_store_values[sunk_temp], ir.Index)  # ruff:ignore[private-member-access]
     assert sunk_temp not in generator.locals  # never slot-allocated
     assert sunk_temp not in generator.temp_pinned_registers  # never register-homed
     body_text = generator.output.split("copy_payload:")[1].split("\n\n")[0]
@@ -1434,7 +1437,7 @@ def test_subscript_terminal_store_sinks_single_use_rhs() -> None:
         address_instruction,
         store,
     ]
-    sunk = generator._collect_ir_sunk_store_values(synthetic_body)  # noqa: SLF001
+    sunk = generator._collect_ir_sunk_store_values(synthetic_body)  # ruff:ignore[private-member-access]
     assert store.value in sunk
 
 
@@ -1467,6 +1470,6 @@ def test_temp_homes_avoid_member_store_base_clobber() -> None:
     # declares the BX base-load clobber, and the helper reports it for the
     # consuming ``ir.Store``.
     store_generator = _generate(ARROW_STORE_SOURCE)
-    (address_destination,) = store_generator._ir_address_plans  # noqa: SLF001
+    (address_destination,) = store_generator._ir_address_plans  # ruff:ignore[private-member-access]
     store = ir.Store(address=address_destination, value=7, width=4)
-    assert store_generator._instruction_clobber_registers(store) == frozenset({"bx"})  # noqa: SLF001
+    assert store_generator._instruction_clobber_registers(store) == frozenset({"bx"})  # ruff:ignore[private-member-access]

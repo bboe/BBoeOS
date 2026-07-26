@@ -104,9 +104,9 @@ def _is_seabios_frame(*, path: Path) -> bool:
     post-reboot SeaBIOS frames without snagging shell content.
     """
     return (
-        _read_pixel_red(column=3, path=path, row=0) < 128  # noqa: PLR2004
-        and _read_pixel_red(column=3, path=path, row=6) > 128  # noqa: PLR2004
-        and _read_pixel_red(column=3, path=path, row=8) < 128  # noqa: PLR2004
+        _read_pixel_red(column=3, path=path, row=0) < 128  # ruff:ignore[magic-value-comparison]
+        and _read_pixel_red(column=3, path=path, row=6) > 128  # ruff:ignore[magic-value-comparison]
+        and _read_pixel_red(column=3, path=path, row=8) < 128  # ruff:ignore[magic-value-comparison]
     )
 
 
@@ -126,7 +126,7 @@ def _ppm_dimensions(*, path: Path) -> tuple[int, int]:
             if line.startswith(b"#"):
                 continue
             parts = line.split()
-            if len(parts) >= 2:  # noqa: PLR2004
+            if len(parts) >= 2:  # ruff:ignore[magic-value-comparison]
                 return int(parts[0]), int(parts[1])
 
 
@@ -145,7 +145,7 @@ def _read_pixel_red(*, column: int, path: Path, row: int) -> int:
 
 def _record(*, keep_frames: bool, output: Path) -> int:
     """Run the demo end-to-end and produce *output*."""
-    from run_qemu import qemu_session  # noqa: PLC0415
+    from run_qemu import qemu_session  # ruff:ignore[import-outside-top-level]
 
     scenario = default_scenario()
     capture_root = ROOT / "_demo_capture"
@@ -195,7 +195,7 @@ def _renumber_frames(*, frame_directory: Path, kept: list[Path]) -> None:
         frame.rename(frame_directory / f"frame_{index:05d}.ppm")
 
 
-def _run_step(*, session: Any, step: EditorStep | ShellStep) -> None:  # noqa: ANN401
+def _run_step(*, session: Any, step: EditorStep | ShellStep) -> None:  # ruff:ignore[any-type]
     """Execute one demo *step* against *session*."""
     if isinstance(step, ShellStep):
         type_at_human_pace(text=step.command, writer=session.write_serial)
@@ -220,7 +220,7 @@ def capture_loop(
     *,
     frame_directory: Path,
     framerate: int,
-    session: Any,  # noqa: ANN401
+    session: Any,  # ruff:ignore[any-type]
     stop: threading.Event,
 ) -> None:
     """Dump PPM frames into *frame_directory* at *framerate* until *stop* is set.

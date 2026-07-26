@@ -48,10 +48,10 @@ def test_allocate_end_to_end() -> None:
 
 def test_allocate_propagates_regalloc_error() -> None:
     """An unmodeled instruction surfaces an error, not a silent miss."""
-    import pytest  # noqa: PLC0415
+    import pytest  # ruff:ignore[import-outside-top-level]
 
     body = [object()]  # not a valid ir.Instruction
-    with pytest.raises(Exception):  # noqa: B017, PT011
+    with pytest.raises(Exception):  # ruff:ignore[assert-raises-exception, pytest-raises-too-broad]
         allocate(
             allocatable=frozenset(),
             constraints=RegisterConstraints(allowed={}, pool=(), precolored={}),
@@ -155,7 +155,7 @@ def test_color_triangle_three_registers() -> None:
 
 def test_contradictory_precolor_raises() -> None:
     """Two interfering values precolored to the same register is rejected loudly."""
-    import pytest  # noqa: PLC0415
+    import pytest  # ruff:ignore[import-outside-top-level]
 
     graph = {"c": {"f"}, "f": {"c"}}
     constraints = RegisterConstraints(allowed={}, pool=("ebx", "ecx"), precolored={"c": "ebx", "f": "ebx"})
@@ -165,7 +165,7 @@ def test_contradictory_precolor_raises() -> None:
 
 def test_defs_and_uses_cover_value_fields_and_base_names() -> None:
     """Defs = destination; uses = value-field reads + Index/IndexAssign base names."""
-    from cc.regalloc import _instruction_defs, _instruction_uses  # noqa: PLC0415, PLC2701
+    from cc.regalloc import _instruction_defs, _instruction_uses  # ruff:ignore[import-outside-top-level, import-private-name]
 
     binop = ir.BinaryOperation(destination="_ir_0", left="a", operation="+", right=2)
     assert _instruction_defs(instruction=binop) == ("_ir_0",)
@@ -296,9 +296,9 @@ def test_spill_lowest_benefit_under_pressure() -> None:
 
 def test_unmodeled_instruction_raises() -> None:
     """An IR shape with no def/use rule raises RegallocError (fail loud)."""
-    import pytest  # noqa: PLC0415
+    import pytest  # ruff:ignore[import-outside-top-level]
 
-    from cc.regalloc import _instruction_uses  # noqa: PLC0415, PLC2701
+    from cc.regalloc import _instruction_uses  # ruff:ignore[import-outside-top-level, import-private-name]
 
     class _Bogus:
         VALUE_FIELDS = ()
@@ -309,7 +309,7 @@ def test_unmodeled_instruction_raises() -> None:
 
 def test_uses_walk_opaque_block_ast() -> None:
     """Block/Access reads are discovered by walking the wrapped AST for Var names."""
-    from cc.regalloc import _instruction_uses  # noqa: PLC0415, PLC2701
+    from cc.regalloc import _instruction_uses  # ruff:ignore[import-outside-top-level, import-private-name]
 
     node = ast_nodes.Assign(expr=ast_nodes.Var(line=1, name="k"), line=1, name="_ir_3")
     block = ir.Block(node=node)

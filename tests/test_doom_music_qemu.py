@@ -51,7 +51,7 @@ WAD_FILE = REPO / "wads" / "doom1.wad"
 
 sys.path.insert(0, str(REPO / "tests"))
 
-from run_qemu import qemu_session  # noqa: E402
+from run_qemu import qemu_session  # ruff:ignore[module-import-not-at-top-of-file]
 
 MUSIC_ENABLED_MARKER = "[bboeos doom] OPL music enabled"
 MUSIC_UNAVAILABLE_MARKER = "[bboeos doom] OPL music unavailable"

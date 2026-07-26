@@ -28,7 +28,7 @@ WAD_FILE = REPO / "wads" / "doom1.wad"
 
 sys.path.insert(0, str(REPO / "tests"))
 
-from run_qemu import qemu_session  # noqa: E402
+from run_qemu import qemu_session  # ruff:ignore[module-import-not-at-top-of-file]
 
 
 def _build_doom() -> None:

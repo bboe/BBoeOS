@@ -20,16 +20,16 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CC = REPO_ROOT / "cc.py"
 sys.path.insert(0, str(REPO_ROOT))
-from cc.ast_nodes import (  # noqa: E402
+from cc.ast_nodes import (  # ruff:ignore[module-import-not-at-top-of-file]
     BinaryOperation,
     Conditional,
     Int,
     LogicalOr,
     VarDecl,
 )
-from cc.errors import CompileError  # noqa: E402
-from cc.lexer import tokenize  # noqa: E402
-from cc.parser import Parser  # noqa: E402
+from cc.errors import CompileError  # ruff:ignore[module-import-not-at-top-of-file]
+from cc.lexer import tokenize  # ruff:ignore[module-import-not-at-top-of-file]
+from cc.parser import Parser  # ruff:ignore[module-import-not-at-top-of-file]
 
 
 def _compile(source_text: str, /, *, bits: int = 16) -> tuple[bool, str]:

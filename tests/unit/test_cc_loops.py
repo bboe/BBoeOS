@@ -574,7 +574,7 @@ def test_iter_read_names_yields_rep_string_dest_source_count_and_final_iv() -> N
         operation="copy",
         source="q",
     )
-    names = set(loops._iter_read_names(rep))  # noqa: SLF001
+    names = set(loops._iter_read_names(rep))  # ruff:ignore[private-member-access]
     assert {"p", "q", "n", "m"} <= names
 
 

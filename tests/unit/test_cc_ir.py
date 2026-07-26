@@ -16,8 +16,8 @@ def _address(*, base_value: ir.Value | None = None, destination: str = "_ir_0", 
 
 def _build_function_body(source: str, /, *, name: str) -> list[ir.Instruction]:
     """Lower a single C source string to one function's flat IR instruction list."""
-    from cc.lexer import tokenize  # noqa: PLC0415
-    from cc.parser import Parser  # noqa: PLC0415
+    from cc.lexer import tokenize  # ruff:ignore[import-outside-top-level]
+    from cc.parser import Parser  # ruff:ignore[import-outside-top-level]
 
     program = ir.Builder().build_program(Parser(tokenize(source)).parse_program())
     return next(function for function in program.functions if function.ast_node.name == name).body
@@ -25,9 +25,11 @@ def _build_function_body(source: str, /, *, name: str) -> list[ir.Instruction]:
 
 def test_access_op_destinations() -> None:
     """Address / AddressOf / Load define a destination; Store does not."""
-    from cc.ir_optimize import _instruction_destination as optimize_destination  # noqa: PLC0415, PLC2701
-    from cc.regalloc import _instruction_defs  # noqa: PLC0415, PLC2701
-    from cc.ssa import _instruction_destination as ssa_destination  # noqa: PLC0415, PLC2701
+    from cc.ir_optimize import (  # ruff:ignore[import-outside-top-level]
+        _instruction_destination as optimize_destination,  # ruff:ignore[import-private-name]
+    )
+    from cc.regalloc import _instruction_defs  # ruff:ignore[import-outside-top-level, import-private-name]
+    from cc.ssa import _instruction_destination as ssa_destination  # ruff:ignore[import-outside-top-level, import-private-name]
 
     address = _address(destination="_ir_5")
     load = ir.Load(address="_ir_5", destination="_ir_6", signed=False, width=4)
@@ -51,9 +53,9 @@ def test_access_op_value_fields() -> None:
 
 def test_address_value_operands_skip_none_leaves() -> None:
     """A symbol-rooted :class:`ir.Address` reads only its present dynamic leaves."""
-    from cc.ir_optimize import _instruction_value_operands  # noqa: PLC0415, PLC2701
-    from cc.regalloc import _instruction_uses  # noqa: PLC0415, PLC2701
-    from cc.ssa import _iter_value_operands  # noqa: PLC0415, PLC2701
+    from cc.ir_optimize import _instruction_value_operands  # ruff:ignore[import-outside-top-level, import-private-name]
+    from cc.regalloc import _instruction_uses  # ruff:ignore[import-outside-top-level, import-private-name]
+    from cc.ssa import _iter_value_operands  # ruff:ignore[import-outside-top-level, import-private-name]
 
     static = _address(base_value=None, indices=())
     assert _instruction_value_operands(static) == ()
@@ -181,8 +183,8 @@ def test_every_instruction_subclass_declares_value_fields() -> None:
 
 def test_increment_decrement_op_uses_and_side_effects() -> None:
     """IncrementDecrement reads its address, defines nothing, and is side-effecting."""
-    from cc.ir_optimize import _has_side_effects, _instruction_destination  # noqa: PLC0415, PLC2701
-    from cc.regalloc import _instruction_defs, _instruction_uses  # noqa: PLC0415, PLC2701
+    from cc.ir_optimize import _has_side_effects, _instruction_destination  # ruff:ignore[import-outside-top-level, import-private-name]
+    from cc.regalloc import _instruction_defs, _instruction_uses  # ruff:ignore[import-outside-top-level, import-private-name]
 
     increment = ir.IncrementDecrement(address="_ir_1", delta=1, is_postfix=True)
     assert ir.IncrementDecrement.VALUE_FIELDS == ("address",)
@@ -217,8 +219,8 @@ def test_index_rhs_member_store_lowers_to_store() -> None:
 
 def test_load_store_uses_and_side_effects() -> None:
     """Load reads its address; Store reads address+value and is side-effecting."""
-    from cc.ir_optimize import _has_side_effects  # noqa: PLC0415, PLC2701
-    from cc.regalloc import _instruction_uses  # noqa: PLC0415, PLC2701
+    from cc.ir_optimize import _has_side_effects  # ruff:ignore[import-outside-top-level, import-private-name]
+    from cc.regalloc import _instruction_uses  # ruff:ignore[import-outside-top-level, import-private-name]
 
     load = ir.Load(address="_ir_1", destination="_ir_2", signed=True, width=2)
     store = ir.Store(address="_ir_1", value="_ir_3", width=1)
@@ -331,7 +333,7 @@ def test_subscript_call_lowers_to_address_and_indirect_call() -> None:
 
 def test_substitute_value_rewrites_access_ops() -> None:
     """Copy-propagation rewrites the new ops' value operands by name."""
-    from cc.ir_optimize import _substitute_value  # noqa: PLC0415, PLC2701
+    from cc.ir_optimize import _substitute_value  # ruff:ignore[import-outside-top-level, import-private-name]
 
     address = _address(base_value="_ir_1", indices=("_ir_2",))
     rewritten = _substitute_value(address, source="_ir_9", target="_ir_2")

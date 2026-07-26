@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from cc.cli import compile_source_homes  # noqa: E402 — needs ROOT on sys.path first
+from cc.cli import compile_source_homes  # ruff:ignore[module-import-not-at-top-of-file] — needs ROOT on sys.path first
 
 GOLDEN = ROOT / "tests" / "golden" / "cc_register_homes_baseline.json"
 # Keys are repo-relative POSIX paths matching the baseline JSON keys

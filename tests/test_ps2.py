@@ -21,7 +21,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from run_qemu import qemu_session  # noqa: E402
+from run_qemu import qemu_session  # ruff:ignore[module-import-not-at-top-of-file]
 
 DRAIN_AFTER_KEYS = 2.0
 

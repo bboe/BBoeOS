@@ -23,9 +23,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from run_qemu import COMMAND_TIMEOUT, run_commands  # noqa: E402
+from run_qemu import COMMAND_TIMEOUT, run_commands  # ruff:ignore[module-import-not-at-top-of-file]
 
-from add_file import SECTOR_SIZE, compute_directory_sector, find_entry, read_assign  # noqa: E402
+from add_file import SECTOR_SIZE, compute_directory_sector, find_entry, read_assign  # ruff:ignore[module-import-not-at-top-of-file]
 
 # The self-host run on asm.asm itself is the slow-path test; every
 # other program in user/static/ finishes well under a second.  Give asm

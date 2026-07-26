@@ -51,7 +51,7 @@ def decode_first_character(text: str, /, *, line: int | None = None) -> int:
     """
     if text[0] == "\\" and len(text) >= 2:
         if text[1] == "x" and len(text) >= 3:
-            return int(text[2:], 16)  # noqa: FURB166
+            return int(text[2:], 16)  # ruff:ignore[int-on-sliced-str]
         if text[1] not in CHARACTER_ESCAPES:
             message = f"unknown escape sequence: '\\{text[1]}'"
             raise CompileError(message, line=line)
@@ -116,11 +116,11 @@ def parse_asm_constants(path: Path, /) -> dict[str, int]:
             for known, val in resolved.items():
                 py_expr = re.sub(r"\b" + re.escape(known) + r"\b", str(val), py_expr)
             try:
-                value = eval(py_expr, {"__builtins__": {}})  # noqa: S307
+                value = eval(py_expr, {"__builtins__": {}})  # ruff:ignore[suspicious-eval-usage]
                 if isinstance(value, int):
                     resolved[name] = value
                     changed = True
-            except Exception:  # noqa: BLE001, S110
+            except Exception:  # ruff:ignore[blind-except, try-except-pass]
                 pass
     return resolved
 

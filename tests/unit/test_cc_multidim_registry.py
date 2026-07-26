@@ -19,7 +19,7 @@ def _generator() -> X86CodeGenerator:
 def test_register_multidim_builds_nested_array_type() -> None:
     """_register_array_type with two dimensions builds a nested ArrayType chain."""
     generator = _generator()
-    generator._register_array_type(  # noqa: SLF001
+    generator._register_array_type(  # ruff:ignore[private-member-access]
         "matrix",
         dimensions=[Int(value=2), Int(value=3)],
         line=1,
@@ -34,7 +34,7 @@ def test_register_multidim_builds_nested_array_type() -> None:
 def test_register_stores_entry_under_given_name() -> None:
     """_register_array_type stores the result keyed by the variable name."""
     generator = _generator()
-    generator._register_array_type(  # noqa: SLF001
+    generator._register_array_type(  # ruff:ignore[private-member-access]
         "table",
         dimensions=[Int(value=8), Int(value=16)],
         line=1,
@@ -50,7 +50,7 @@ def test_register_stores_entry_under_given_name() -> None:
 def test_register_three_dimensions_builds_triple_nested_array_type() -> None:
     """_register_array_type with three dimensions builds a triple-nested ArrayType."""
     generator = _generator()
-    generator._register_array_type(  # noqa: SLF001
+    generator._register_array_type(  # ruff:ignore[private-member-access]
         "cube",
         dimensions=[Int(value=4), Int(value=5), Int(value=6)],
         line=1,

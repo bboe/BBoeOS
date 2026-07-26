@@ -3807,7 +3807,7 @@ class X86CodeGenerator(BuiltinsMixin, EmissionMixin, CodeGeneratorBase):
         message = f"sizeof: cannot determine type of {type(node).__name__}"
         raise CompileError(message, line=node.line)
 
-    def _flatten_array_init(self, init: ArrayInit, /, *, line: int, name: str, total: int) -> list[Node]:  # noqa: PLR6301
+    def _flatten_array_init(self, init: ArrayInit, /, *, line: int, name: str, total: int) -> list[Node]:  # ruff:ignore[no-self-use]
         """Flatten a (possibly nested) ArrayInit into a row-major element list.
 
         Walks the nested ``ArrayInit`` tree depth-first, collecting leaf

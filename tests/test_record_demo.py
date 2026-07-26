@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
-import record_demo  # noqa: E402
+import record_demo  # ruff:ignore[module-import-not-at-top-of-file]
 
 
 def test_default_scenario_assembler_section_starts_with_editor() -> None:

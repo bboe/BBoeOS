@@ -3344,7 +3344,7 @@ class EmissionMixin:
 
         # Local import: ``MemoryOperand`` lives in generator.py, which imports
         # this mixin module — a module-level import here would be circular.
-        from cc.codegen.x86.generator import MemoryOperand  # noqa: PLC0415
+        from cc.codegen.x86.generator import MemoryOperand  # ruff:ignore[import-outside-top-level]
 
         def build_operand(*, base: str, base_kind: str) -> MemoryOperand:
             # Single construction point so the per-base-kind arms can never
@@ -3439,7 +3439,7 @@ class EmissionMixin:
         """
         # Local import: ``MemoryOperand`` lives in generator.py, which imports
         # this mixin module — a module-level import here would be circular.
-        from cc.codegen.x86.generator import MemoryOperand  # noqa: PLC0415
+        from cc.codegen.x86.generator import MemoryOperand  # ruff:ignore[import-outside-top-level]
 
         assert isinstance(plan.base, str)
         arrow = plan.member_index_arrow
@@ -6654,7 +6654,7 @@ class EmissionMixin:
         :class:`ir.Jump` in the case bodies can reference it).
         """
         if emit_body is None:
-            emit_body = lambda arm_body: self.generate_body(arm_body, scoped=True)  # noqa: E731
+            emit_body = lambda arm_body: self.generate_body(arm_body, scoped=True)  # ruff:ignore[lambda-assignment]
         default_case, case_arms = self._classify_switch_arms(statement, cases_override=cases_override)
         # Build the compare/jump chain via the existing condition
         # machinery: each ``case CONST:`` is lowered as a synthetic
