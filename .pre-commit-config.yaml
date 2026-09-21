@@ -8,7 +8,7 @@ repos:
   hooks:
     - id: codesorter
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: e8f7d69b957a30acb2c875078d5fd012de24b64c  # v0.16.7
+  rev: 2eeb5678de71a00c0902cbda7105d328432f72cb  # v0.16.8
   hooks:
     # Run the linter.
     - id: ruff-check
@@ -20,7 +20,7 @@ repos:
   hooks:
     - id: auto-walrus
 - repo: https://github.com/pre-commit/mirrors-clang-format
-  rev: 34b241d706d24e4ccb69e38f9f0fa190b5f486ec  # v23.1.0
+  rev: e2b496dc2bd8340c2524cb9a2d2a943cde1bb6df  # v23.1.1
   hooks:
     - id: clang-format
       exclude: ^(ports/doom/|tests/golden/|user/static/)
