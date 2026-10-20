@@ -1580,11 +1580,14 @@ def _is_byte_safe_store_rhs(node: ast_nodes.Node, /) -> bool:
     ``BinaryOperation`` grew ``gettimeofday`` +21 bytes and ``Index`` grew
     ``readdir`` +2 bytes.
 
-    **Excluded classes** — remain on :class:`Access`:
+    *``Cast``* (ledger class 2): re-admitted in phase 3 via the cast
+    ``Block(Assign(Cast))`` store-RHS sink (Task 1); casts are
+    codegen-identity, so the store width — the lvalue's field width — is
+    unchanged by the cast, and the design-specs errata records the corrected
+    mechanism (the earlier ``Store.width`` premise was falsified; the
+    regression was a cast-temp spill, not a dropped width).
 
-    *``Cast``* (ledger class 2): the cast selects the store width; the bare
-    ``Value`` round-trip drops that width, and phase 3's ``Store.width`` field
-    is the planned fix.
+    **Excluded classes** — remain on :class:`Access`:
 
     *``PlaceLoad``-operand ``BinaryOperation``* (``p->bytes += q->bytes`` —
     ``stdlib.c`` ``release`` / ``malloc``): the legacy stack choreography
@@ -1596,7 +1599,7 @@ def _is_byte_safe_store_rhs(node: ast_nodes.Node, /) -> bool:
     ``2026-06-06-cc-native-address-emission-expected-byte-reductions.md``.
     """
     return (
-        isinstance(node, (ast_nodes.Index, ast_nodes.Int, ast_nodes.PlaceLoad, ast_nodes.String, ast_nodes.Var))
+        isinstance(node, (ast_nodes.Cast, ast_nodes.Index, ast_nodes.Int, ast_nodes.PlaceLoad, ast_nodes.String, ast_nodes.Var))
         or _is_byte_safe_binary_operation(node)
         or (isinstance(node, ast_nodes.PlaceAddressOf) and isinstance(node.place, ast_nodes.VariablePlace))
     )
