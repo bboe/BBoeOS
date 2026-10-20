@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
 
 BOOT_TIMEOUT = float(os.environ.get("BBOE_BOOT_TIMEOUT", "2"))
 COMMAND_TIMEOUT = 4
@@ -433,7 +433,7 @@ def qemu_session(
     snapshot: bool = False,
     wait_for_boot: bool = True,
     with_net: bool = False,
-) -> Iterator[QemuSession]:
+) -> Generator[QemuSession]:
     """Launch QEMU, yield a :class:`QemuSession`, kill on exit.
 
     *monitor* attaches a unix-socket HMP monitor; the path is stored on
